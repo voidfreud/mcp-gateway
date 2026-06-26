@@ -1,6 +1,9 @@
-"""End-to-end verification: connect to the running gateway over HTTP and assert
-every broadcast-text rewrite from config.toml was actually applied, then make a
-real passthrough call to prove reverse-mapping works.
+"""End-to-end verification against the running gateway.
+
+The seed config ships both backends as PASSTHROUGH (no overrides), so this
+asserts that every backend tool reaches Claude under its original (prefixed)
+name with its original params, and that a real call forwards correctly. (When
+you add overrides in config.toml / the admin UI, extend these assertions.)
 
 Usage:  uv run verify_rename.py [http://127.0.0.1:9100/mcp]
 Exits non-zero on the first failed assertion.
@@ -37,31 +40,20 @@ async def main() -> int:
         props = (tools["gitnexus_query"].inputSchema or {}).get("properties", {})
         check("task_context" in props, "gitnexus passthrough: original param 'task_context' intact")
 
-    # --- deepwiki ask_question -> wiki_ask (the remaining demo override) ---
-    check("wiki_ask" in names, "renamed tool 'wiki_ask' present")
-    check(
-        "deepwiki_ask_question" not in names, "original 'deepwiki_ask_question' hidden"
-    )
-    if "wiki_ask" in names:
-        props = (tools["wiki_ask"].inputSchema or {}).get("properties", {})
-        check(
-            "repo" in props and "repoName" not in props,
-            "param 'repoName' renamed to 'repo'",
-        )
+    # --- deepwiki is PASSTHROUGH (no overrides) — original names reach Claude ---
+    check("deepwiki_ask_question" in names, "deepwiki passthrough: 'deepwiki_ask_question' present (original)")
+    check("deepwiki_read_wiki_structure" in names, "deepwiki passthrough: 'read_wiki_structure' present (not disabled)")
+    if "deepwiki_ask_question" in names:
+        props = (tools["deepwiki_ask_question"].inputSchema or {}).get("properties", {})
+        check("repoName" in props, "deepwiki passthrough: original param 'repoName' intact")
 
-    # --- disabled tool dropped ---
-    check(
-        "deepwiki_read_wiki_structure" not in names,
-        "disabled tool 'read_wiki_structure' dropped from listing",
-    )
-
-    # --- passthrough: call renamed tool with renamed param (reverse-mapping) ---
-    print("\npassthrough call: wiki_ask(repo=prefecthq/fastmcp, question=...)")
+    # --- passthrough call with ORIGINAL names proves the gateway forwards calls ---
+    print("\npassthrough call: deepwiki_ask_question(repoName=prefecthq/fastmcp, question=...)")
     async with Client(URL) as c:
         res = await c.call_tool(
-            "wiki_ask",
+            "deepwiki_ask_question",
             {
-                "repo": "prefecthq/fastmcp",
+                "repoName": "prefecthq/fastmcp",
                 "question": "What transport does the proxy use?",
             },
         )

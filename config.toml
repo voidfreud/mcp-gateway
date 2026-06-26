@@ -1,8 +1,10 @@
 # mcp-gateway config — backends + per-tool broadcast-text rewrites.
 #
-# Seeded with two backends already on this machine (no secrets needed) so the
-# rename behaviour can be verified end-to-end: gitnexus (stdio) + deepwiki
-# (remote http). See config.example.toml for the full annotated schema.
+# Seeded with two backends already on this machine (no secrets needed):
+# gitnexus (stdio) + deepwiki (remote http). Both are PASSTHROUGH — no overrides
+# — so every tool reaches Claude exactly as the backend broadcasts it (names
+# prefixed `<backend>_*`). Shape what Claude sees in the admin UI, where each
+# field prefills with the original. See config.example.toml for the schema.
 
 host = "127.0.0.1"
 port = 9100
@@ -21,7 +23,8 @@ args = ["mcp"]
 stateless = false
 
 # --------------------------------------------------------------------------
-# deepwiki — remote http backend (proves http transport + rewrite + disable)
+# deepwiki — remote http backend. PASSTHROUGH: no overrides (original names
+# `deepwiki_*` reach Claude). Edit in the admin UI to shape what Claude sees.
 # --------------------------------------------------------------------------
 [[backends]]
 name = "deepwiki"
@@ -31,23 +34,3 @@ stateless = true
 # For an authed backend, add:
 #   auth_header = "Authorization"
 #   auth_value  = "Bearer ${DEEPWIKI_TOKEN}"   # value resolved from env
-
-  [[backends.tools]]
-  original = "ask_question"
-  name = "wiki_ask"
-  description = "Ask a question about a public GitHub repo and get an AI answer grounded in its code."
-  enabled = true
-
-    [[backends.tools.params]]
-    original = "repoName"
-    name = "repo"
-    description = "GitHub repo as owner/name, e.g. prefecthq/fastmcp."
-
-    [[backends.tools.params]]
-    original = "question"
-    description = "The question to answer about that repo."
-
-  # Demonstrate dropping a whole tool from the listing.
-  [[backends.tools]]
-  original = "read_wiki_structure"
-  enabled = false
