@@ -139,6 +139,54 @@ def all_tools_from_defaults(cfg: GatewayConfig) -> dict[str, list[str]]:
     return out
 
 
+def effective_tools(cfg: GatewayConfig) -> list[dict]:
+    """Every ENABLED tool's effective broadcast (name, description) across all
+    backends, computed from defaults + overrides. Used to detect collisions —
+    Claude can't tell two tools apart if they share a broadcast name."""
+    out: list[dict] = []
+    for b in cfg.backends:
+        defaults = load_defaults(b.name) or {}
+        for dt in defaults.get("tools", []):
+            orig = dt["original"]
+            ov = _find_tool_override(b, orig)
+            if ov is not None and not ov.enabled:
+                continue  # disabled -> not broadcast -> can't collide
+            name = ov.name if (ov and ov.name) else cl.exposed_name(cfg, b, orig)
+            desc = ov.description if (ov and ov.description) else dt.get("description")
+            out.append(
+                {"backend": b.name, "original": orig, "name": name, "description": desc}
+            )
+    return out
+
+
+def check_no_collision(
+    cfg: GatewayConfig, backend: str, original: str, new: ToolOverride
+) -> None:
+    """Reject if *new* would make the edited tool share a broadcast NAME with any
+    other enabled tool, or a deliberately-set DESCRIPTION identical to another's.
+    Passthrough never collides (prefixed names are unique), so this only fires on
+    a real rename/description clash."""
+    if not new.enabled:
+        return  # not broadcast
+    b = next(x for x in cfg.backends if x.name == backend)
+    eff_name = new.name or cl.exposed_name(cfg, b, original)
+    for other in effective_tools(cfg):
+        if other["backend"] == backend and other["original"] == original:
+            continue
+        if other["name"] == eff_name:
+            raise cl.ConfigError(
+                f"broadcast name {eff_name!r} is already used by tool "
+                f"{other['original']!r} in backend {other['backend']!r} — names "
+                f"must be unique; pick a different one"
+            )
+        if new.description is not None and new.description == other["description"]:
+            raise cl.ConfigError(
+                f"that description is identical to tool {other['original']!r} in "
+                f"backend {other['backend']!r} — make it unique so Claude can tell "
+                f"them apart"
+            )
+
+
 def build_state(cfg: GatewayConfig) -> dict:
     backends = []
     for b in cfg.backends:
@@ -287,6 +335,8 @@ def apply_tool_override(cfg: GatewayConfig, backend: str, payload: dict) -> None
     has_override = bool(
         name or title or description or not enabled or always_load or params
     )
+    # Reject a rename/description that would collide with another broadcast tool.
+    check_no_collision(cfg, backend, original, new)
     b.tools = [t for t in b.tools if t.original != original]
     if has_override:
         b.tools.append(new)

@@ -212,6 +212,96 @@ def test_apply_param_hide_stored(defaults_dir):
     assert cfg.backends[0].tools[0].params[0].hide is True
 
 
+# --- collision validation (no duplicate broadcast names/descriptions) ------
+
+
+def _write_defaults_multi(d, backend, tools):
+    """tools: list of (original, description)."""
+    (d / f"{backend}.json").write_text(
+        json.dumps(
+            {
+                "backend": backend,
+                "tools": [
+                    {"original": o, "title": None, "description": desc, "params": []}
+                    for o, desc in tools
+                ],
+            }
+        )
+    )
+
+
+def test_rename_to_existing_broadcast_name_rejected(defaults_dir):
+    _write_defaults_multi(defaults_dir, "b", [("t1", "d1"), ("t2", "d2")])
+    cfg = _single_cfg()
+    with pytest.raises(cl.ConfigError, match="already used"):
+        admin.apply_tool_override(
+            cfg,
+            "b",
+            {
+                "tool_original": "t1",
+                "override": {"name": "t2", "enabled": True, "params": []},
+            },
+        )
+
+
+def test_rename_to_unique_name_ok(defaults_dir):
+    _write_defaults_multi(defaults_dir, "b", [("t1", "d1"), ("t2", "d2")])
+    cfg = _single_cfg()
+    admin.apply_tool_override(
+        cfg,
+        "b",
+        {
+            "tool_original": "t1",
+            "override": {"name": "fresh_name", "enabled": True, "params": []},
+        },
+    )
+    assert cfg.backends[0].tools[0].name == "fresh_name"
+
+
+def test_collision_ignored_when_other_tool_disabled(defaults_dir):
+    _write_defaults_multi(defaults_dir, "b", [("t1", "d1"), ("t2", "d2")])
+    # t2 is disabled -> not broadcast -> t1 may take its name
+    cfg = cl.GatewayConfig.model_validate(
+        {
+            "backends": [
+                {
+                    "name": "b",
+                    "transport": "stdio",
+                    "command": "/bin/x",
+                    "tools": [{"original": "t2", "enabled": False}],
+                }
+            ]
+        }
+    )
+    admin.apply_tool_override(
+        cfg,
+        "b",
+        {
+            "tool_original": "t1",
+            "override": {"name": "t2", "enabled": True, "params": []},
+        },
+    )
+    assert any(t.original == "t1" and t.name == "t2" for t in cfg.backends[0].tools)
+
+
+def test_duplicate_description_rejected(defaults_dir):
+    _write_defaults_multi(defaults_dir, "b", [("t1", "d1"), ("t2", "SHARED DESC")])
+    cfg = _single_cfg()
+    with pytest.raises(cl.ConfigError, match="identical"):
+        admin.apply_tool_override(
+            cfg,
+            "b",
+            {
+                "tool_original": "t1",
+                "override": {
+                    "description": "SHARED DESC",
+                    "enabled": True,
+                    "params": [],
+                },
+            },
+        )
+
+
 # --- build_state merge -----------------------------------------------------
 
 
