@@ -1,0 +1,222 @@
+"""Tests for admin pure logic — override-vs-default diffing, name validation,
+apply_tool_override (store iff differs), and build_state merge."""
+
+from __future__ import annotations
+
+import json
+import string
+
+import pytest
+from hypothesis import given
+from hypothesis import strategies as st
+
+import admin
+import config_loader as cl
+
+ident = st.text(
+    alphabet=string.ascii_letters + string.digits + "_-", min_size=1, max_size=15
+)
+
+
+# --- _override_vs_default --------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "value,default,expected",
+    [
+        ("", "x", None),
+        ("   ", "x", None),
+        ("abc", "abc", None),
+        ("  abc  ", "abc", None),  # stripped equals default -> inherit
+        ("abc", "xyz", "abc"),
+        ("abc", None, "abc"),
+        (None, "x", None),
+    ],
+)
+def test_override_vs_default_examples(value, default, expected):
+    assert admin._override_vs_default(value, default) == expected
+
+
+@given(s=st.text(max_size=40))
+def test_override_equal_to_default_always_inherits(s):
+    """A field left at its (stripped) default never stores an override."""
+    assert admin._override_vs_default(s, s.strip() or None) is None
+
+
+@given(s=st.text(min_size=1, max_size=40).filter(lambda x: x.strip()))
+def test_override_differing_returns_cleaned(s):
+    assert admin._override_vs_default(s, None) == s.strip()
+
+
+# --- _validate_name --------------------------------------------------------
+
+
+@given(name=ident)
+def test_validate_accepts_safe_identifiers(name):
+    admin._validate_name(name, "tool name")  # must not raise
+
+
+def test_validate_allows_none():
+    admin._validate_name(None, "tool name")  # no override -> fine
+
+
+@pytest.mark.parametrize(
+    "bad", ["has space", "slash/name", "dot.name", "bang!", "", "uni·code"]
+)
+def test_validate_rejects_unsafe(bad):
+    with pytest.raises(cl.ConfigError):
+        admin._validate_name(bad, "tool name")
+
+
+# --- apply_tool_override (needs a defaults file) ---------------------------
+
+
+@pytest.fixture
+def defaults_dir(tmp_path, monkeypatch):
+    d = tmp_path / "defaults"
+    d.mkdir()
+    monkeypatch.setattr(admin, "DEFAULTS_DIR", d)
+    return d
+
+
+def _write_defaults(d, backend, tool, desc="orig desc", params=None):
+    (d / f"{backend}.json").write_text(
+        json.dumps(
+            {
+                "backend": backend,
+                "tools": [
+                    {
+                        "original": tool,
+                        "title": None,
+                        "description": desc,
+                        "params": params or [],
+                    }
+                ],
+            }
+        )
+    )
+
+
+def _single_cfg(backend="b", tool="t"):
+    return cl.GatewayConfig.model_validate(
+        {"backends": [{"name": backend, "transport": "stdio", "command": "/bin/x"}]}
+    )
+
+
+def test_apply_stores_override_when_changed(defaults_dir):
+    _write_defaults(defaults_dir, "b", "t", desc="orig desc")
+    cfg = _single_cfg()
+    admin.apply_tool_override(
+        cfg,
+        "b",
+        {
+            "tool_original": "t",
+            "override": {
+                "name": "renamed",
+                "description": "new",
+                "enabled": True,
+                "params": [],
+            },
+        },
+    )
+    assert len(cfg.backends[0].tools) == 1
+    ov = cfg.backends[0].tools[0]
+    assert ov.name == "renamed" and ov.description == "new"
+
+
+def test_apply_stores_nothing_when_equal_to_default(defaults_dir):
+    # single backend -> default tool name is the bare original "t"
+    _write_defaults(defaults_dir, "b", "t", desc="orig desc")
+    cfg = _single_cfg()
+    admin.apply_tool_override(
+        cfg,
+        "b",
+        {
+            "tool_original": "t",
+            "override": {
+                "name": "t",
+                "description": "orig desc",
+                "enabled": True,
+                "params": [],
+            },
+        },
+    )
+    assert cfg.backends[0].tools == []  # nothing stored — minimal config
+
+
+def test_apply_disable_is_an_override(defaults_dir):
+    _write_defaults(defaults_dir, "b", "t")
+    cfg = _single_cfg()
+    admin.apply_tool_override(
+        cfg,
+        "b",
+        {"tool_original": "t", "override": {"enabled": False, "params": []}},
+    )
+    assert cfg.backends[0].tools[0].enabled is False
+
+
+def test_apply_rejects_invalid_name(defaults_dir):
+    _write_defaults(defaults_dir, "b", "t")
+    cfg = _single_cfg()
+    with pytest.raises(cl.ConfigError):
+        admin.apply_tool_override(
+            cfg,
+            "b",
+            {
+                "tool_original": "t",
+                "override": {"name": "bad name", "enabled": True, "params": []},
+            },
+        )
+
+
+def test_apply_param_hide_stored(defaults_dir):
+    _write_defaults(
+        defaults_dir, "b", "t", params=[{"original": "p", "description": "pd"}]
+    )
+    cfg = _single_cfg()
+    admin.apply_tool_override(
+        cfg,
+        "b",
+        {
+            "tool_original": "t",
+            "override": {
+                "enabled": True,
+                "params": [
+                    {"original": "p", "name": None, "description": None, "hide": True}
+                ],
+            },
+        },
+    )
+    assert cfg.backends[0].tools[0].params[0].hide is True
+
+
+# --- build_state merge -----------------------------------------------------
+
+
+def test_build_state_merges_defaults_and_override(defaults_dir):
+    _write_defaults(
+        defaults_dir,
+        "b",
+        "t",
+        desc="orig desc",
+        params=[{"original": "p", "description": "pd"}],
+    )
+    cfg = cl.GatewayConfig.model_validate(
+        {
+            "backends": [
+                {
+                    "name": "b",
+                    "transport": "stdio",
+                    "command": "/bin/x",
+                    "tools": [{"original": "t", "name": "renamed"}],
+                }
+            ]
+        }
+    )
+    state = admin.build_state(cfg)
+    tool = state["backends"][0]["tools"][0]
+    assert tool["original"] == "t"
+    assert tool["default_name"] == "t"  # single backend -> bare
+    assert tool["name"] == "renamed"  # override surfaced
+    assert tool["default_description"] == "orig desc"
+    assert tool["params"][0]["default_name"] == "p"

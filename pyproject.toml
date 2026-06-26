@@ -1,7 +1,7 @@
 [project]
 name = "mcp-gateway"
 version = "0.1.0"
-description = "Add your description here"
+description = "Local MCP proxy that rewrites every broadcast text a backend MCP shows Claude Code"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -10,3 +10,13 @@ dependencies = [
     "structlog>=26.1.0",
     "tomli-w>=1.2.0",
 ]
+
+[dependency-groups]
+dev = [
+    "hypothesis>=6.155.7",
+    "pytest>=9.1.1",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
