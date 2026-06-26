@@ -177,6 +177,10 @@ function renderDetail(name) {
   m.innerHTML = `
     <div class="b-head"><h2>${esc(b.name)}</h2><span class="badge">${b.transport}</span><code>${conn}</code></div>
     <div class="b-actions">
+      <label class="chk" title="pin ALL this backend's tools to load upfront (eager)">
+        <input type="checkbox" id="b-pin" ${b.always_load ? 'checked' : ''}
+               onchange="pinBackend('${esc(b.name)}', this.checked)"> 📌 pin all tools (eager)</label>
+      <span class="spacer" style="flex:1"></span>
       <button class="ghost" onclick="reintrospect('${esc(b.name)}')">Re-introspect</button>
       <button class="ghost danger" onclick="delBackend('${esc(b.name)}')">Remove backend</button>
     </div>
@@ -203,6 +207,8 @@ function toolCard(b, t) {
       <span class="orig" title="real MCP tool name (provider-facing, not editable)">${esc(t.original)}</span>
       <span class="arrow">→</span>
       <span class="newname">${esc(name)}</span><span class="spacer"></span>
+      <label class="chk" onclick="event.stopPropagation()" title="load this tool UPFRONT — exempt from tool-search deferral (anthropic/alwaysLoad)">
+        <input type="checkbox" class="f-always" ${t.always_load ? 'checked' : ''}> 📌 eager</label>
       <label class="chk" onclick="event.stopPropagation()">
         <input type="checkbox" class="f-enabled" ${t.enabled ? 'checked' : ''}> broadcast</label>
     </div>
@@ -268,6 +274,7 @@ function gather(card) {
     title: $('.f-title', card).value,
     description: $('.f-desc', card).value,
     enabled: $('.f-enabled', card).checked,
+    always_load: $('.f-always', card).checked,
     params,
   };
 }
@@ -317,6 +324,10 @@ async function resetTool(backend, original) {
 async function reintrospect(name) {
   try { await api('POST', '/admin/api/introspect/' + encodeURIComponent(name)); await load(); toast('re-introspected ' + name); }
   catch (e) { toast('introspect failed: ' + e.message); }
+}
+async function pinBackend(name, value) {
+  try { await api('POST', '/admin/api/backend/' + encodeURIComponent(name) + '/pin', { value }); toast(value ? 'pinned all tools (eager)' : 'unpinned'); }
+  catch (e) { toast('pin failed: ' + e.message); }
 }
 async function delBackend(name) {
   if (!confirm('Remove backend "' + name + '"? This restarts the gateway.')) return;

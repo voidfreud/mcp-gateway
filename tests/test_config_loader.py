@@ -37,6 +37,8 @@ def gw_config_dict(draw) -> dict:
     for nm in names:
         transport = draw(st.sampled_from(["http", "stdio"]))
         b: dict = {"name": nm, "transport": transport, "stateless": draw(st.booleans())}
+        if draw(st.booleans()):
+            b["always_load"] = True
         if transport == "http":
             b["url"] = draw(
                 st.sampled_from(["https://h/mcp", "http://127.0.0.1:9/mcp"])
@@ -50,6 +52,8 @@ def gw_config_dict(draw) -> dict:
         tools = []
         for to in draw(st.lists(ident, max_size=3, unique=True)):
             t: dict = {"original": to, "enabled": draw(st.booleans())}
+            if draw(st.booleans()):
+                t["always_load"] = True
             if draw(st.booleans()):
                 t["name"] = draw(ident)
             if draw(st.booleans()):
@@ -151,6 +155,61 @@ def test_exposed_name_single_backend_is_bare():
 def test_exposed_name_multi_backend_is_prefixed():
     cfg = _cfg(2)
     assert cl.exposed_name(cfg, cfg.backends[0], "tool") == "b0_tool"
+
+
+# --- eager / always_load meta ----------------------------------------------
+
+
+def test_per_tool_always_load_sets_meta():
+    cfg = cl.GatewayConfig.model_validate(
+        {
+            "backends": [
+                {
+                    "name": "b",
+                    "transport": "stdio",
+                    "command": "/bin/x",
+                    "tools": [{"original": "t", "always_load": True}],
+                }
+            ]
+        }
+    )
+    tr, _ = cl.build_transforms(cfg)
+    assert tr._transforms["t"].meta == cl.ALWAYS_LOAD_META
+
+
+def test_no_always_load_means_no_meta():
+    cfg = cl.GatewayConfig.model_validate(
+        {
+            "backends": [
+                {
+                    "name": "b",
+                    "transport": "stdio",
+                    "command": "/bin/x",
+                    "tools": [{"original": "t", "name": "tt"}],
+                }
+            ]
+        }
+    )
+    tr, _ = cl.build_transforms(cfg)
+    assert tr._transforms["t"].meta is None
+
+
+def test_per_backend_always_load_pins_all_tools():
+    cfg = cl.GatewayConfig.model_validate(
+        {
+            "backends": [
+                {
+                    "name": "b",
+                    "transport": "stdio",
+                    "command": "/bin/x",
+                    "always_load": True,
+                }
+            ]
+        }
+    )
+    tr, _ = cl.build_transforms(cfg, all_tools={"b": ["t1", "t2", "t3"]})
+    assert set(tr._transforms) == {"t1", "t2", "t3"}
+    assert all(t.meta == cl.ALWAYS_LOAD_META for t in tr._transforms.values())
 
 
 # --- durable save ----------------------------------------------------------

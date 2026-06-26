@@ -34,21 +34,41 @@ async def main() -> int:
     print(f"gateway exposes {len(names)} tools: {sorted(names)}\n")
 
     # --- gitnexus is PASSTHROUGH (no overrides) — original names reach Claude ---
-    check("gitnexus_query" in names, "gitnexus passthrough: 'gitnexus_query' present (original)")
-    check("gitnexus_list_repos" in names, "gitnexus passthrough: 'gitnexus_list_repos' present")
+    check(
+        "gitnexus_query" in names,
+        "gitnexus passthrough: 'gitnexus_query' present (original)",
+    )
+    check(
+        "gitnexus_list_repos" in names,
+        "gitnexus passthrough: 'gitnexus_list_repos' present",
+    )
     if "gitnexus_query" in names:
         props = (tools["gitnexus_query"].inputSchema or {}).get("properties", {})
-        check("task_context" in props, "gitnexus passthrough: original param 'task_context' intact")
+        check(
+            "task_context" in props,
+            "gitnexus passthrough: original param 'task_context' intact",
+        )
 
     # --- deepwiki is PASSTHROUGH (no overrides) — original names reach Claude ---
-    check("deepwiki_ask_question" in names, "deepwiki passthrough: 'deepwiki_ask_question' present (original)")
-    check("deepwiki_read_wiki_structure" in names, "deepwiki passthrough: 'read_wiki_structure' present (not disabled)")
+    check(
+        "deepwiki_ask_question" in names,
+        "deepwiki passthrough: 'deepwiki_ask_question' present (original)",
+    )
+    check(
+        "deepwiki_read_wiki_structure" in names,
+        "deepwiki passthrough: 'read_wiki_structure' present (not disabled)",
+    )
     if "deepwiki_ask_question" in names:
         props = (tools["deepwiki_ask_question"].inputSchema or {}).get("properties", {})
-        check("repoName" in props, "deepwiki passthrough: original param 'repoName' intact")
+        check(
+            "repoName" in props,
+            "deepwiki passthrough: original param 'repoName' intact",
+        )
 
     # --- passthrough call with ORIGINAL names proves the gateway forwards calls ---
-    print("\npassthrough call: deepwiki_ask_question(repoName=prefecthq/fastmcp, question=...)")
+    print(
+        "\npassthrough call: deepwiki_ask_question(repoName=prefecthq/fastmcp, question=...)"
+    )
     async with Client(URL) as c:
         res = await c.call_tool(
             "deepwiki_ask_question",

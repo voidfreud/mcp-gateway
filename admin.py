@@ -128,6 +128,17 @@ def _find_tool_override(b: Backend, original: str) -> ToolOverride | None:
     return next((t for t in b.tools if t.original == original), None)
 
 
+def all_tools_from_defaults(cfg: GatewayConfig) -> dict[str, list[str]]:
+    """``backend name -> [original tool names]`` from captured defaults. Lets
+    build_transforms apply a per-backend ``always_load`` to un-overridden tools."""
+    out: dict[str, list[str]] = {}
+    for b in cfg.backends:
+        d = load_defaults(b.name)
+        if d:
+            out[b.name] = [t["original"] for t in d.get("tools", [])]
+    return out
+
+
 def build_state(cfg: GatewayConfig) -> dict:
     backends = []
     for b in cfg.backends:
@@ -163,6 +174,7 @@ def build_state(cfg: GatewayConfig) -> dict:
                     "title": ov.title if ov else None,
                     "description": ov.description if ov else None,
                     "enabled": ov.enabled if ov else True,
+                    "always_load": ov.always_load if ov else False,
                     "params": params,
                 }
             )
@@ -176,6 +188,7 @@ def build_state(cfg: GatewayConfig) -> dict:
                 "auth_header": b.auth_header,
                 "auth_value": b.auth_value,
                 "stateless": b.stateless,
+                "always_load": b.always_load,
                 "introspected": defaults is not None,
                 "tools": tools_state,
             }
@@ -261,15 +274,19 @@ def apply_tool_override(cfg: GatewayConfig, backend: str, payload: dict) -> None
             )
 
     enabled = bool(ov.get("enabled", True))
+    always_load = bool(ov.get("always_load", False))
     new = ToolOverride(
         original=original,
         name=name,
         title=title,
         description=description,
         enabled=enabled,
+        always_load=always_load,
         params=params,
     )
-    has_override = bool(name or title or description or not enabled or params)
+    has_override = bool(
+        name or title or description or not enabled or always_load or params
+    )
     b.tools = [t for t in b.tools if t.original != original]
     if has_override:
         b.tools.append(new)
@@ -282,7 +299,7 @@ def apply_tool_override(cfg: GatewayConfig, backend: str, payload: dict) -> None
 
 def hot_reload(mcp, cfg: GatewayConfig, holder: list, log) -> None:
     """Rebuild transforms from cfg and swap them into the live proxy in-process."""
-    new_transform, _index = cl.build_transforms(cfg)
+    new_transform, _index = cl.build_transforms(cfg, all_tools_from_defaults(cfg))
     old = holder[0] if holder else None
     if old is not None and old in mcp._transforms:
         mcp._transforms.remove(old)
@@ -369,6 +386,24 @@ def register(mcp, config_path: str, log, holder: list) -> None:
         cl.save(cfg, config_path)
         hot_reload(mcp, cfg, holder, log)
         return JSONResponse({"ok": True})
+
+    @mcp.custom_route("/admin/api/backend/{name}/pin", methods=["POST"])
+    async def pin_backend(request: Request):
+        """Toggle per-backend always_load (pin all its tools upfront). Hot-reload —
+        it only adds `_meta`, no connection change."""
+        name = request.path_params["name"]
+        payload = await request.json()
+        cfg = _load()
+        b = next((x for x in cfg.backends if x.name == name), None)
+        if b is None:
+            return JSONResponse(
+                {"ok": False, "error": "unknown backend"}, status_code=400
+            )
+        b.always_load = bool(payload.get("value", False))
+        backup_config(config_path)
+        cl.save(cfg, config_path)
+        hot_reload(mcp, cfg, holder, log)
+        return JSONResponse({"ok": True, "reloaded": "in-process"})
 
     @mcp.custom_route("/admin/api/backend", methods=["POST"])
     async def add_backend(request: Request):

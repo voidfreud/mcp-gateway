@@ -123,19 +123,13 @@ async def _reconcile(mcp: FastMCP, index: dict[str, str], log) -> None:
 
 
 def build():
-    """Construct the proxy. Returns (mcp, cfg, log, transforms, index).
-
-    The transform is intentionally NOT applied here — the caller reconciles
-    against the live *source* tool names first (so a renamed tool isn't flagged
-    as missing), then applies it.
-    """
+    """Construct the proxy (create_proxy + middleware + health). Returns
+    (mcp, cfg, log). Transforms are built and applied later in `_startup`, after
+    defaults are captured (so a per-backend always_load can see the tool list)."""
     cfg = config_loader.load(CONFIG_PATH)
     log = _configure_logging(cfg.log_file)
 
-    proxy_config = config_loader.to_proxy_config(cfg)
-    transforms, index = config_loader.build_transforms(cfg)
-
-    mcp = create_proxy(proxy_config, name="mcp-gateway")
+    mcp = create_proxy(config_loader.to_proxy_config(cfg), name="mcp-gateway")
     mcp.add_middleware(CallLogMiddleware(log))
 
     @mcp.custom_route("/health", methods=["GET"])
@@ -145,29 +139,31 @@ def build():
     log.info(
         "gateway_built",
         backends=[b.name for b in cfg.backends],
-        overrides=len(index),
         host=cfg.host,
         port=cfg.port,
     )
-    return mcp, cfg, log, transforms, index
+    return mcp, cfg, log
+
+
+async def _startup(mcp, cfg, log, holder: list) -> None:
+    """Capture defaults, build transforms (with the tool list so a per-backend
+    always_load can pin un-overridden tools), reconcile against source names,
+    then apply the transform."""
+    await admin.ensure_defaults(cfg, log)
+    all_tools = admin.all_tools_from_defaults(cfg)
+    transforms, index = config_loader.build_transforms(cfg, all_tools)
+    await _reconcile(mcp, index, log)  # pre-flight: SOURCE names, before renames
+    mcp.add_transform(transforms)
+    holder.append(transforms)
 
 
 def main() -> None:
     import anyio
 
-    mcp, cfg, log, transforms, index = build()
-
-    # Pre-flight against SOURCE names (before the transform renames them).
-    anyio.run(_reconcile, mcp, index, log)
-
-    # Apply the rewrites, tracking the transform so the admin UI can hot-swap it.
-    transform_holder: list = [transforms]
-    mcp.add_transform(transforms)
-
-    # Capture each backend's original broadcast (baseline for the admin UI),
-    # then attach the admin UI + API at /admin.
-    anyio.run(admin.ensure_defaults, cfg, log)
-    admin.register(mcp, CONFIG_PATH, log, transform_holder)
+    mcp, cfg, log = build()
+    holder: list = []
+    anyio.run(_startup, mcp, cfg, log, holder)
+    admin.register(mcp, CONFIG_PATH, log, holder)
 
     log.info(
         "gateway_starting",

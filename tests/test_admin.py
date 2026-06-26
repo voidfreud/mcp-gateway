@@ -169,6 +169,28 @@ def test_apply_rejects_invalid_name(defaults_dir):
         )
 
 
+def test_apply_always_load_alone_is_an_override(defaults_dir):
+    # pinning a tool eager, with no text change, must still store the override
+    _write_defaults(defaults_dir, "b", "t", desc="orig desc")
+    cfg = _single_cfg()
+    admin.apply_tool_override(
+        cfg,
+        "b",
+        {
+            "tool_original": "t",
+            "override": {
+                "name": "t",
+                "description": "orig desc",
+                "enabled": True,
+                "always_load": True,
+                "params": [],
+            },
+        },
+    )
+    assert len(cfg.backends[0].tools) == 1
+    assert cfg.backends[0].tools[0].always_load is True
+
+
 def test_apply_param_hide_stored(defaults_dir):
     _write_defaults(
         defaults_dir, "b", "t", params=[{"original": "p", "description": "pd"}]

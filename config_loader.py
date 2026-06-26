@@ -78,6 +78,9 @@ class ToolOverride(BaseModel, extra="forbid"):
     title: str | None = None
     description: str | None = None
     enabled: bool = True
+    # Pin this tool to load UPFRONT (exempt from Claude Code tool-search deferral)
+    # via the tool's `_meta["anthropic/alwaysLoad"]`.
+    always_load: bool = False
     params: list[ParamOverride] = Field(default_factory=list)
 
 
@@ -97,6 +100,8 @@ class Backend(BaseModel, extra="forbid"):
     # efficiency knob (parsed; shared-session reuse is a tier-2 optimisation,
     # see README "Session strategy" — default per-request sessions for now)
     stateless: bool = False
+    # Pin ALL of this backend's tools to load upfront (per-tool meta on each).
+    always_load: bool = False
     tools: list[ToolOverride] = Field(default_factory=list)
 
     @model_validator(mode="after")
@@ -177,12 +182,23 @@ def to_proxy_config(cfg: GatewayConfig) -> dict:
     return {"mcpServers": servers}
 
 
-def build_transforms(cfg: GatewayConfig) -> tuple[ToolTransform, dict[str, str]]:
+# Tool `_meta` hint that exempts a tool from Claude Code's tool-search deferral
+# (loads it upfront). See references/mcp.md (anthropic/alwaysLoad).
+ALWAYS_LOAD_META = {"anthropic/alwaysLoad": True}
+
+
+def build_transforms(
+    cfg: GatewayConfig, all_tools: dict[str, list[str]] | None = None
+) -> tuple[ToolTransform, dict[str, str]]:
     """Build the ``ToolTransform`` plus a ``{exposed_name: backend}`` index.
 
     The index lets the server reconcile configured tools against the live tool
     list at startup and warn on any name that does not match a real backend
     tool (a typo in ``original``).
+
+    *all_tools* maps ``backend name -> [original tool names]`` (from captured
+    defaults). It is needed only to apply a **per-backend** ``always_load`` to
+    tools that have no other override; per-tool ``always_load`` works without it.
     """
     transforms: dict[str, ToolTransformConfig] = {}
     index: dict[str, str] = {}
@@ -208,7 +224,19 @@ def build_transforms(cfg: GatewayConfig) -> tuple[ToolTransform, dict[str, str]]
                 tc_kwargs["description"] = tool.description
             if arguments:
                 tc_kwargs["arguments"] = arguments
+            if tool.always_load or b.always_load:
+                tc_kwargs["meta"] = dict(ALWAYS_LOAD_META)
             transforms[key] = ToolTransformConfig(**tc_kwargs)
+
+        # Per-backend always_load: also pin tools that have no override entry.
+        if b.always_load and all_tools and b.name in all_tools:
+            for original in all_tools[b.name]:
+                key = exposed_name(cfg, b, original)
+                if key not in transforms:
+                    transforms[key] = ToolTransformConfig(
+                        enabled=True, meta=dict(ALWAYS_LOAD_META)
+                    )
+                    index[key] = b.name
     return ToolTransform(transforms), index
 
 
@@ -231,6 +259,8 @@ def to_raw(cfg: GatewayConfig) -> dict:
             if b.env:
                 d["env"] = dict(b.env)
         d["stateless"] = b.stateless
+        if b.always_load:
+            d["always_load"] = True
         tools = [_tool(t) for t in b.tools]
         if tools:
             d["tools"] = tools
@@ -245,6 +275,8 @@ def to_raw(cfg: GatewayConfig) -> dict:
         if t.description is not None:
             d["description"] = t.description
         d["enabled"] = t.enabled
+        if t.always_load:
+            d["always_load"] = True
         params = [_param(p) for p in t.params]
         if params:
             d["params"] = params
