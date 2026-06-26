@@ -1,0 +1,28 @@
+# mcp-gateway config. Managed by the admin UI at http://127.0.0.1:9100/admin.
+# Hand-edits are fine but comments are not preserved on UI save.
+# Secrets: use ${ENV_VAR} refs only; values come from the environment.
+
+host = "127.0.0.1"
+port = 9100
+log_file = "~/.local/state/mcp-gateway/gateway.log"
+
+[[backends]]
+name = "gitnexus"
+transport = "stdio"
+command = "/Users/alexanderbass/.local/bin/gitnexus"
+args = [
+    "mcp",
+]
+stateless = false
+
+[[backends]]
+name = "deepwiki"
+transport = "http"
+url = "https://mcp.deepwiki.com/mcp"
+stateless = true
+
+[[backends]]
+name = "context7"
+transport = "http"
+url = "https://mcp.context7.com/mcp"
+stateless = true

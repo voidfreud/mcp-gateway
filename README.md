@@ -32,9 +32,14 @@ Python 3.12 · FastMCP 3.x · Pydantic · structlog · `uv`.
 
 ```bash
 cd ~/Developer/mine/mcp-gateway
-uv sync                              # create .venv from uv.lock
-cp config.example.toml config.toml   # then edit (a seeded config.toml ships too)
+uv sync     # create .venv from uv.lock
 ```
+
+On first run the server **auto-seeds `config.toml`** from the committed
+`config.default.toml` (both backends passthrough). `config.toml` is the live,
+admin-managed file — it's **gitignored** (the admin regenerates it on every save,
+so it never shows up as a git change). Edit it in the admin UI, or by hand.
+`config.example.toml` is the full annotated schema reference.
 
 ## Run
 

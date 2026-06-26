@@ -24,13 +24,40 @@ every configured rename/hide/disable + a real passthrough call.
 - `server.py` — `create_proxy` → reconcile → `add_transform` → register admin → run http.
 - `admin.py` — admin UI/API at `/admin`: introspect/defaults, edit overrides, in-process hot-reload, import/remove (restart).
 - `admin.html` — single-file vanilla-JS admin page (no framework, no build).
-- `config.toml` — backends + per-tool rewrites. **Runtime-managed by the admin** (UI saves regenerate it, comments lost). Defaults/backups live under `~/.local/state/mcp-gateway/`.
+- `config.toml` — the LIVE, admin-managed config (**gitignored** — regenerated on
+  every UI save). Auto-seeded from `config.default.toml` on first run (`config_loader.ensure_config`).
+- `config.default.toml` — committed runnable seed (both backends passthrough).
+  `config.example.toml` — full annotated schema reference. Defaults/backups for
+  the runtime live under `~/.local/state/mcp-gateway/`.
 
 ## Conventions
-- `config.toml` holds only `${ENV}` refs + public endpoints (safe to commit);
-  secret VALUES come from the environment (LaunchAgent `EnvironmentVariables`).
+- `config.toml` holds only `${ENV}` refs + public endpoints; secret VALUES come
+  from the environment (LaunchAgent `EnvironmentVariables`). It's gitignored, so
+  it never shows as a git change after a UI edit. To change the shipped seed,
+  edit `config.default.toml`.
 - A tool's `original` is the bare backend tool name; the loader adds the
   `<backend>_` prefix that FastMCP applies when there are 2+ backends.
+
+## Workflow (how we work on this project)
+- **One branch per change, off `main`.** Never commit directly to `main`. Merge
+  when done (fast-forward), then delete the branch — keep the repo flat. Claude
+  handles all the git; Alex never touches it.
+- **Commit each change atomically**, with a clear message and the co-author
+  trailer (`Co-Authored-By: Claude …`). **Never** put a session/transcript link
+  in a commit, PR, or issue.
+- **Gate before commit:** `just check` (ruff + pytest + import smoke) must be
+  green. For live behavior, also `just verify` against the running daemon.
+- **Sync the docs after every push.** Update the project memory at
+  `~/.claude/memory/project/mcp-gateway/` — `handoff.md` (STATUS + the two
+  trackers), `overview.md` if stable facts changed, the `MEMORY.md` index line,
+  and `reference/milestone-log.md` when something ships — then commit + push that
+  to the `~/.claude` repo (scoped to the files this change touched). Update this
+  repo's `README.md` / `CLAUDE.md` when behavior or a convention changes.
+- **Issues: the local handoff tracker is the source of truth.** Every actionable
+  item is a tracker row. Promote a row to a **GitHub issue** per-item (via `gh
+  issue create`) when it's worth tracking on GitHub; then put `[#N](url)` in the
+  row's PR/Issue column so both stay reconciled. Bugs (dropped/omitted info) get
+  the `bug` label; new capabilities get `enhancement`.
 
 ## Gotchas (verified against FastMCP 3.4.2)
 - Spec was written for FastMCP 2.x. v3 changes: `create_proxy()` (not

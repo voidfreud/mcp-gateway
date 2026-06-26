@@ -10,7 +10,10 @@ wheels/
 .venv
 
 # Runtime state / logs (created under ~/.local/state by default; this covers a
-# local ./state too). config.toml holds only ${ENV} refs + public endpoints,
-# so it is committed; never put raw secret VALUES in it.
+# local ./state too).
 state/
 *.log
+
+# Live, runtime-managed config (the admin regenerates it). Seeded from
+# config.default.toml on first run. config.example.toml is the schema reference.
+config.toml

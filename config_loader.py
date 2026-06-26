@@ -145,8 +145,29 @@ class GatewayConfig(BaseModel, extra="forbid"):
 # ---------------------------------------------------------------------------
 
 
+def ensure_config(path: str | Path) -> None:
+    """Seed *path* from ``config.default.toml`` if it doesn't exist yet.
+
+    ``config.toml`` is the live, admin-managed file (gitignored — it gets
+    regenerated on every UI save). ``config.default.toml`` is the committed
+    runnable seed (both backends passthrough). On a fresh clone the live file is
+    missing, so copy the default into place once.
+    """
+    p = Path(path).expanduser()
+    if p.is_file():
+        return
+    default = Path(__file__).resolve().parent / "config.default.toml"
+    if not default.is_file():
+        raise ConfigError(
+            f"no {p} and no config.default.toml to seed it from ({default})"
+        )
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(default.read_text(encoding="utf-8"), encoding="utf-8")
+
+
 def load(path: str | Path) -> GatewayConfig:
-    """Read and validate *path* (a ``config.toml``)."""
+    """Read and validate *path* (a ``config.toml``), seeding it if absent."""
+    ensure_config(path)
     p = Path(path).expanduser()
     if not p.is_file():
         raise ConfigError(f"config file not found: {p}")
