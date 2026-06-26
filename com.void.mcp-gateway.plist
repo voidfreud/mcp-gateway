@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.void.mcp-gateway</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/alexanderbass/.local/bin/uv</string>
+        <string>run</string>
+        <string>--directory</string>
+        <string>/Users/alexanderbass/Developer/mine/mcp-gateway</string>
+        <string>server.py</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <!-- launchd gives a minimal PATH; include user + system bins so the
+             gateway and its stdio backends (e.g. gitnexus) resolve. -->
+        <key>PATH</key>
+        <string>/Users/alexanderbass/.local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <!-- Absolute config path so it resolves regardless of cwd. -->
+        <key>MCP_GATEWAY_CONFIG</key>
+        <string>/Users/alexanderbass/Developer/mine/mcp-gateway/config.toml</string>
+        <key>FASTMCP_LOG_LEVEL</key>
+        <string>WARNING</string>
+        <!-- Add backend secrets here when a backend needs them, e.g.:
+             <key>EXA_TOKEN</key><string>...</string>
+             (referenced from config.toml as auth_value = "Bearer ${EXA_TOKEN}") -->
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/alexanderbass/.local/state/mcp-gateway/out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/alexanderbass/.local/state/mcp-gateway/err.log</string>
+</dict>
+</plist>

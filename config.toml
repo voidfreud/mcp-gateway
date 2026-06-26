@@ -1,0 +1,72 @@
+# mcp-gateway config — backends + per-tool broadcast-text rewrites.
+#
+# Seeded with two backends already on this machine (no secrets needed) so the
+# rename behaviour can be verified end-to-end: gitnexus (stdio) + deepwiki
+# (remote http). See config.example.toml for the full annotated schema.
+
+host = "127.0.0.1"
+port = 9100
+log_file = "~/.local/state/mcp-gateway/gateway.log"
+
+# --------------------------------------------------------------------------
+# gitnexus — local stdio backend (proves stdio transport + full rewrite)
+# --------------------------------------------------------------------------
+[[backends]]
+name = "gitnexus"
+transport = "stdio"
+command = "/Users/alexanderbass/.local/bin/gitnexus"
+args = ["mcp"]
+stateless = false
+
+  # Rewrite EVERY broadcast text for gitnexus's `query` tool.
+  [[backends.tools]]
+  original = "query"
+  name = "code_search"
+  title = "Code Search"
+  description = "Search the indexed codebase by meaning or symbol and get the most relevant code back."
+  enabled = true
+
+    [[backends.tools.params]]
+    original = "query"
+    description = "What to look for, in plain language or as a symbol name."
+
+    [[backends.tools.params]]
+    original = "task_context"
+    name = "intent"
+    description = "Why you're searching — helps rank results to your goal."
+
+    [[backends.tools.params]]
+    original = "service"
+    hide = true          # internal routing knob — drop it from the schema
+
+# --------------------------------------------------------------------------
+# deepwiki — remote http backend (proves http transport + rewrite + disable)
+# --------------------------------------------------------------------------
+[[backends]]
+name = "deepwiki"
+transport = "http"
+url = "https://mcp.deepwiki.com/mcp"
+stateless = true
+# For an authed backend, add:
+#   auth_header = "Authorization"
+#   auth_value  = "Bearer ${DEEPWIKI_TOKEN}"   # value resolved from env
+
+  [[backends.tools]]
+  original = "ask_question"
+  name = "wiki_ask"
+  description = "Ask a question about a public GitHub repo and get an AI answer grounded in its code."
+  enabled = true
+
+    [[backends.tools.params]]
+    original = "repoName"
+    name = "repo"
+    description = "GitHub repo as owner/name, e.g. prefecthq/fastmcp."
+
+    [[backends.tools.params]]
+    original = "question"
+    description = "The question to answer about that repo."
+
+  # Demonstrate dropping a whole tool from the listing.
+  [[backends.tools]]
+  original = "read_wiki_structure"
+  enabled = false

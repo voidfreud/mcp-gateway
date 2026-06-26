@@ -1,0 +1,16 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Runtime state / logs (created under ~/.local/state by default; this covers a
+# local ./state too). config.toml holds only ${ENV} refs + public endpoints,
+# so it is committed; never put raw secret VALUES in it.
+state/
+*.log

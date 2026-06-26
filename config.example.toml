@@ -1,0 +1,49 @@
+# mcp-gateway config — annotated schema/template.
+# Copy to config.toml and edit. Secrets are never hardcoded: write ${ENV_VAR}
+# and the loader resolves it from the environment (injected by the LaunchAgent).
+
+host = "127.0.0.1"          # bind loopback only — never 0.0.0.0
+port = 9100
+log_file = "~/.local/state/mcp-gateway/gateway.log"
+
+# ===========================================================================
+# A backend MCP server. Repeat the [[backends]] block per backend.
+# transport = "http"  -> needs `url` (+ optional auth_header/auth_value)
+# transport = "stdio" -> needs `command` (+ optional args, env)
+# ===========================================================================
+[[backends]]
+name = "exa"                       # backend id; also the tool-name prefix
+                                   # when >1 backend (exa_web_search, ...)
+transport = "http"
+url = "https://your-exa-endpoint/mcp"
+auth_header = "Authorization"      # optional; set BOTH or NEITHER
+auth_value = "Bearer ${EXA_TOKEN}" # ${ENV} resolved at startup
+stateless = true                   # parsed; shared-session reuse is a
+                                   # tier-2 optimisation (see README)
+
+  # Per-tool rewrite. `original` is the backend's own tool name.
+  # Any of name/title/description omitted -> left as the backend's.
+  [[backends.tools]]
+  original = "web_search_exa"
+  name = "web_search"
+  title = "Web Search"
+  description = "Exactly what Claude should read for this tool."
+  enabled = true                   # false -> tool is dropped from the listing
+
+    [[backends.tools.params]]
+    original = "query"
+    name = "query"                 # omit to keep the original param name
+    description = "What Claude should read for this parameter."
+
+    [[backends.tools.params]]
+    original = "internal_flag"
+    hide = true                    # remove this param from the schema
+
+# A local stdio backend looks like this:
+# [[backends]]
+# name = "serena"
+# transport = "stdio"
+# command = "uvx"
+# args = ["serena-mcp"]
+# env = { SOME_KEY = "${SOME_ENV}" }
+# stateless = false
