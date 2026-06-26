@@ -9,7 +9,9 @@ port = 9100
 log_file = "~/.local/state/mcp-gateway/gateway.log"
 
 # --------------------------------------------------------------------------
-# gitnexus — local stdio backend (proves stdio transport + full rewrite)
+# gitnexus — local stdio backend. PASSTHROUGH: no overrides, so every gitnexus
+# tool reaches Claude exactly as gitnexus broadcasts it (names prefixed
+# `gitnexus_*`). Edit any of them in the admin UI to see original → your change.
 # --------------------------------------------------------------------------
 [[backends]]
 name = "gitnexus"
@@ -17,27 +19,6 @@ transport = "stdio"
 command = "/Users/alexanderbass/.local/bin/gitnexus"
 args = ["mcp"]
 stateless = false
-
-  # Rewrite EVERY broadcast text for gitnexus's `query` tool.
-  [[backends.tools]]
-  original = "query"
-  name = "code_search"
-  title = "Code Search"
-  description = "Search the indexed codebase by meaning or symbol and get the most relevant code back."
-  enabled = true
-
-    [[backends.tools.params]]
-    original = "query"
-    description = "What to look for, in plain language or as a symbol name."
-
-    [[backends.tools.params]]
-    original = "task_context"
-    name = "intent"
-    description = "Why you're searching — helps rank results to your goal."
-
-    [[backends.tools.params]]
-    original = "service"
-    hide = true          # internal routing knob — drop it from the schema
 
 # --------------------------------------------------------------------------
 # deepwiki — remote http backend (proves http transport + rewrite + disable)

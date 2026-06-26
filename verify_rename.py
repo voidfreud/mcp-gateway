@@ -30,28 +30,14 @@ async def main() -> int:
     names = set(tools)
     print(f"gateway exposes {len(names)} tools: {sorted(names)}\n")
 
-    # --- gitnexus query -> code_search (full rewrite) ---
-    check("code_search" in names, "renamed tool 'code_search' present")
-    check("gitnexus_query" not in names, "original 'gitnexus_query' hidden")
-    if "code_search" in names:
-        t = tools["code_search"]
-        check(
-            t.description == "Search the indexed codebase by meaning or symbol "
-            "and get the most relevant code back.",
-            "tool description rewritten",
-        )
-        props = (t.inputSchema or {}).get("properties", {})
-        check("intent" in props, "param 'task_context' renamed to 'intent'")
-        check("task_context" not in props, "original param 'task_context' gone")
-        check(
-            props.get("intent", {}).get("description")
-            == "Why you're searching — helps rank results to your goal.",
-            "param description rewritten",
-        )
-        check("service" not in props, "hidden param 'service' absent from schema")
-        check("query" in props, "untouched param 'query' still present")
+    # --- gitnexus is PASSTHROUGH (no overrides) — original names reach Claude ---
+    check("gitnexus_query" in names, "gitnexus passthrough: 'gitnexus_query' present (original)")
+    check("gitnexus_list_repos" in names, "gitnexus passthrough: 'gitnexus_list_repos' present")
+    if "gitnexus_query" in names:
+        props = (tools["gitnexus_query"].inputSchema or {}).get("properties", {})
+        check("task_context" in props, "gitnexus passthrough: original param 'task_context' intact")
 
-    # --- deepwiki ask_question -> wiki_ask ---
+    # --- deepwiki ask_question -> wiki_ask (the remaining demo override) ---
     check("wiki_ask" in names, "renamed tool 'wiki_ask' present")
     check(
         "deepwiki_ask_question" not in names, "original 'deepwiki_ask_question' hidden"
