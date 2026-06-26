@@ -52,3 +52,10 @@ every configured rename/hide/disable + a real passthrough call.
   detach a `sleep` shell for this (it zombies).
 - launchd runs the venv python directly (not `uv run`) → one process, no uv
   supervisor. Recreate the venv with `uv sync` after cloning.
+- Admin editing model: everything broadcast to Claude is editable (incl. the
+  tool name); the *original* tool/param names (provider-facing) are read-only.
+  Fields prefill with the effective value; the server stores an override only if
+  it differs from the default (`_override_vs_default`), so config stays minimal.
+  Broadcast names are validated `[A-Za-z0-9_-]`.
+- `config_loader.save` is atomic + fsync (durable across crash); the UI debounces
+  ~550ms and flushes on blur/page-close (`keepalive`) so no edit is lost.

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -142,6 +143,9 @@ def build_state(cfg: GatewayConfig) -> dict:
                 params.append(
                     {
                         "original": dp["original"],
+                        # default broadcast name of a param == its original name
+                        # (params are never prefixed); the field prefills with this.
+                        "default_name": dp["original"],
                         "default_description": dp.get("description"),
                         "name": p.name if p else None,
                         "description": p.description if p else None,
@@ -151,6 +155,8 @@ def build_state(cfg: GatewayConfig) -> dict:
             tools_state.append(
                 {
                     "original": dt["original"],
+                    # default broadcast name == the exposed (possibly prefixed) name
+                    "default_name": cl.exposed_name(cfg, b, dt["original"]),
                     "default_title": dt.get("title"),
                     "default_description": dt.get("description"),
                     "name": ov.name if ov else None,
@@ -189,35 +195,81 @@ def _clean(v):
     return v
 
 
+_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def _validate_name(name: str | None, what: str) -> None:
+    """MCP-safe identifier guard. Conservative ([A-Za-z0-9_-]) so an edited name
+    can't break the tool listing or `mcp__server__tool` resolution."""
+    if name is not None and not _NAME_RE.match(name):
+        raise cl.ConfigError(
+            f"invalid {what} {name!r}: use only letters, digits, '_' or '-'"
+        )
+
+
+def _override_vs_default(value, default) -> str | None:
+    """Return an override value, or None to inherit the default.
+
+    Empty -> inherit. Equal to the default -> inherit (keeps config.toml minimal,
+    so a field prefilled with its default and left unchanged stores nothing).
+    """
+    v = _clean(value)
+    if v is None:
+        return None
+    if default is not None and v == default:
+        return None
+    return v
+
+
 def apply_tool_override(cfg: GatewayConfig, backend: str, payload: dict) -> None:
-    """Replace one tool's override from a UI payload."""
+    """Replace one tool's override from a UI payload, diffing against defaults.
+
+    Every editable field arrives prefilled with its effective value; we only
+    store a value that actually differs from the backend's default.
+    """
     b = next((x for x in cfg.backends if x.name == backend), None)
     if b is None:
         raise cl.ConfigError(f"unknown backend {backend!r}")
     original = payload["tool_original"]
     ov = payload.get("override", {})
-    params = [
-        ParamOverride(
-            original=p["original"],
-            name=_clean(p.get("name")),
-            description=_clean(p.get("description")),
-            hide=bool(p.get("hide", False)),
-        )
-        for p in ov.get("params", [])
-    ]
-    # drop params that carry no actual override (keeps config.toml minimal)
-    params = [p for p in params if p.name or p.description or p.hide]
+
+    # Defaults for this tool (original broadcast captured at introspection).
+    defaults = load_defaults(backend) or {}
+    dtool = next(
+        (t for t in defaults.get("tools", []) if t["original"] == original), {}
+    )
+    default_name = cl.exposed_name(cfg, b, original)
+    dparams = {p["original"]: p for p in dtool.get("params", [])}
+
+    name = _override_vs_default(ov.get("name"), default_name)
+    title = _override_vs_default(ov.get("title"), dtool.get("title"))
+    description = _override_vs_default(ov.get("description"), dtool.get("description"))
+    _validate_name(name, "tool name")
+
+    params = []
+    for p in ov.get("params", []):
+        po = p["original"]
+        dp = dparams.get(po, {})
+        # a param's default broadcast name is its original name
+        pname = _override_vs_default(p.get("name"), po)
+        pdesc = _override_vs_default(p.get("description"), dp.get("description"))
+        _validate_name(pname, "parameter name")
+        hide = bool(p.get("hide", False))
+        if pname or pdesc or hide:
+            params.append(
+                ParamOverride(original=po, name=pname, description=pdesc, hide=hide)
+            )
+
+    enabled = bool(ov.get("enabled", True))
     new = ToolOverride(
         original=original,
-        name=_clean(ov.get("name")),
-        title=_clean(ov.get("title")),
-        description=_clean(ov.get("description")),
-        enabled=bool(ov.get("enabled", True)),
+        name=name,
+        title=title,
+        description=description,
+        enabled=enabled,
         params=params,
     )
-    has_override = bool(
-        new.name or new.title or new.description or not new.enabled or new.params
-    )
+    has_override = bool(name or title or description or not enabled or params)
     b.tools = [t for t in b.tools if t.original != original]
     if has_override:
         b.tools.append(new)

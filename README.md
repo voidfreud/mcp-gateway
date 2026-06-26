@@ -76,12 +76,23 @@ Reversible with `claude mcp remove gateway`.
 
 A built-in web admin is served by the same daemon at **`http://127.0.0.1:9100/admin`**
 (loopback only). It shows every backend in a left pane, an **Import MCP** button,
-and per-tool editing of everything Claude Code sees — broadcast name, title,
+and per-tool editing of **everything Claude Code sees** — broadcast name, title,
 description, each parameter's name + description, hide a param, disable a tool.
-The backend's *original* tool names are shown read-only (they're the real
-identifiers). Each backend's original broadcast is captured once as a baseline
-(`~/.local/state/mcp-gateway/defaults/<backend>.json`) so any field has a
-**reset to default**; `config.toml` is snapshotted to `backups/` on every save.
+The backend's *real, provider-facing* names (the original tool + parameter names
+the gateway forwards to) are shown **read-only** — those can't change.
+
+Every editable field is **prefilled with its effective value** (your override if
+set, else the backend default), so it's never blank — clear it and it falls back
+to the default. Only values that actually differ from the default are stored, so
+`config.toml` stays minimal. Broadcast names are validated as MCP-safe
+identifiers (`[A-Za-z0-9_-]`) so an edit can't break the tool listing. Each
+backend's original broadcast is captured once as a baseline
+(`~/.local/state/mcp-gateway/defaults/<backend>.json`) for **reset to default**;
+`config.toml` is snapshotted to `backups/` on every save.
+
+**Durability.** Saves write `config.toml` atomically with `fsync` (survives an
+unexpected crash/power-loss, never a partial file), debounced ~550 ms to avoid
+overload, and flushed on field-blur and on page-close — so no edit is lost.
 
 Edits **auto-save** (no buttons) and apply with no reload latency:
 

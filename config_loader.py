@@ -280,11 +280,25 @@ def dump_toml(cfg: GatewayConfig) -> str:
 
 
 def save(cfg: GatewayConfig, path: str | Path) -> None:
-    """Write *cfg* to *path* as TOML (atomically)."""
+    """Write *cfg* to *path* as TOML, atomically and durably.
+
+    Writes a temp file, fsyncs it, atomically renames over the target, then
+    fsyncs the directory — so an unexpected crash/power-loss after this returns
+    leaves the config intact (never a partial file).
+    """
     p = Path(path).expanduser()
     tmp = p.with_suffix(p.suffix + ".tmp")
-    tmp.write_text(dump_toml(cfg), encoding="utf-8")
-    tmp.replace(p)
+    data = dump_toml(cfg)
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(data)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, p)
+    dir_fd = os.open(str(p.parent), os.O_RDONLY)
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
 
 
 if __name__ == "__main__":

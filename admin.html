@@ -186,26 +186,33 @@ function renderDetail(name) {
   b.tools.forEach(t => tw.appendChild(toolCard(b, t)));
 }
 
+// Editable fields are PREFILLED with their effective value (override if set,
+// else the backend default) so they are never blank — what you see is what
+// Claude Code gets. The read-only "real" name is the provider-facing identifier
+// the gateway forwards to (not editable).
 function toolCard(b, t) {
   const card = document.createElement('div');
   card.className = 'tool' + (t.enabled ? '' : ' disabled');
   card.dataset.original = t.original;
-  const shown = t.name || t.original;
+  card.dataset.defaultName = t.default_name;
+  const name = t.name || t.default_name;
+  const title = t.title || t.default_title || '';
+  const desc = t.description || t.default_description || '';
   card.innerHTML = `
     <div class="t-head" onclick="this.parentElement.classList.toggle('open')">
-      <span class="orig">${esc(t.original)}</span><span class="arrow">→</span>
-      <span class="newname">${esc(shown)}</span><span class="spacer"></span>
+      <span class="orig" title="real MCP tool name (provider-facing, not editable)">${esc(t.original)}</span>
+      <span class="arrow">→</span>
+      <span class="newname">${esc(name)}</span><span class="spacer"></span>
       <label class="chk" onclick="event.stopPropagation()">
         <input type="checkbox" class="f-enabled" ${t.enabled ? 'checked' : ''}> broadcast</label>
     </div>
     <div class="t-body">
       <div class="row">
-        <div><label>Broadcast name</label><input type="text" class="f-name" value="${esc(t.name||'')}" placeholder="${esc(t.original)}"></div>
-        <div><label>Title</label><input type="text" class="f-title" value="${esc(t.title||'')}" placeholder="${esc(t.default_title||'')}"></div>
+        <div><label>Broadcast name</label><input type="text" class="f-name" value="${esc(name)}" data-default="${esc(t.default_name)}"></div>
+        <div><label>Title</label><input type="text" class="f-title" value="${esc(title)}" data-default="${esc(t.default_title||'')}"></div>
       </div>
       <label>Description (what Claude reads)</label>
-      <textarea class="f-desc" placeholder="${esc(t.default_description||'')}">${esc(t.description||'')}</textarea>
-      ${t.default_description ? `<div class="hint">default: ${esc(t.default_description)}</div>` : ''}
+      <textarea class="f-desc" data-default="${esc(t.default_description||'')}">${esc(desc)}</textarea>
       <div class="params">
         <div class="lbl">Parameters</div>
         ${t.params.map(p => paramRow(p)).join('')}
@@ -214,22 +221,39 @@ function toolCard(b, t) {
         <button class="ghost" onclick="resetTool('${esc(b.name)}','${esc(t.original)}')">Reset to default</button>
       </div>
     </div>`;
-  // wire auto-save
-  card.querySelectorAll('input, textarea').forEach(inp => {
-    const ev = inp.type === 'checkbox' ? 'change' : 'input';
-    inp.addEventListener(ev, () => scheduleSave(b.name, t.original, card));
-  });
+  wireCard(b.name, t.original, card);
   return card;
 }
 
 function paramRow(p) {
+  const name = p.name || p.default_name;
+  const desc = p.description || p.default_description || '';
   return `<div class="param" data-original="${esc(p.original)}">
-    <div class="p-top"><span class="orig">${esc(p.original)}</span>
+    <div class="p-top"><span class="orig" title="real MCP parameter name (provider-facing, not editable)">${esc(p.original)}</span>
       <label class="chk"><input type="checkbox" class="p-hide" ${p.hide?'checked':''}> hide</label></div>
     <div class="row" style="margin-top:8px;">
-      <div><label>Broadcast name</label><input type="text" class="p-name" value="${esc(p.name||'')}" placeholder="${esc(p.original)}"></div>
-      <div><label>Description</label><input type="text" class="p-desc" value="${esc(p.description||'')}" placeholder="${esc(p.default_description||'')}"></div>
+      <div><label>Broadcast name</label><input type="text" class="p-name" value="${esc(name)}" data-default="${esc(p.default_name)}"></div>
+      <div><label>Description</label><input type="text" class="p-desc" value="${esc(desc)}" data-default="${esc(p.default_description||'')}"></div>
     </div></div>`;
+}
+
+// Wire auto-save: debounce on input; flush immediately on blur; refill a
+// cleared field with its default so it is never effectively empty.
+function wireCard(backend, original, card) {
+  card.querySelectorAll('input, textarea').forEach(inp => {
+    if (inp.type === 'checkbox') {
+      inp.addEventListener('change', () => scheduleSave(backend, original, card));
+      return;
+    }
+    inp.addEventListener('input', () => scheduleSave(backend, original, card));
+    inp.addEventListener('blur', () => {
+      if (inp.dataset.default !== undefined && inp.value.trim() === '' && inp.dataset.default !== '') {
+        inp.value = inp.dataset.default;  // never leave it blank — fall back to default
+        if (inp.classList.contains('f-name')) $('.newname', card).textContent = inp.value;
+      }
+      flushSave(backend, original, card);  // persist on leaving the field
+    });
+  });
 }
 
 function gather(card) {
@@ -248,18 +272,43 @@ function gather(card) {
   };
 }
 
+const pending = {};  // key -> {backend, original, card} for edits not yet persisted
+
 function scheduleSave(backend, original, card) {
   const key = backend + '::' + original;
   clearTimeout(timers[key]);
+  pending[key] = { backend, original, card };
   card.classList.toggle('disabled', !$('.f-enabled', card).checked);
-  $('.newname', card).textContent = $('.f-name', card).value || original;
-  timers[key] = setTimeout(async () => {
-    try {
-      await api('PUT', '/admin/api/override', { backend, tool_original: original, override: gather(card) });
-      flashSaved();
-    } catch (e) { toast('save failed: ' + e.message); }
-  }, 550);
+  $('.newname', card).textContent = $('.f-name', card).value.trim() || card.dataset.defaultName;
+  timers[key] = setTimeout(() => doSave(backend, original, card), 550);  // debounce
 }
+
+// Persist one tool's override. Each change is written to config.toml (atomic +
+// fsync) server-side, so nothing is lost on crash. keepalive lets it finish
+// during page unload.
+async function doSave(backend, original, card, keepalive = false) {
+  const key = backend + '::' + original;
+  clearTimeout(timers[key]); delete timers[key]; delete pending[key];
+  const body = JSON.stringify({ backend, tool_original: original, override: gather(card) });
+  try {
+    const r = await fetch('/admin/api/override',
+      { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body, keepalive });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) { toast('save failed: ' + (j.error || ('HTTP ' + r.status))); pending[key] = { backend, original, card }; return; }
+    flashSaved();
+  } catch (e) { toast('save failed: ' + e.message); pending[key] = { backend, original, card }; }
+}
+
+// Flush an edit immediately (on blur), but only if there is an unsaved change.
+function flushSave(backend, original, card) {
+  const key = backend + '::' + original;
+  if (timers[key] || pending[key]) doSave(backend, original, card);
+}
+
+// Last-resort durability: persist any still-pending edits as the page closes.
+window.addEventListener('beforeunload', () => {
+  Object.values(pending).forEach(({ backend, original, card }) => doSave(backend, original, card, true));
+});
 
 async function resetTool(backend, original) {
   try { await api('POST', '/admin/api/reset', { backend, tool_original: original }); await load(); toast('reset to default'); }
