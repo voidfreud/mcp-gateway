@@ -18,6 +18,8 @@ Per tool, from `config.toml`, it can:
 2. Rename any parameter and rewrite its description.
 3. Hide a parameter from the schema.
 4. Drop a whole tool from the listing.
+5. **Pin a tool (or a whole backend) to load _eagerly_** — upfront, instead of
+   deferred by Claude Code's tool search (sets `_meta["anthropic/alwaysLoad"]`).
 
 Calls are forwarded transparently — FastMCP reverse-maps renamed names/params
 back to the originals, so the backend never sees your renames.
@@ -89,6 +91,14 @@ identifiers (`[A-Za-z0-9_-]`) so an edit can't break the tool listing. Each
 backend's original broadcast is captured once as a baseline
 (`~/.local/state/mcp-gateway/defaults/<backend>.json`) for **reset to default**;
 `config.toml` is snapshotted to `backups/` on every save.
+
+**Eager loading (pin).** By default Claude Code *defers* MCP tools — only their
+names load upfront; descriptions load on demand. A **📌 eager** checkbox on each
+tool (and a **"pin all tools"** checkbox per backend) pins it to load **upfront**
+instead, by setting the tool's `_meta["anthropic/alwaysLoad"] = true`. Use it for
+the few tools you want Claude to reach for reliably. (Per-backend pinning applies
+to every tool the backend exposes, including ones you haven't otherwise edited.)
+Pinning hot-reloads in-process. Takes effect for Claude on a fresh session.
 
 **Durability.** Saves write `config.toml` atomically with `fsync` (survives an
 unexpected crash/power-loss, never a partial file), debounced ~550 ms to avoid

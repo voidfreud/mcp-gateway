@@ -43,6 +43,13 @@ every configured rename/hide/disable + a real passthrough call.
 - FastMCP's INFO "reusing existing session … context mixing" line is benign
   here (fresh session per request; no per-request user secrets). Quieted via
   `FASTMCP_LOG_LEVEL=WARNING`. Revisit if a backend forwards per-user auth.
+- **Eager loading (always_load):** `ToolOverride.always_load` (per-tool) /
+  `Backend.always_load` (per-server) → `build_transforms` sets the tool's
+  `_meta["anthropic/alwaysLoad"]=true` (FastMCP `ToolTransformConfig.meta`), which
+  exempts it from Claude Code tool-search deferral (loads upfront). Verified the
+  meta propagates to the wire `_meta`. Per-backend pinning needs the live tool
+  list, so `build_transforms(cfg, all_tools)` — startup builds transforms AFTER
+  `ensure_defaults` (see `server._startup`). Pinning hot-reloads (meta only).
 - One resident subprocess per stdio backend — calls do NOT re-spawn it.
 - Hot-reload swaps the transform by mutating `mcp._transforms` (a list); tools/list
   applies transforms live per request, so the swap is instant. Remove the old

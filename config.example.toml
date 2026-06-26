@@ -20,6 +20,8 @@ auth_header = "Authorization"      # optional; set BOTH or NEITHER
 auth_value = "Bearer ${EXA_TOKEN}" # ${ENV} resolved at startup
 stateless = true                   # parsed; shared-session reuse is a
                                    # tier-2 optimisation (see README)
+# always_load = true               # pin ALL this backend's tools to load upfront
+                                   # (eager — exempt from tool-search deferral)
 
   # Per-tool rewrite. `original` is the backend's own tool name.
   # Any of name/title/description omitted -> left as the backend's.
@@ -29,6 +31,7 @@ stateless = true                   # parsed; shared-session reuse is a
   title = "Web Search"
   description = "Exactly what Claude should read for this tool."
   enabled = true                   # false -> tool is dropped from the listing
+  always_load = true               # pin THIS tool to load upfront (eager)
 
     [[backends.tools.params]]
     original = "query"
