@@ -87,7 +87,9 @@ Every editable field is **prefilled with its effective value** (your override if
 set, else the backend default), so it's never blank — clear it and it falls back
 to the default. Only values that actually differ from the default are stored, so
 `config.toml` stays minimal. Broadcast names are validated as MCP-safe
-identifiers (`[A-Za-z0-9_-]`) so an edit can't break the tool listing. Each
+identifiers (`[A-Za-z0-9_-]`) **and must be unique** — a rename that would collide
+with another tool's broadcast name (or a description set identical to another's)
+is rejected with a clear error, so two tools can never share a name. Each
 backend's original broadcast is captured once as a baseline
 (`~/.local/state/mcp-gateway/defaults/<backend>.json`) for **reset to default**;
 `config.toml` is snapshotted to `backups/` on every save.

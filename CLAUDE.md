@@ -43,6 +43,11 @@ every configured rename/hide/disable + a real passthrough call.
 - FastMCP's INFO "reusing existing session … context mixing" line is benign
   here (fresh session per request; no per-request user secrets). Quieted via
   `FASTMCP_LOG_LEVEL=WARNING`. Revisit if a backend forwards per-user auth.
+- **Collision validation:** `admin.check_no_collision` (called in
+  `apply_tool_override`) rejects a save whose broadcast NAME would equal another
+  enabled tool's, or a deliberately-set DESCRIPTION identical to another's.
+  `admin.effective_tools(cfg)` computes every enabled tool's effective name/desc.
+  Passthrough never collides (prefixed names unique) — only real renames do.
 - **Eager loading (always_load):** `ToolOverride.always_load` (per-tool) /
   `Backend.always_load` (per-server) → `build_transforms` sets the tool's
   `_meta["anthropic/alwaysLoad"]=true` (FastMCP `ToolTransformConfig.meta`), which
