@@ -22,6 +22,7 @@ from fastmcp import Client, FastMCP
 from fastmcp.server import create_proxy
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 
+import admin
 import config_loader
 
 CONFIG_PATH = os.environ.get("MCP_GATEWAY_CONFIG", "config.toml")
@@ -159,10 +160,20 @@ def main() -> None:
     # Pre-flight against SOURCE names (before the transform renames them).
     anyio.run(_reconcile, mcp, index, log)
 
-    # Now apply the rewrites.
+    # Apply the rewrites, tracking the transform so the admin UI can hot-swap it.
+    transform_holder: list = [transforms]
     mcp.add_transform(transforms)
 
-    log.info("gateway_starting", url=f"http://{cfg.host}:{cfg.port}/mcp")
+    # Capture each backend's original broadcast (baseline for the admin UI),
+    # then attach the admin UI + API at /admin.
+    anyio.run(admin.ensure_defaults, cfg, log)
+    admin.register(mcp, CONFIG_PATH, log, transform_holder)
+
+    log.info(
+        "gateway_starting",
+        mcp=f"http://{cfg.host}:{cfg.port}/mcp",
+        admin=f"http://{cfg.host}:{cfg.port}/admin",
+    )
     mcp.run(transport="http", host=cfg.host, port=cfg.port)
 
 

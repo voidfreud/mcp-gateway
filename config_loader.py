@@ -23,6 +23,7 @@ import tomllib
 from pathlib import Path
 from typing import Literal
 
+import tomli_w
 from pydantic import BaseModel, Field, model_validator
 
 from fastmcp.server.transforms import ToolTransform
@@ -209,6 +210,81 @@ def build_transforms(cfg: GatewayConfig) -> tuple[ToolTransform, dict[str, str]]
                 tc_kwargs["arguments"] = arguments
             transforms[key] = ToolTransformConfig(**tc_kwargs)
     return ToolTransform(transforms), index
+
+
+def to_raw(cfg: GatewayConfig) -> dict:
+    """Convert a GatewayConfig back to the plain dict shape of config.toml,
+    omitting None/empty fields so the written file stays minimal and clean.
+    """
+
+    def _backend(b: Backend) -> dict:
+        d: dict = {"name": b.name, "transport": b.transport}
+        if b.transport == "http":
+            d["url"] = b.url
+            if b.auth_header and b.auth_value:
+                d["auth_header"] = b.auth_header
+                d["auth_value"] = b.auth_value
+        else:
+            d["command"] = b.command
+            if b.args:
+                d["args"] = list(b.args)
+            if b.env:
+                d["env"] = dict(b.env)
+        d["stateless"] = b.stateless
+        tools = [_tool(t) for t in b.tools]
+        if tools:
+            d["tools"] = tools
+        return d
+
+    def _tool(t: ToolOverride) -> dict:
+        d: dict = {"original": t.original}
+        if t.name is not None:
+            d["name"] = t.name
+        if t.title is not None:
+            d["title"] = t.title
+        if t.description is not None:
+            d["description"] = t.description
+        d["enabled"] = t.enabled
+        params = [_param(p) for p in t.params]
+        if params:
+            d["params"] = params
+        return d
+
+    def _param(p: ParamOverride) -> dict:
+        d: dict = {"original": p.original}
+        if p.name is not None:
+            d["name"] = p.name
+        if p.description is not None:
+            d["description"] = p.description
+        d["hide"] = p.hide
+        return d
+
+    return {
+        "host": cfg.host,
+        "port": cfg.port,
+        "log_file": cfg.log_file,
+        "backends": [_backend(b) for b in cfg.backends],
+    }
+
+
+_GENERATED_HEADER = (
+    "# mcp-gateway config. Managed by the admin UI at http://127.0.0.1:9100/admin.\n"
+    "# Hand-edits are fine but comments are not preserved on UI save.\n"
+    "# Secrets: use ${ENV_VAR} refs only; values come from the environment.\n\n"
+)
+
+
+def dump_toml(cfg: GatewayConfig) -> str:
+    """Serialize a GatewayConfig to a config.toml string."""
+    return _GENERATED_HEADER + tomli_w.dumps(to_raw(cfg))
+
+
+def save(cfg: GatewayConfig, path: str | Path) -> None:
+    """Write *cfg* to *path* as TOML (atomically)."""
+    p = Path(path).expanduser()
+    tmp = p.with_suffix(p.suffix + ".tmp")
+    tmp.write_text(dump_toml(cfg), encoding="utf-8")
+    tmp.replace(p)
 
 
 if __name__ == "__main__":

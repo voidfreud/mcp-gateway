@@ -1,0 +1,312 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>mcp-gateway · admin</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #161a21; --panel2: #1c222b; --line: #2a313c;
+    --fg: #e6e9ef; --mut: #8b95a5; --accent: #5aa9ff; --ok: #54d18c;
+    --warn: #e0a14a; --ro: #232a34;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.45 -apple-system, system-ui, sans-serif;
+         background: var(--bg); color: var(--fg); height: 100vh; display: flex; flex-direction: column; }
+  header { display: flex; align-items: center; gap: 12px; padding: 12px 18px;
+           border-bottom: 1px solid var(--line); background: var(--panel); }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: .2px; }
+  header .sub { color: var(--mut); font-size: 12px; }
+  header .spacer { flex: 1; }
+  button { font: inherit; cursor: pointer; border: 1px solid var(--line);
+           background: var(--panel2); color: var(--fg); border-radius: 7px; padding: 6px 12px; }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #06203f; font-weight: 600; }
+  button.ghost { background: transparent; }
+  button.danger:hover { border-color: #e06a6a; color: #ff9b9b; }
+  .wrap { flex: 1; display: flex; min-height: 0; }
+  /* left pane */
+  aside { width: 260px; border-right: 1px solid var(--line); background: var(--panel);
+          overflow-y: auto; flex-shrink: 0; }
+  .b-item { padding: 11px 16px; border-bottom: 1px solid var(--line); cursor: pointer; }
+  .b-item:hover { background: var(--panel2); }
+  .b-item.sel { background: var(--panel2); box-shadow: inset 3px 0 0 var(--accent); }
+  .b-item .nm { font-weight: 600; }
+  .b-item .meta { color: var(--mut); font-size: 12px; margin-top: 2px; display: flex; gap: 8px; }
+  .badge { font-size: 10.5px; text-transform: uppercase; letter-spacing: .4px;
+           padding: 1px 6px; border-radius: 4px; border: 1px solid var(--line); color: var(--mut); }
+  /* detail */
+  main { flex: 1; overflow-y: auto; padding: 18px 22px; }
+  .empty { color: var(--mut); margin-top: 40px; text-align: center; }
+  .b-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 4px; }
+  .b-head h2 { margin: 0; font-size: 17px; }
+  .b-head code { color: var(--mut); font-size: 12px; }
+  .b-actions { margin: 10px 0 18px; display: flex; gap: 8px; }
+  .tool { border: 1px solid var(--line); border-radius: 10px; margin-bottom: 14px; background: var(--panel); }
+  .tool.disabled { opacity: .55; }
+  .t-head { display: flex; align-items: center; gap: 10px; padding: 11px 14px; border-bottom: 1px solid var(--line); }
+  .t-head .orig { font-family: ui-monospace, Menlo, monospace; color: var(--mut); font-size: 12px; }
+  .t-head .arrow { color: var(--mut); }
+  .t-head .newname { font-family: ui-monospace, Menlo, monospace; color: var(--accent); font-weight: 600; }
+  .t-head .spacer { flex: 1; }
+  .t-body { padding: 12px 14px; display: none; }
+  .tool.open .t-body { display: block; }
+  .t-head { cursor: pointer; }
+  label { display: block; font-size: 11.5px; text-transform: uppercase; letter-spacing: .4px;
+          color: var(--mut); margin: 10px 0 4px; }
+  input[type=text], textarea {
+    width: 100%; background: var(--panel2); border: 1px solid var(--line); color: var(--fg);
+    border-radius: 7px; padding: 7px 9px; font: inherit; }
+  input[readonly] { background: var(--ro); color: var(--mut); }
+  input:focus, textarea:focus { outline: none; border-color: var(--accent); }
+  textarea { resize: vertical; min-height: 38px; }
+  .hint { font-size: 11.5px; color: var(--mut); margin-top: 3px; }
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .params { margin-top: 14px; border-top: 1px dashed var(--line); padding-top: 10px; }
+  .params > .lbl { font-size: 11.5px; text-transform: uppercase; letter-spacing: .4px; color: var(--mut); }
+  .param { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin-top: 8px; background: var(--panel2); }
+  .param .p-top { display: flex; align-items: center; gap: 10px; }
+  .param .p-top .orig { font-family: ui-monospace, Menlo, monospace; color: var(--mut); font-size: 12px; }
+  .chk { display: flex; align-items: center; gap: 6px; color: var(--mut); font-size: 12px; user-select: none; }
+  .saved { font-size: 12px; color: var(--ok); opacity: 0; transition: opacity .2s; }
+  .saved.show { opacity: 1; }
+  /* modal */
+  .modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,.55); display: none; align-items: center; justify-content: center; }
+  .modal-bg.show { display: flex; }
+  .modal { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 20px; width: 460px; max-width: 92vw; }
+  .modal h3 { margin: 0 0 14px; }
+  .modal .foot { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
+  .modal .err { color: #ff9b9b; font-size: 12.5px; min-height: 16px; margin-top: 8px; }
+  .toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%);
+           background: var(--panel2); border: 1px solid var(--accent); color: var(--fg);
+           padding: 10px 16px; border-radius: 8px; display: none; }
+  .toast.show { display: block; }
+</style>
+</head>
+<body>
+<header>
+  <h1>mcp-gateway</h1>
+  <span class="sub">edit what Claude Code sees · changes save + reload automatically</span>
+  <span class="spacer"></span>
+  <span id="saved" class="saved">saved ✓</span>
+  <button class="primary" onclick="openImport()">+ Import MCP</button>
+</header>
+<div class="wrap">
+  <aside id="list"></aside>
+  <main id="detail"><div class="empty">Select an MCP on the left.</div></main>
+</div>
+
+<div class="modal-bg" id="importBg">
+  <div class="modal">
+    <h3>Import an MCP backend</h3>
+    <label>Name (id + tool prefix)</label>
+    <input type="text" id="im_name" placeholder="exa" />
+    <label>Transport</label>
+    <select id="im_transport" onchange="importTransportChange()"
+            style="width:100%;background:var(--panel2);border:1px solid var(--line);color:var(--fg);border-radius:7px;padding:7px 9px;">
+      <option value="http">http</option>
+      <option value="stdio">stdio</option>
+    </select>
+    <div id="im_http">
+      <label>URL</label>
+      <input type="text" id="im_url" placeholder="https://host/mcp" />
+      <div class="row">
+        <div><label>Auth header (optional)</label><input type="text" id="im_ah" placeholder="Authorization" /></div>
+        <div><label>Auth value (optional)</label><input type="text" id="im_av" placeholder="Bearer ${EXA_TOKEN}" /></div>
+      </div>
+    </div>
+    <div id="im_stdio" style="display:none">
+      <label>Command</label>
+      <input type="text" id="im_cmd" placeholder="/path/to/server  or  uvx" />
+      <label>Args (space-separated)</label>
+      <input type="text" id="im_args" placeholder="serena-mcp" />
+    </div>
+    <div class="err" id="im_err"></div>
+    <div class="foot">
+      <button class="ghost" onclick="closeImport()">Cancel</button>
+      <button class="primary" id="im_go" onclick="doImport()">Import &amp; connect</button>
+    </div>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = (s, r=document) => r.querySelector(s);
+let STATE = null, SELECTED = null;
+const timers = {};
+
+async function api(method, path, body) {
+  const opt = { method, headers: {} };
+  if (body !== undefined) { opt.headers['Content-Type'] = 'application/json'; opt.body = JSON.stringify(body); }
+  const r = await fetch(path, opt);
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || ('HTTP ' + r.status));
+  return j;
+}
+function toast(msg, ms=2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('show'); setTimeout(() => t.classList.remove('show'), ms); }
+function flashSaved() { const s = $('#saved'); s.classList.add('show'); setTimeout(() => s.classList.remove('show'), 1200); }
+
+async function load() {
+  STATE = await api('GET', '/admin/api/state');
+  renderList();
+  if (SELECTED && STATE.backends.find(b => b.name === SELECTED)) renderDetail(SELECTED);
+  else { SELECTED = null; $('#detail').innerHTML = '<div class="empty">Select an MCP on the left.</div>'; }
+}
+
+function renderList() {
+  const el = $('#list');
+  el.innerHTML = '';
+  STATE.backends.forEach(b => {
+    const d = document.createElement('div');
+    d.className = 'b-item' + (b.name === SELECTED ? ' sel' : '');
+    d.onclick = () => { SELECTED = b.name; renderList(); renderDetail(b.name); };
+    const overridden = b.tools.filter(t => t.name || t.title || t.description || !t.enabled
+      || t.params.some(p => p.name || p.description || p.hide)).length;
+    d.innerHTML = `<div class="nm">${esc(b.name)}</div>
+      <div class="meta"><span class="badge">${b.transport}</span>
+      <span>${b.tools.length} tools</span>${overridden ? `<span>· ${overridden} edited</span>` : ''}
+      ${b.introspected ? '' : '<span style="color:var(--warn)">· not introspected</span>'}</div>`;
+    el.appendChild(d);
+  });
+}
+
+function renderDetail(name) {
+  const b = STATE.backends.find(x => x.name === name);
+  const m = $('#detail');
+  const conn = b.transport === 'http' ? esc(b.url || '') : esc((b.command || '') + ' ' + (b.args || []).join(' '));
+  m.innerHTML = `
+    <div class="b-head"><h2>${esc(b.name)}</h2><span class="badge">${b.transport}</span><code>${conn}</code></div>
+    <div class="b-actions">
+      <button class="ghost" onclick="reintrospect('${esc(b.name)}')">Re-introspect</button>
+      <button class="ghost danger" onclick="delBackend('${esc(b.name)}')">Remove backend</button>
+    </div>
+    <div id="tools"></div>`;
+  const tw = $('#tools', m);
+  if (!b.introspected) { tw.innerHTML = '<div class="empty">Backend not introspected yet — click Re-introspect.</div>'; return; }
+  b.tools.forEach(t => tw.appendChild(toolCard(b, t)));
+}
+
+function toolCard(b, t) {
+  const card = document.createElement('div');
+  card.className = 'tool' + (t.enabled ? '' : ' disabled');
+  card.dataset.original = t.original;
+  const shown = t.name || t.original;
+  card.innerHTML = `
+    <div class="t-head" onclick="this.parentElement.classList.toggle('open')">
+      <span class="orig">${esc(t.original)}</span><span class="arrow">→</span>
+      <span class="newname">${esc(shown)}</span><span class="spacer"></span>
+      <label class="chk" onclick="event.stopPropagation()">
+        <input type="checkbox" class="f-enabled" ${t.enabled ? 'checked' : ''}> broadcast</label>
+    </div>
+    <div class="t-body">
+      <div class="row">
+        <div><label>Broadcast name</label><input type="text" class="f-name" value="${esc(t.name||'')}" placeholder="${esc(t.original)}"></div>
+        <div><label>Title</label><input type="text" class="f-title" value="${esc(t.title||'')}" placeholder="${esc(t.default_title||'')}"></div>
+      </div>
+      <label>Description (what Claude reads)</label>
+      <textarea class="f-desc" placeholder="${esc(t.default_description||'')}">${esc(t.description||'')}</textarea>
+      ${t.default_description ? `<div class="hint">default: ${esc(t.default_description)}</div>` : ''}
+      <div class="params">
+        <div class="lbl">Parameters</div>
+        ${t.params.map(p => paramRow(p)).join('')}
+      </div>
+      <div style="margin-top:12px;display:flex;gap:8px;">
+        <button class="ghost" onclick="resetTool('${esc(b.name)}','${esc(t.original)}')">Reset to default</button>
+      </div>
+    </div>`;
+  // wire auto-save
+  card.querySelectorAll('input, textarea').forEach(inp => {
+    const ev = inp.type === 'checkbox' ? 'change' : 'input';
+    inp.addEventListener(ev, () => scheduleSave(b.name, t.original, card));
+  });
+  return card;
+}
+
+function paramRow(p) {
+  return `<div class="param" data-original="${esc(p.original)}">
+    <div class="p-top"><span class="orig">${esc(p.original)}</span>
+      <label class="chk"><input type="checkbox" class="p-hide" ${p.hide?'checked':''}> hide</label></div>
+    <div class="row" style="margin-top:8px;">
+      <div><label>Broadcast name</label><input type="text" class="p-name" value="${esc(p.name||'')}" placeholder="${esc(p.original)}"></div>
+      <div><label>Description</label><input type="text" class="p-desc" value="${esc(p.description||'')}" placeholder="${esc(p.default_description||'')}"></div>
+    </div></div>`;
+}
+
+function gather(card) {
+  const params = [...card.querySelectorAll('.param')].map(pe => ({
+    original: pe.dataset.original,
+    name: $('.p-name', pe).value,
+    description: $('.p-desc', pe).value,
+    hide: $('.p-hide', pe).checked,
+  }));
+  return {
+    name: $('.f-name', card).value,
+    title: $('.f-title', card).value,
+    description: $('.f-desc', card).value,
+    enabled: $('.f-enabled', card).checked,
+    params,
+  };
+}
+
+function scheduleSave(backend, original, card) {
+  const key = backend + '::' + original;
+  clearTimeout(timers[key]);
+  card.classList.toggle('disabled', !$('.f-enabled', card).checked);
+  $('.newname', card).textContent = $('.f-name', card).value || original;
+  timers[key] = setTimeout(async () => {
+    try {
+      await api('PUT', '/admin/api/override', { backend, tool_original: original, override: gather(card) });
+      flashSaved();
+    } catch (e) { toast('save failed: ' + e.message); }
+  }, 550);
+}
+
+async function resetTool(backend, original) {
+  try { await api('POST', '/admin/api/reset', { backend, tool_original: original }); await load(); toast('reset to default'); }
+  catch (e) { toast('reset failed: ' + e.message); }
+}
+async function reintrospect(name) {
+  try { await api('POST', '/admin/api/introspect/' + encodeURIComponent(name)); await load(); toast('re-introspected ' + name); }
+  catch (e) { toast('introspect failed: ' + e.message); }
+}
+async function delBackend(name) {
+  if (!confirm('Remove backend "' + name + '"? This restarts the gateway.')) return;
+  try { await api('DELETE', '/admin/api/backend/' + encodeURIComponent(name)); SELECTED = null; toast('removed — restarting…'); waitReload(); }
+  catch (e) { toast('remove failed: ' + e.message); }
+}
+
+// import modal
+function openImport() { $('#importBg').classList.add('show'); $('#im_err').textContent = ''; }
+function closeImport() { $('#importBg').classList.remove('show'); }
+function importTransportChange() {
+  const http = $('#im_transport').value === 'http';
+  $('#im_http').style.display = http ? '' : 'none';
+  $('#im_stdio').style.display = http ? 'none' : '';
+}
+async function doImport() {
+  const t = $('#im_transport').value;
+  const body = { name: $('#im_name').value.trim(), transport: t,
+    stateless: t === 'http' };
+  if (t === 'http') { body.url = $('#im_url').value.trim(); body.auth_header = $('#im_ah').value.trim(); body.auth_value = $('#im_av').value.trim(); }
+  else { body.command = $('#im_cmd').value.trim(); body.args = $('#im_args').value.trim() ? $('#im_args').value.trim().split(/\s+/) : []; }
+  $('#im_go').disabled = true; $('#im_err').textContent = 'connecting…';
+  try { const r = await api('POST', '/admin/api/backend', body); closeImport(); SELECTED = r.backend; toast('imported — restarting gateway…'); waitReload(); }
+  catch (e) { $('#im_err').textContent = e.message; }
+  finally { $('#im_go').disabled = false; }
+}
+
+// after a restart-triggering change, poll until the gateway is back, then reload
+async function waitReload() {
+  for (let i = 0; i < 40; i++) {
+    await new Promise(r => setTimeout(r, 700));
+    try { const h = await fetch('/health'); if (h.ok) { await load(); toast('gateway back up'); return; } } catch {}
+  }
+  toast('gateway did not come back — check logs');
+}
+
+function esc(s) { return String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+load();
+</script>
+</body>
+</html>

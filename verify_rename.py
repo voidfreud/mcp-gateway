@@ -53,10 +53,15 @@ async def main() -> int:
 
     # --- deepwiki ask_question -> wiki_ask ---
     check("wiki_ask" in names, "renamed tool 'wiki_ask' present")
-    check("deepwiki_ask_question" not in names, "original 'deepwiki_ask_question' hidden")
+    check(
+        "deepwiki_ask_question" not in names, "original 'deepwiki_ask_question' hidden"
+    )
     if "wiki_ask" in names:
         props = (tools["wiki_ask"].inputSchema or {}).get("properties", {})
-        check("repo" in props and "repoName" not in props, "param 'repoName' renamed to 'repo'")
+        check(
+            "repo" in props and "repoName" not in props,
+            "param 'repoName' renamed to 'repo'",
+        )
 
     # --- disabled tool dropped ---
     check(
@@ -69,7 +74,10 @@ async def main() -> int:
     async with Client(URL) as c:
         res = await c.call_tool(
             "wiki_ask",
-            {"repo": "prefecthq/fastmcp", "question": "What transport does the proxy use?"},
+            {
+                "repo": "prefecthq/fastmcp",
+                "question": "What transport does the proxy use?",
+            },
         )
     text = ""
     for block in res.content:
@@ -80,7 +88,7 @@ async def main() -> int:
         print(f"\n  answer (first 200 chars): {text.strip()[:200]}...")
 
     failed = [label for ok, label in checks if not ok]
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     if failed:
         print(f"FAILED {len(failed)}/{len(checks)}:")
         for label in failed:

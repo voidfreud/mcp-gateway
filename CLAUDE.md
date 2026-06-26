@@ -20,9 +20,11 @@ every configured rename/hide/disable + a real passthrough call.
 `uv run config_loader.py config.toml` prints parsed backends + transform keys.
 
 ## Layout
-- `config_loader.py` — Pydantic models + `config.toml` → proxy config + transforms.
-- `server.py` — `create_proxy` → reconcile → `add_transform` → run http.
-- `config.toml` — the file you edit (backends + per-tool text rewrites).
+- `config_loader.py` — Pydantic models + `config.toml` → proxy config + transforms; also `dump_toml`/`save` (admin writes config back).
+- `server.py` — `create_proxy` → reconcile → `add_transform` → register admin → run http.
+- `admin.py` — admin UI/API at `/admin`: introspect/defaults, edit overrides, in-process hot-reload, import/remove (restart).
+- `admin.html` — single-file vanilla-JS admin page (no framework, no build).
+- `config.toml` — backends + per-tool rewrites. **Runtime-managed by the admin** (UI saves regenerate it, comments lost). Defaults/backups live under `~/.local/state/mcp-gateway/`.
 
 ## Conventions
 - `config.toml` holds only `${ENV}` refs + public endpoints (safe to commit);
@@ -42,3 +44,11 @@ every configured rename/hide/disable + a real passthrough call.
   here (fresh session per request; no per-request user secrets). Quieted via
   `FASTMCP_LOG_LEVEL=WARNING`. Revisit if a backend forwards per-user auth.
 - One resident subprocess per stdio backend — calls do NOT re-spawn it.
+- Hot-reload swaps the transform by mutating `mcp._transforms` (a list); tools/list
+  applies transforms live per request, so the swap is instant. Remove the old
+  transform before adding the new one or the list grows.
+- Backend topology changes restart via launchd; the restart runs as a Starlette
+  `BackgroundTask` with `subprocess.run` (reaps the child — no zombie). Don't
+  detach a `sleep` shell for this (it zombies).
+- launchd runs the venv python directly (not `uv run`) → one process, no uv
+  supervisor. Recreate the venv with `uv sync` after cloning.

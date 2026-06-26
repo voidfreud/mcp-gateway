@@ -5,14 +5,16 @@
     <key>Label</key>
     <string>com.void.mcp-gateway</string>
 
+    <!-- Run the venv python directly (no `uv run` supervisor process) — one
+         resident process, faster start. Recreate the venv with `uv sync`. -->
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/alexanderbass/.local/bin/uv</string>
-        <string>run</string>
-        <string>--directory</string>
-        <string>/Users/alexanderbass/Developer/mine/mcp-gateway</string>
-        <string>server.py</string>
+        <string>/Users/alexanderbass/Developer/mine/mcp-gateway/.venv/bin/python</string>
+        <string>/Users/alexanderbass/Developer/mine/mcp-gateway/server.py</string>
     </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/alexanderbass/Developer/mine/mcp-gateway</string>
 
     <key>RunAtLoad</key>
     <true/>

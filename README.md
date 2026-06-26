@@ -72,6 +72,30 @@ Reversible with `claude mcp remove gateway`.
 > The intended end state is to register the gateway and **remove the direct
 > registrations** for the backends it fronts, so Claude sees only your rewrites.
 
+## Admin UI
+
+A built-in web admin is served by the same daemon at **`http://127.0.0.1:9100/admin`**
+(loopback only). It shows every backend in a left pane, an **Import MCP** button,
+and per-tool editing of everything Claude Code sees — broadcast name, title,
+description, each parameter's name + description, hide a param, disable a tool.
+The backend's *original* tool names are shown read-only (they're the real
+identifiers). Each backend's original broadcast is captured once as a baseline
+(`~/.local/state/mcp-gateway/defaults/<backend>.json`) so any field has a
+**reset to default**; `config.toml` is snapshotted to `backups/` on every save.
+
+Edits **auto-save** (no buttons) and apply with no reload latency:
+
+- **Text edits** (rename/description/hide/disable) hot-reload the proxy's
+  transforms **in-process** — instant, no restart, no client disconnect. The
+  change is live in the gateway immediately; an already-connected Claude session
+  picks it up on its next tool list / reconnect / new session.
+- **Backend changes** (import/remove/url/auth) rebuild the connection, so they
+  write config and restart the daemon (Claude auto-reconnects).
+
+`config.toml` is **runtime-managed by the admin** — UI saves regenerate it
+(comments are not preserved; `config.example.toml` keeps the annotated reference).
+Hand-editing it is still fine.
+
 ## Config
 
 `config.toml` is the source of truth (see `config.example.toml` for the full
