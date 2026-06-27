@@ -82,6 +82,16 @@ every configured rename/hide/disable + a real passthrough call.
   meta propagates to the wire `_meta`. Per-backend pinning needs the live tool
   list, so `build_transforms(cfg, all_tools)` — startup builds transforms AFTER
   `ensure_defaults` (see `server._startup`). Pinning hot-reloads (meta only).
+- **Server instructions:** a bare proxy drops each backend's server-level
+  `initialize.instructions`. The gateway captures them (in the defaults JSON,
+  alongside `server_info`/`capabilities`) and `config_loader.compose_instructions`
+  rebuilds the gateway's own `instructions` — `cfg.instructions` (gateway override)
+  wins entirely, else aggregate each backend's effective blurb (`Backend.instructions`
+  override else captured) under `# <backend>` headers (single contributor → no
+  header). Set live via `admin.apply_instructions(mcp, cfg)` in `server._startup`
+  and `hot_reload`. Edit through `PUT /admin/api/instructions` ({backend|null, value}).
+  Old defaults files (pre-capture) auto-re-introspect on startup (key-presence check
+  in `ensure_defaults`).
 - One resident subprocess per stdio backend — calls do NOT re-spawn it.
 - Hot-reload swaps the transform by mutating `mcp._transforms` (a list); tools/list
   applies transforms live per request, so the swap is instant. Remove the old

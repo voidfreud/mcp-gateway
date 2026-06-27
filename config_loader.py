@@ -102,6 +102,11 @@ class Backend(BaseModel, extra="forbid"):
     stateless: bool = False
     # Pin ALL of this backend's tools to load upfront (per-tool meta on each).
     always_load: bool = False
+    # Override this backend's server-level `instructions` (the always-loaded
+    # blurb the backend sends at `initialize`). None -> use the captured original
+    # (see admin defaults); a string replaces it in the gateway's composed
+    # instructions. Set even when the backend sends none, to add your own.
+    instructions: str | None = None
     tools: list[ToolOverride] = Field(default_factory=list)
 
     @model_validator(mode="after")
@@ -127,6 +132,10 @@ class GatewayConfig(BaseModel, extra="forbid"):
     host: str = "127.0.0.1"
     port: int = 9100
     log_file: str = "~/.local/state/mcp-gateway/gateway.log"
+    # Full manual override of the gateway's server-level `instructions`. None ->
+    # auto-compose from each backend's effective instructions (see
+    # `compose_instructions`); a string replaces the whole composed blob.
+    instructions: str | None = None
     backends: list[Backend] = Field(default_factory=list)
 
     @model_validator(mode="after")
@@ -261,6 +270,35 @@ def build_transforms(
     return ToolTransform(transforms), index
 
 
+def compose_instructions(
+    cfg: GatewayConfig, captured: dict[str, str | None]
+) -> str | None:
+    """The gateway's effective server-level ``instructions``.
+
+    A backend's server ``instructions`` (the always-loaded blurb it sends at
+    ``initialize``) are otherwise dropped by the proxy. This composes them back:
+
+    * If ``cfg.instructions`` is set, it is the entire result (full manual control).
+    * Otherwise aggregate each backend's *effective* instructions — its override
+      (``Backend.instructions``) if set, else the captured original from
+      *captured* (``backend name -> original instructions or None``) — under a
+      ``# <backend>`` header, in config order. Backends with no instructions are
+      skipped. Returns ``None`` if nothing to say (so the gateway stays silent).
+    """
+    if cfg.instructions is not None:
+        return cfg.instructions
+    parts: list[tuple[str, str]] = []
+    for b in cfg.backends:
+        eff = b.instructions if b.instructions is not None else captured.get(b.name)
+        if eff and eff.strip():
+            parts.append((b.name, eff.strip()))
+    if not parts:
+        return None
+    if len(parts) == 1:
+        return parts[0][1]  # single source -> no header needed
+    return "\n\n".join(f"# {name}\n\n{text}" for name, text in parts)
+
+
 def to_raw(cfg: GatewayConfig) -> dict:
     """Convert a GatewayConfig back to the plain dict shape of config.toml,
     omitting None/empty fields so the written file stays minimal and clean.
@@ -282,6 +320,8 @@ def to_raw(cfg: GatewayConfig) -> dict:
         d["stateless"] = b.stateless
         if b.always_load:
             d["always_load"] = True
+        if b.instructions is not None:
+            d["instructions"] = b.instructions
         tools = [_tool(t) for t in b.tools]
         if tools:
             d["tools"] = tools
@@ -312,12 +352,15 @@ def to_raw(cfg: GatewayConfig) -> dict:
         d["hide"] = p.hide
         return d
 
-    return {
+    out: dict = {
         "host": cfg.host,
         "port": cfg.port,
         "log_file": cfg.log_file,
-        "backends": [_backend(b) for b in cfg.backends],
     }
+    if cfg.instructions is not None:
+        out["instructions"] = cfg.instructions
+    out["backends"] = [_backend(b) for b in cfg.backends]
+    return out
 
 
 _GENERATED_HEADER = (

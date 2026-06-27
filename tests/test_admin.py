@@ -302,6 +302,84 @@ def test_duplicate_description_rejected(defaults_dir):
         )
 
 
+# --- instructions overrides (set_instructions) -----------------------------
+
+
+def _write_defaults_instr(d, backend, instructions):
+    (d / f"{backend}.json").write_text(
+        json.dumps(
+            {
+                "backend": backend,
+                "instructions": instructions,
+                "server_info": {"name": backend, "version": "1.0"},
+                "tools": [],
+            }
+        )
+    )
+
+
+def test_gateway_instructions_value_stored(defaults_dir):
+    cfg = _single_cfg()
+    admin.set_instructions(cfg, None, "MANUAL BLURB")
+    assert cfg.instructions == "MANUAL BLURB"
+
+
+def test_gateway_instructions_empty_clears(defaults_dir):
+    cfg = _single_cfg()
+    cfg.instructions = "old"
+    admin.set_instructions(cfg, None, "   ")  # whitespace -> auto-compose
+    assert cfg.instructions is None
+
+
+def test_backend_instructions_equal_to_default_inherits(defaults_dir):
+    _write_defaults_instr(defaults_dir, "b", "ORIGINAL")
+    cfg = _single_cfg()
+    admin.set_instructions(cfg, "b", "ORIGINAL")  # unchanged -> store nothing
+    assert cfg.backends[0].instructions is None
+
+
+def test_backend_instructions_changed_stored(defaults_dir):
+    _write_defaults_instr(defaults_dir, "b", "ORIGINAL")
+    cfg = _single_cfg()
+    admin.set_instructions(cfg, "b", "EDITED")
+    assert cfg.backends[0].instructions == "EDITED"
+
+
+def test_backend_instructions_added_when_default_none(defaults_dir):
+    _write_defaults_instr(defaults_dir, "b", None)  # backend sends none
+    cfg = _single_cfg()
+    admin.set_instructions(cfg, "b", "MY OWN")
+    assert cfg.backends[0].instructions == "MY OWN"
+
+
+def test_backend_instructions_empty_inherits(defaults_dir):
+    _write_defaults_instr(defaults_dir, "b", "ORIGINAL")
+    cfg = _single_cfg()
+    cfg.backends[0].instructions = "stale"
+    admin.set_instructions(cfg, "b", "")
+    assert cfg.backends[0].instructions is None
+
+
+def test_set_instructions_unknown_backend_raises(defaults_dir):
+    cfg = _single_cfg()
+    with pytest.raises(cl.ConfigError):
+        admin.set_instructions(cfg, "nope", "x")
+
+
+def test_build_state_surfaces_instructions(defaults_dir):
+    _write_defaults_instr(defaults_dir, "b", "ORIGINAL BLURB")
+    cfg = _single_cfg()
+    cfg.backends[0].instructions = "EDITED BLURB"
+    state = admin.build_state(cfg)
+    bs = state["backends"][0]
+    assert bs["default_instructions"] == "ORIGINAL BLURB"
+    assert bs["instructions"] == "EDITED BLURB"
+    assert bs["server_info"] == {"name": "b", "version": "1.0"}
+    # gateway composes from the override
+    assert state["composed_instructions"] == "EDITED BLURB"
+    assert state["instructions"] is None
+
+
 # --- build_state merge -----------------------------------------------------
 
 

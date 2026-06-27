@@ -55,9 +55,15 @@ def _client_config(b: Backend) -> dict:
 
 
 async def capture_defaults(b: Backend) -> dict:
-    """Connect to one backend and return its original broadcast as a baseline."""
+    """Connect to one backend and return its original broadcast as a baseline.
+
+    Captures the per-tool text AND the server-level ``initialize`` data the proxy
+    otherwise drops: ``instructions`` (the always-loaded server blurb), plus
+    ``serverInfo`` and ``capabilities`` (surfaced read-only in the admin UI).
+    """
     async with Client(_client_config(b)) as c:
         tools = await c.list_tools()
+        init = c.initialize_result  # populated after the context entered
     out_tools = []
     for t in tools:
         schema = t.inputSchema or {}
@@ -74,7 +80,27 @@ async def capture_defaults(b: Backend) -> dict:
                 "params": params,
             }
         )
-    return {"backend": b.name, "captured_at": time.time(), "tools": out_tools}
+    server_info = None
+    capabilities = None
+    instructions = None
+    if init is not None:
+        instructions = init.instructions
+        si = getattr(init, "serverInfo", None)
+        if si is not None:
+            server_info = {"name": si.name, "version": si.version}
+        caps = getattr(init, "capabilities", None)
+        if caps is not None:
+            capabilities = caps.model_dump(exclude_none=True, mode="json")
+    return {
+        "backend": b.name,
+        "captured_at": time.time(),
+        # `instructions` is ALWAYS present (even if None) so its key presence marks
+        # a defaults file as carrying the server-level capture (see ensure_defaults).
+        "instructions": instructions,
+        "server_info": server_info,
+        "capabilities": capabilities,
+        "tools": out_tools,
+    }
 
 
 def load_defaults(name: str) -> dict | None:
@@ -92,12 +118,19 @@ def save_defaults(data: dict) -> None:
 
 
 async def ensure_defaults(cfg: GatewayConfig, log, force: str | None = None) -> None:
-    """Capture defaults for any backend missing them (or *force* one by name)."""
+    """Capture defaults for any backend missing them (or *force* one by name).
+
+    A defaults file written before server-level capture lacks the ``instructions``
+    key; treat such a file as stale and re-capture it once, so old installs gain
+    instructions/serverInfo without a manual re-introspect.
+    """
     for b in cfg.backends:
         if force and b.name != force:
             continue
-        if not force and load_defaults(b.name) is not None:
-            continue
+        if not force:
+            existing = load_defaults(b.name)
+            if existing is not None and "instructions" in existing:
+                continue
         try:
             save_defaults(await capture_defaults(b))
             log.info("defaults_captured", backend=b.name)
@@ -137,6 +170,25 @@ def all_tools_from_defaults(cfg: GatewayConfig) -> dict[str, list[str]]:
         if d:
             out[b.name] = [t["original"] for t in d.get("tools", [])]
     return out
+
+
+def captured_instructions(cfg: GatewayConfig) -> dict[str, str | None]:
+    """``backend name -> its captured original server instructions (or None)``.
+    Feeds :func:`config_loader.compose_instructions` so the gateway can hand each
+    backend's always-loaded blurb back to Claude (the proxy otherwise drops it)."""
+    out: dict[str, str | None] = {}
+    for b in cfg.backends:
+        d = load_defaults(b.name)
+        out[b.name] = (d or {}).get("instructions")
+    return out
+
+
+def apply_instructions(mcp, cfg: GatewayConfig) -> str | None:
+    """Compose and set the gateway's live server-level ``instructions``.
+    Returns the composed value (for logging). Read fresh per ``initialize``."""
+    composed = cl.compose_instructions(cfg, captured_instructions(cfg))
+    mcp.instructions = composed
+    return composed
 
 
 def effective_tools(cfg: GatewayConfig) -> list[dict]:
@@ -238,10 +290,25 @@ def build_state(cfg: GatewayConfig) -> dict:
                 "stateless": b.stateless,
                 "always_load": b.always_load,
                 "introspected": defaults is not None,
+                # server-level instructions: captured original + this backend's
+                # override (None = inherit the original); plus serverInfo.
+                "default_instructions": (defaults or {}).get("instructions"),
+                "instructions": b.instructions,
+                "server_info": (defaults or {}).get("server_info"),
                 "tools": tools_state,
             }
         )
-    return {"host": cfg.host, "port": cfg.port, "backends": backends}
+    return {
+        "host": cfg.host,
+        "port": cfg.port,
+        # gateway-level instructions: the manual override (None = auto-compose)
+        # and the composed value actually broadcast to Claude (read-only preview).
+        "instructions": cfg.instructions,
+        "composed_instructions": cl.compose_instructions(
+            cfg, captured_instructions(cfg)
+        ),
+        "backends": backends,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -347,6 +414,27 @@ def apply_tool_override(cfg: GatewayConfig, backend: str, payload: dict) -> None
 # ---------------------------------------------------------------------------
 
 
+def set_instructions(cfg: GatewayConfig, backend: str | None, value) -> None:
+    """Set the gateway-level (``backend is None``) or a per-backend instructions
+    override from a UI value.
+
+    * Per-backend: diff against the captured original — empty or equal-to-default
+      inherits (stores nothing), so config stays minimal; a different value (incl.
+      one added where the backend sends none) is stored.
+    * Gateway: empty inherits (``None`` -> auto-compose from backends); any value
+      becomes the full manual override. No diff-vs-composed (the composed output
+      shifts with the backends, so freezing it on a match would surprise).
+    """
+    if backend is None:
+        cfg.instructions = _clean(value)
+        return
+    b = next((x for x in cfg.backends if x.name == backend), None)
+    if b is None:
+        raise cl.ConfigError(f"unknown backend {backend!r}")
+    default = (load_defaults(backend) or {}).get("instructions")
+    b.instructions = _override_vs_default(value, default)
+
+
 def hot_reload(mcp, cfg: GatewayConfig, holder: list, log) -> None:
     """Rebuild transforms from cfg and swap them into the live proxy in-process."""
     new_transform, _index = cl.build_transforms(cfg, all_tools_from_defaults(cfg))
@@ -358,6 +446,8 @@ def hot_reload(mcp, cfg: GatewayConfig, holder: list, log) -> None:
         holder[0] = new_transform
     else:
         holder.append(new_transform)
+    # Re-compose + set the gateway's server instructions (read per initialize).
+    apply_instructions(mcp, cfg)
     # The change is live in the gateway immediately (next tools/list reflects it).
     # FastMCP exposes no tools/list_changed helper, so an already-connected Claude
     # session refreshes on its next list / reconnect / new session.
@@ -436,6 +526,23 @@ def register(mcp, config_path: str, log, holder: list) -> None:
         cl.save(cfg, config_path)
         hot_reload(mcp, cfg, holder, log)
         return JSONResponse({"ok": True})
+
+    @mcp.custom_route("/admin/api/instructions", methods=["PUT"])
+    async def put_instructions(request: Request):
+        """Set the gateway-level (``backend`` null/absent) or a per-backend
+        server-instructions override. Hot-reloads — it only changes the blurb
+        Claude reads at initialize, no connection rebuild."""
+        payload = await request.json()
+        cfg = _load()
+        try:
+            set_instructions(cfg, payload.get("backend"), payload.get("value"))
+        except (cl.ConfigError, KeyError) as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+        backup_config(config_path)
+        cl.save(cfg, config_path)
+        hot_reload(mcp, cfg, holder, log)
+        composed = cl.compose_instructions(cfg, captured_instructions(cfg))
+        return JSONResponse({"ok": True, "composed": composed})
 
     @mcp.custom_route("/admin/api/backend/{name}/pin", methods=["POST"])
     async def pin_backend(request: Request):

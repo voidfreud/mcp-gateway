@@ -70,6 +70,16 @@
   .chk { display: flex; align-items: center; gap: 6px; color: var(--mut); font-size: 12px; user-select: none; }
   .saved { font-size: 12px; color: var(--ok); opacity: 0; transition: opacity .2s; }
   .saved.show { opacity: 1; }
+  /* instructions */
+  .instr { border: 1px solid var(--line); border-radius: 10px; margin-bottom: 18px;
+           background: var(--panel); padding: 12px 14px; }
+  .instr h3 { margin: 0 0 2px; font-size: 14px; }
+  .instr .si { color: var(--mut); font-size: 12px; font-family: ui-monospace, Menlo, monospace; }
+  .instr textarea { min-height: 90px; font-family: ui-monospace, Menlo, monospace; font-size: 12.5px; }
+  .preview { background: var(--ro); border: 1px solid var(--line); border-radius: 7px;
+             padding: 9px 11px; white-space: pre-wrap; color: var(--mut); font-size: 12px;
+             font-family: ui-monospace, Menlo, monospace; max-height: 240px; overflow-y: auto; }
+  .b-item.gw .nm { color: var(--accent); }
   /* modal */
   .modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,.55); display: none; align-items: center; justify-content: center; }
   .modal-bg.show { display: flex; }
@@ -132,6 +142,7 @@
 
 <script>
 const $ = (s, r=document) => r.querySelector(s);
+const GATEWAY = '__gateway__';  // sentinel for the gateway pseudo-item
 let STATE = null, SELECTED = null;
 const timers = {};
 
@@ -156,6 +167,14 @@ async function load() {
 function renderList() {
   const el = $('#list');
   el.innerHTML = '';
+  // Gateway pseudo-item: edit the server-level instructions Claude reads upfront.
+  const gw = document.createElement('div');
+  gw.className = 'b-item gw' + (SELECTED === GATEWAY ? ' sel' : '');
+  gw.onclick = () => { SELECTED = GATEWAY; renderList(); renderDetail(GATEWAY); };
+  const gwOverridden = STATE.instructions ? ' · custom' : '';
+  gw.innerHTML = `<div class="nm">⚙ Gateway</div>
+    <div class="meta"><span>server instructions${gwOverridden}</span></div>`;
+  el.appendChild(gw);
   STATE.backends.forEach(b => {
     const d = document.createElement('div');
     d.className = 'b-item' + (b.name === SELECTED ? ' sel' : '');
@@ -171,6 +190,7 @@ function renderList() {
 }
 
 function renderDetail(name) {
+  if (name === GATEWAY) return renderGateway();
   const b = STATE.backends.find(x => x.name === name);
   const m = $('#detail');
   const conn = b.transport === 'http' ? esc(b.url || '') : esc((b.command || '') + ' ' + (b.args || []).join(' '));
@@ -184,10 +204,68 @@ function renderDetail(name) {
       <button class="ghost" onclick="reintrospect('${esc(b.name)}')">Re-introspect</button>
       <button class="ghost danger" onclick="delBackend('${esc(b.name)}')">Remove backend</button>
     </div>
+    ${backendInstrSection(b)}
     <div id="tools"></div>`;
+  wireInstr(m, b.name, b.default_instructions);
   const tw = $('#tools', m);
   if (!b.introspected) { tw.innerHTML = '<div class="empty">Backend not introspected yet — click Re-introspect.</div>'; return; }
   b.tools.forEach(t => tw.appendChild(toolCard(b, t)));
+}
+
+// Per-backend server instructions: prefilled with the override else the captured
+// original (so it shows what flows into the gateway's composed blurb). Empty ->
+// inherit the original; if the backend sends none, the box is empty to add your own.
+function backendInstrSection(b) {
+  const eff = b.instructions ?? b.default_instructions ?? '';
+  const has = b.default_instructions != null && b.default_instructions !== '';
+  const si = b.server_info ? `${b.server_info.name} ${b.server_info.version || ''}`.trim() : '';
+  return `<div class="instr">
+    <h3>Server instructions</h3>
+    <div class="si">${si ? esc(si) + ' · ' : ''}the always-loaded blurb this MCP sends; folded into the gateway's instructions</div>
+    <textarea class="f-instr" data-default="${esc(b.default_instructions ?? '')}"
+      placeholder="${has ? '' : '(this server sends no instructions — type to add your own)'}">${esc(eff)}</textarea>
+    <div class="hint">Empty = inherit the server's original${has ? '' : ' (none)'}. Edits reload live.</div>
+  </div>`;
+}
+
+// Wire a backend's instructions textarea: debounce-save; on blur refill to the
+// original only when it HAS one (so "empty = inherit" stays reachable when none).
+function wireInstr(root, backend, def) {
+  const ta = $('.f-instr', root);
+  if (!ta) return;
+  ta.addEventListener('input', () => scheduleInstr(backend, ta));
+  ta.addEventListener('blur', () => {
+    if (ta.value.trim() === '' && def) ta.value = def;
+    flushInstr(backend, ta);
+  });
+}
+
+// Gateway pseudo-detail: the server-level instructions Claude reads at connect.
+// A read-only preview of what's broadcast now, plus a full-override textarea
+// (empty = auto-compose from the backends).
+function renderGateway() {
+  const m = $('#detail');
+  const ov = STATE.instructions ?? '';
+  const composed = STATE.composed_instructions ?? '';
+  m.innerHTML = `
+    <div class="b-head"><h2>⚙ Gateway</h2><code>server-level instructions</code></div>
+    <p class="hint" style="margin:0 0 14px">These are the <b>instructions</b> Claude reads upfront when it connects to the
+      gateway. By default they're composed from each backend's own server instructions (edit those on each MCP).
+      Override below to take full manual control.</p>
+    <div class="instr">
+      <h3>Broadcast now <span class="si">(read-only — what Claude gets)</span></h3>
+      <div class="preview">${composed ? esc(composed) : '(none — no backend sends instructions and no override set)'}</div>
+    </div>
+    <div class="instr">
+      <h3>Full override</h3>
+      <div class="si">replaces the composed text entirely</div>
+      <textarea class="f-instr" placeholder="(empty = auto-compose from the backends ↑)">${esc(ov)}</textarea>
+      <div class="hint">Empty = auto-compose. Edits reload live.</div>
+    </div>`;
+  // Gateway override: no auto-refill on blur — empty is a real state (auto-compose).
+  const ta = $('.f-instr', m);
+  ta.addEventListener('input', () => scheduleInstr(null, ta));
+  ta.addEventListener('blur', () => flushInstr(null, ta));
 }
 
 // Editable fields are PREFILLED with their effective value (override if set,
@@ -315,7 +393,37 @@ function flushSave(backend, original, card) {
 // Last-resort durability: persist any still-pending edits as the page closes.
 window.addEventListener('beforeunload', () => {
   Object.values(pending).forEach(({ backend, original, card }) => doSave(backend, original, card, true));
+  Object.values(instrPending).forEach(({ backend, ta }) => doSaveInstr(backend, ta, true));
 });
+
+// --- instructions save (gateway-level: backend === null) ------------------
+const instrPending = {};  // key -> textarea for an unsaved instructions edit
+function instrKey(backend) { return 'instr::' + (backend ?? GATEWAY); }
+
+function scheduleInstr(backend, ta) {
+  const key = instrKey(backend);
+  clearTimeout(timers[key]);
+  instrPending[key] = { backend, ta };
+  timers[key] = setTimeout(() => doSaveInstr(backend, ta), 550);
+}
+function flushInstr(backend, ta) {
+  const key = instrKey(backend);
+  if (timers[key] || instrPending[key]) doSaveInstr(backend, ta);
+}
+async function doSaveInstr(backend, ta, keepalive = false) {
+  const key = instrKey(backend);
+  clearTimeout(timers[key]); delete timers[key]; delete instrPending[key];
+  const body = JSON.stringify({ backend, value: ta.value });
+  try {
+    const r = await fetch('/admin/api/instructions',
+      { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body, keepalive });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) { toast('save failed: ' + (j.error || ('HTTP ' + r.status))); instrPending[key] = { backend, ta }; return; }
+    STATE.composed_instructions = j.composed;  // keep preview fresh
+    if (backend === null) STATE.instructions = ta.value.trim() || null;
+    flashSaved();
+  } catch (e) { toast('save failed: ' + e.message); instrPending[key] = { backend, ta }; }
+}
 
 async function resetTool(backend, original) {
   try { await api('POST', '/admin/api/reset', { backend, tool_original: original }); await load(); toast('reset to default'); }

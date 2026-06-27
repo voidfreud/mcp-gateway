@@ -155,6 +155,10 @@ async def _startup(mcp, cfg, log, holder: list) -> None:
     await _reconcile(mcp, index, log)  # pre-flight: SOURCE names, before renames
     mcp.add_transform(transforms)
     holder.append(transforms)
+    # Compose + set the gateway's server-level instructions from the backends'
+    # captured originals (the proxy would otherwise drop them). Read per initialize.
+    composed = admin.apply_instructions(mcp, cfg)
+    log.info("instructions_set", chars=len(composed) if composed else 0)
 
 
 def main() -> None:

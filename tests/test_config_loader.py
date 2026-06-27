@@ -39,6 +39,8 @@ def gw_config_dict(draw) -> dict:
         b: dict = {"name": nm, "transport": transport, "stateless": draw(st.booleans())}
         if draw(st.booleans()):
             b["always_load"] = True
+        if draw(st.booleans()):
+            b["instructions"] = draw(free_text)
         if transport == "http":
             b["url"] = draw(
                 st.sampled_from(["https://h/mcp", "http://127.0.0.1:9/mcp"])
@@ -74,12 +76,15 @@ def gw_config_dict(draw) -> dict:
         if tools:
             b["tools"] = tools
         backends.append(b)
-    return {
+    out: dict = {
         "host": "127.0.0.1",
         "port": draw(st.integers(1, 65535)),
         "log_file": "~/x.log",
         "backends": backends,
     }
+    if draw(st.booleans()):
+        out["instructions"] = draw(free_text)
+    return out
 
 
 # --- round-trip property ---------------------------------------------------
@@ -210,6 +215,74 @@ def test_per_backend_always_load_pins_all_tools():
     tr, _ = cl.build_transforms(cfg, all_tools={"b": ["t1", "t2", "t3"]})
     assert set(tr._transforms) == {"t1", "t2", "t3"}
     assert all(t.meta == cl.ALWAYS_LOAD_META for t in tr._transforms.values())
+
+
+# --- instructions composition ----------------------------------------------
+
+
+def _instr_cfg(backends, gateway_instructions=None):
+    raw = {"backends": backends}
+    if gateway_instructions is not None:
+        raw["instructions"] = gateway_instructions
+    return cl.GatewayConfig.model_validate(raw)
+
+
+def _http(name, instructions=None):
+    b = {"name": name, "transport": "http", "url": "https://h/mcp"}
+    if instructions is not None:
+        b["instructions"] = instructions
+    return b
+
+
+def test_compose_gateway_override_wins():
+    cfg = _instr_cfg([_http("a")], gateway_instructions="MANUAL")
+    # captured originals are ignored entirely when a full override is set
+    assert cl.compose_instructions(cfg, {"a": "captured"}) == "MANUAL"
+
+
+def test_compose_aggregates_captured_with_headers():
+    cfg = _instr_cfg([_http("a"), _http("b")])
+    out = cl.compose_instructions(cfg, {"a": "Use A.", "b": "Use B."})
+    assert out == "# a\n\nUse A.\n\n# b\n\nUse B."
+
+
+def test_compose_backend_override_replaces_captured():
+    cfg = _instr_cfg([_http("a", instructions="OVERRIDE A")])
+    out = cl.compose_instructions(cfg, {"a": "captured A"})
+    assert out == "OVERRIDE A"  # single source -> no header
+
+
+def test_compose_skips_backends_with_no_instructions():
+    cfg = _instr_cfg([_http("a"), _http("b")])
+    # b sends none and has no override -> only a contributes -> no header
+    assert cl.compose_instructions(cfg, {"a": "Use A.", "b": None}) == "Use A."
+
+
+def test_compose_three_backends_two_contribute_get_headers():
+    cfg = _instr_cfg([_http("a"), _http("b"), _http("c")])
+    out = cl.compose_instructions(cfg, {"a": "Use A.", "b": None, "c": "Use C."})
+    assert out == "# a\n\nUse A.\n\n# c\n\nUse C."
+
+
+def test_compose_none_when_nothing_to_say():
+    cfg = _instr_cfg([_http("a"), _http("b")])
+    assert cl.compose_instructions(cfg, {"a": None, "b": None}) is None
+
+
+def test_compose_added_instructions_where_backend_sends_none():
+    cfg = _instr_cfg([_http("a", instructions="ADDED")])
+    # default captured is None, but the override adds a blurb (single -> no header)
+    assert cl.compose_instructions(cfg, {"a": None}) == "ADDED"
+
+
+def test_instructions_survive_toml_roundtrip():
+    cfg = _instr_cfg(
+        [_http("a", instructions="line1\nline2 = ok")],
+        gateway_instructions='gw "quoted"\nblurb',
+    )
+    reparsed = cl.GatewayConfig.model_validate(tomllib.loads(cl.dump_toml(cfg)))
+    assert reparsed.instructions == cfg.instructions
+    assert reparsed.backends[0].instructions == cfg.backends[0].instructions
 
 
 # --- durable save ----------------------------------------------------------

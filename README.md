@@ -107,6 +107,17 @@ the few tools you want Claude to reach for reliably. (Per-backend pinning applie
 to every tool the backend exposes, including ones you haven't otherwise edited.)
 Pinning hot-reloads in-process. Takes effect for Claude on a fresh session.
 
+**Server instructions.** An MCP server can send a server-level `instructions`
+blurb at `initialize` — always-loaded context Claude reads upfront (e.g. "use
+this server whenever the user asks about a library"). A bare proxy **drops** it.
+The gateway captures each backend's original instructions and, by default,
+**composes** them back into its own `instructions` (one `# <backend>` section per
+contributing server; a single contributor gets no header). The **⚙ Gateway** item
+in the admin lets you see what's broadcast now and set a **full manual override**;
+each backend's detail has a **Server instructions** box to edit (or add, where the
+server sends none) its section. Empty = inherit the original / auto-compose.
+Composition hot-reloads in-process and is read fresh on each connect.
+
 **Durability.** Saves write `config.toml` atomically with `fsync` (survives an
 unexpected crash/power-loss, never a partial file), debounced ~550 ms to avoid
 overload, and flushed on field-blur and on page-close — so no edit is lost.
