@@ -123,13 +123,25 @@ async def _reconcile(mcp: FastMCP, index: dict[str, str], log) -> None:
 
 
 def build():
-    """Construct the proxy (create_proxy + middleware + health). Returns
-    (mcp, cfg, log). Transforms are built and applied later in `_startup`, after
-    defaults are captured (so a per-backend always_load can see the tool list)."""
+    """Load config + logging and decide the session strategy. Returns
+    (cfg, log, proxy_cfg, persistent). The proxy is assembled in `_assemble`:
+    a persistent backend must be created from an already-connected Client
+    (see `main`), so it cannot be constructed here."""
     cfg = config_loader.load(CONFIG_PATH)
     log = _configure_logging(cfg.log_file)
+    proxy_cfg = config_loader.to_proxy_config(cfg)
+    # stateless=false → keep ONE warm backend session for the daemon's lifetime
+    # instead of FastMCP's default per-request session, which over HTTP spawns a
+    # fresh stdio subprocess on every call (the gitnexus respawn — issue #8).
+    persistent = any(not b.stateless for b in cfg.backends)
+    return cfg, log, proxy_cfg, persistent
 
-    mcp = create_proxy(config_loader.to_proxy_config(cfg), name="mcp-gateway")
+
+def _assemble(target, cfg, log):
+    """create_proxy(target) + middleware + health. `target` is the config dict
+    (fresh per-request sessions) or an already-connected Client (one reused
+    session for every call). Transforms are applied later in `_startup`."""
+    mcp = create_proxy(target, name="mcp-gateway")
     mcp.add_middleware(CallLogMiddleware(log))
 
     @mcp.custom_route("/health", methods=["GET"])
@@ -141,8 +153,9 @@ def build():
         backends=[b.name for b in cfg.backends],
         host=cfg.host,
         port=cfg.port,
+        persistent=any(not b.stateless for b in cfg.backends),
     )
-    return mcp, cfg, log
+    return mcp
 
 
 async def _startup(mcp, cfg, log, holder: list) -> None:
@@ -161,20 +174,37 @@ async def _startup(mcp, cfg, log, holder: list) -> None:
     log.info("instructions_set", chars=len(composed) if composed else 0)
 
 
-def main() -> None:
-    import anyio
-
-    mcp, cfg, log = build()
-    holder: list = []
-    anyio.run(_startup, mcp, cfg, log, holder)
+async def _serve(mcp, cfg, log, holder: list) -> None:
+    """Startup (defaults → transforms → reconcile), register admin, run http."""
+    await _startup(mcp, cfg, log, holder)
     admin.register(mcp, CONFIG_PATH, log, holder)
-
     log.info(
         "gateway_starting",
         mcp=f"http://{cfg.host}:{cfg.port}/mcp",
         admin=f"http://{cfg.host}:{cfg.port}/admin",
     )
-    mcp.run(transport="http", host=cfg.host, port=cfg.port)
+    await mcp.run_async(transport="http", host=cfg.host, port=cfg.port)
+
+
+def main() -> None:
+    import anyio
+
+    cfg, log, proxy_cfg, persistent = build()
+
+    async def _run() -> None:
+        holder: list = []
+        if persistent:
+            # One backend client, connected for the whole daemon lifetime, so a
+            # stateless=false backend (gitnexus) is spawned once and reused
+            # across every call instead of cold-starting per request.
+            async with Client(proxy_cfg) as backend_client:
+                mcp = _assemble(backend_client, cfg, log)
+                await _serve(mcp, cfg, log, holder)
+        else:
+            mcp = _assemble(proxy_cfg, cfg, log)
+            await _serve(mcp, cfg, log, holder)
+
+    anyio.run(_run)
 
 
 if __name__ == "__main__":
