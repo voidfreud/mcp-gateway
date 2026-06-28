@@ -216,4 +216,4 @@ tier-2 optimization — add it only if per-call latency bothers you.
 
 ## Out of scope (parked for later)
 
-> Migrated to GitHub Issues — 2026-06-28. See [#12](https://github.com/voidfreud/mcp-gateway/issues/12), [#13](https://github.com/voidfreud/mcp-gateway/issues/13), [#14](https://github.com/voidfreud/mcp-gateway/issues/14), [#15](https://github.com/voidfreud/mcp-gateway/issues/15), [#17](https://github.com/voidfreud/mcp-gateway/issues/17), [#18](https://github.com/voidfreud/mcp-gateway/issues/18).
+> Migrated to GitHub Issues — 2026-06-28. [#12 tool search / deferred loading](https://github.com/voidfreud/mcp-gateway/issues/12) · [#13 code mode](https://github.com/voidfreud/mcp-gateway/issues/13) · [#14 multi-backend composite tools](https://github.com/voidfreud/mcp-gateway/issues/14) · [#15 resource / prompt text rewriting](https://github.com/voidfreud/mcp-gateway/issues/15) · [#17 LLM-generated descriptions](https://github.com/voidfreud/mcp-gateway/issues/17) · [#18 public exposure + bearer auth](https://github.com/voidfreud/mcp-gateway/issues/18). See the project spec's appendix for the longer-form rationale.
