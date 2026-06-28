@@ -184,8 +184,7 @@ no backend exposes (catches typos).
 
 - Binds `127.0.0.1` only — never `0.0.0.0`. Nothing off-machine can reach it.
 - Any local process could hit the port; on a single-user Mac this is a non-issue.
-  For belt-and-suspenders, require a bearer token on the gateway and pass it from
-  Claude Code with `-H "Authorization: Bearer ..."`.
+  > Optional bearer-token requirement on the loopback is tracked at [#26](https://github.com/voidfreud/mcp-gateway/issues/26).
 - Keep dangerous backend tools disabled via `enabled = false`.
 
 ## Operations
@@ -206,8 +205,7 @@ context mixing in concurrent scenarios` at INFO. For this gateway it is benign:
 the top-level factory creates a fresh session per request, backends here carry no
 per-request user secrets, and a stdio backend stays one resident subprocess by
 design. It is quieted to WARNING in the daemon (`FASTMCP_LOG_LEVEL=WARNING`).
-**Revisit** only if you add a backend that forwards per-user auth from the
-incoming request — then per-session isolation matters.
+> Per-session-isolation tripwire tracked at [#25](https://github.com/voidfreud/mcp-gateway/issues/25).
 
 ## Session strategy (efficiency)
 
@@ -218,6 +216,4 @@ tier-2 optimization — add it only if per-call latency bothers you.
 
 ## Out of scope (parked for later)
 
-On-demand tool search / deferred loading, code mode, multi-backend composite
-tools, resource/prompt text rewriting, LLM-generated descriptions, public
-exposure. See the project spec's appendix.
+> Migrated to GitHub Issues — 2026-06-28. See [#12](https://github.com/voidfreud/mcp-gateway/issues/12), [#13](https://github.com/voidfreud/mcp-gateway/issues/13), [#14](https://github.com/voidfreud/mcp-gateway/issues/14), [#15](https://github.com/voidfreud/mcp-gateway/issues/15), [#17](https://github.com/voidfreud/mcp-gateway/issues/17), [#18](https://github.com/voidfreud/mcp-gateway/issues/18).

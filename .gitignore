@@ -17,3 +17,4 @@ state/
 # Live, runtime-managed config (the admin regenerates it). Seeded from
 # config.default.toml on first run. config.example.toml is the schema reference.
 config.toml
+claude-design/
