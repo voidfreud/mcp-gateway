@@ -1,23 +1,30 @@
-"""End-to-end verification against the running gateway.
+"""End-to-end verification against the running gateway (per-backend endpoints).
 
-The seed config ships both backends as PASSTHROUGH (no overrides), so this
-asserts that every backend tool reaches Claude under its original (prefixed)
-name with its original params, and that a real call forwards correctly. (When
-you add overrides in config.toml / the admin UI, extend these assertions.)
+Each backend is exposed on its OWN endpoint (``/<backend>/mcp``) as its own MCP
+server, with BARE tool names and its OWN server instructions — its own ~2KB
+budget (issue #29). This enumerates backends from ``/admin/api/state``, then for
+each endpoint asserts: it is reachable, every enabled tool is exposed under its
+effective (bare) name, and its instructions are within the 2KB budget. A
+passthrough call on deepwiki (if present) proves calls forward end to end.
 
-Usage:  uv run verify_rename.py [http://127.0.0.1:9100/mcp]
+Usage:  uv run verify_rename.py [http://127.0.0.1:9100]
 Exits non-zero on the first failed assertion.
 """
 
 from __future__ import annotations
 
+import json
 import sys
+import urllib.request
 
 import anyio
 
 from fastmcp import Client
 
-URL = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:9100/mcp"
+BASE = (sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:9100").rstrip("/")
+# Tolerate the old single-endpoint form (…/mcp): strip it back to the base.
+if BASE.endswith("/mcp"):
+    BASE = BASE[: -len("/mcp")]
 
 checks: list[tuple[bool, str]] = []
 
@@ -27,63 +34,70 @@ def check(ok: bool, label: str) -> None:
     print(f"  {'PASS' if ok else 'FAIL'}  {label}")
 
 
+def _get_json(url: str) -> dict:
+    with urllib.request.urlopen(url, timeout=10) as r:  # noqa: S310 (loopback only)
+        return json.loads(r.read())
+
+
 async def main() -> int:
-    async with Client(URL) as c:
-        tools = {t.name: t for t in await c.list_tools()}
-    names = set(tools)
-    print(f"gateway exposes {len(names)} tools: {sorted(names)}\n")
+    state = _get_json(f"{BASE}/admin/api/state")
+    backends = state["backends"]
+    print(f"gateway has {len(backends)} endpoint(s): {[b['name'] for b in backends]}\n")
+    check(len(backends) > 0, "at least one backend endpoint")
 
-    # --- gitnexus is PASSTHROUGH (no overrides) — original names reach Claude ---
-    check(
-        "gitnexus_query" in names,
-        "gitnexus passthrough: 'gitnexus_query' present (original)",
-    )
-    check(
-        "gitnexus_list_repos" in names,
-        "gitnexus passthrough: 'gitnexus_list_repos' present",
-    )
-    if "gitnexus_query" in names:
-        props = (tools["gitnexus_query"].inputSchema or {}).get("properties", {})
+    deepwiki = None
+    for b in backends:
+        name = b["name"]
+        url = f"{BASE}{b['endpoint']}"
+        if name == "deepwiki":
+            deepwiki = b
+        try:
+            async with Client(url) as c:
+                exposed = {t.name for t in await c.list_tools()}
+                instr = c.initialize_result.instructions or ""
+        except Exception as exc:  # noqa: BLE001
+            check(False, f"{name}: endpoint {url} reachable ({exc})")
+            continue
+        check(True, f"{name}: endpoint {url} reachable")
+
+        # Every ENABLED tool is exposed under its effective name, which is BARE
+        # (no '<backend>_' prefix) — each backend is its own endpoint now (#29).
+        expected = {
+            (t.get("name") or t["original"])
+            for t in b["tools"]
+            if t.get("enabled", True)
+        }
+        missing = expected - exposed
         check(
-            "task_context" in props,
-            "gitnexus passthrough: original param 'task_context' intact",
+            not missing, f"{name}: all enabled tools exposed (bare); missing={missing}"
         )
-
-    # --- deepwiki is PASSTHROUGH (no overrides) — original names reach Claude ---
-    check(
-        "deepwiki_ask_question" in names,
-        "deepwiki passthrough: 'deepwiki_ask_question' present (original)",
-    )
-    check(
-        "deepwiki_read_wiki_structure" in names,
-        "deepwiki passthrough: 'read_wiki_structure' present (not disabled)",
-    )
-    if "deepwiki_ask_question" in names:
-        props = (tools["deepwiki_ask_question"].inputSchema or {}).get("properties", {})
         check(
-            "repoName" in props,
-            "deepwiki passthrough: original param 'repoName' intact",
+            all(not t.startswith(f"{name}_") for t in exposed),
+            f"{name}: no '<backend>_' prefix on exposed names: {sorted(exposed)[:4]}",
         )
 
-    # --- passthrough call with ORIGINAL names proves the gateway forwards calls ---
-    print(
-        "\npassthrough call: deepwiki_ask_question(repoName=prefecthq/fastmcp, question=...)"
-    )
-    async with Client(URL) as c:
-        res = await c.call_tool(
-            "deepwiki_ask_question",
-            {
-                "repoName": "prefecthq/fastmcp",
-                "question": "What transport does the proxy use?",
-            },
+        # #29: this endpoint carries only its OWN instructions, within the 2KB cap.
+        nbytes = len(instr.encode("utf-8"))
+        check(nbytes <= 2048, f"{name}: instructions within 2KB budget ({nbytes} B)")
+
+    # Passthrough call (bare name) on deepwiki, if present — proves forwarding.
+    if deepwiki is not None:
+        print(
+            "\npassthrough call: deepwiki ask_question(repoName=prefecthq/fastmcp, …)"
         )
-    text = ""
-    for block in res.content:
-        text += getattr(block, "text", "")
-    ok = len(text.strip()) > 0
-    check(ok, "passthrough returned a real backend answer")
-    if ok:
-        print(f"\n  answer (first 200 chars): {text.strip()[:200]}...")
+        async with Client(f"{BASE}{deepwiki['endpoint']}") as c:
+            res = await c.call_tool(
+                "ask_question",
+                {
+                    "repoName": "prefecthq/fastmcp",
+                    "question": "What transport does the proxy use?",
+                },
+            )
+        text = "".join(getattr(block, "text", "") for block in res.content)
+        ok = len(text.strip()) > 0
+        check(ok, "deepwiki passthrough returned a real backend answer")
+        if ok:
+            print(f"\n  answer (first 200 chars): {text.strip()[:200]}...")
 
     failed = [label for ok, label in checks if not ok]
     print(f"\n{'=' * 60}")

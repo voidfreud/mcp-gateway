@@ -132,10 +132,6 @@ class GatewayConfig(BaseModel, extra="forbid"):
     host: str = "127.0.0.1"
     port: int = 9100
     log_file: str = "~/.local/state/mcp-gateway/gateway.log"
-    # Full manual override of the gateway's server-level `instructions`. None ->
-    # auto-compose from each backend's effective instructions (see
-    # `compose_instructions`); a string replaces the whole composed blob.
-    instructions: str | None = None
     backends: list[Backend] = Field(default_factory=list)
 
     @model_validator(mode="after")
@@ -186,30 +182,46 @@ def load(path: str | Path) -> GatewayConfig:
 
 
 def exposed_name(cfg: GatewayConfig, backend: Backend, original: str) -> str:
-    """The name FastMCP exposes a backend tool under.
+    """The name a backend tool is exposed under on its own endpoint.
 
-    Single backend -> bare name; multiple backends -> ``<backend>_<original>``.
-    This is the key a tool transform must use.
+    Each backend is proxied alone on its own path (``/<backend>/mcp``) and
+    registered as its own MCP server in Claude Code, so tools keep their BARE
+    original name. The old ``<backend>_`` prefix only existed to disambiguate
+    tools inside one shared multi-backend proxy; with per-backend endpoints the
+    endpoint/server registration provides the namespace, so the prefix is gone.
+
+    (``cfg``/``backend`` are kept in the signature so the admin's call sites stay
+    stable while the prefix rule is centralised here.)
     """
-    if len(cfg.backends) > 1:
-        return f"{backend.name}_{original}"
     return original
 
 
+def backend_entry(b: Backend) -> dict:
+    """The FastMCP client-config entry for one backend (url/headers or command/env)."""
+    if b.transport == "http":
+        entry: dict = {"url": expand_env(b.url or ""), "transport": "http"}
+        if b.auth_header and b.auth_value:
+            entry["headers"] = {b.auth_header: expand_env(b.auth_value)}
+    else:
+        entry = {"command": b.command, "args": list(b.args), "transport": "stdio"}
+        if b.env:
+            entry["env"] = {k: expand_env(v) for k, v in b.env.items()}
+    return entry
+
+
+def to_proxy_config_one(b: Backend) -> dict:
+    """Single-backend proxy config (``{"mcpServers": {b.name: ...}}``).
+
+    The live server builds ONE proxy per backend from this, so each backend is
+    its own MCP endpoint and its tools come back un-prefixed (bare names).
+    """
+    return {"mcpServers": {b.name: backend_entry(b)}}
+
+
 def to_proxy_config(cfg: GatewayConfig) -> dict:
-    """Build the FastMCP ``{"mcpServers": {...}}`` dict for ``create_proxy``."""
-    servers: dict[str, dict] = {}
-    for b in cfg.backends:
-        if b.transport == "http":
-            entry: dict = {"url": expand_env(b.url or ""), "transport": "http"}
-            if b.auth_header and b.auth_value:
-                entry["headers"] = {b.auth_header: expand_env(b.auth_value)}
-        else:
-            entry = {"command": b.command, "args": list(b.args), "transport": "stdio"}
-            if b.env:
-                entry["env"] = {k: expand_env(v) for k, v in b.env.items()}
-        servers[b.name] = entry
-    return {"mcpServers": servers}
+    """All-backends proxy config. Kept for tooling/tests; the live server now
+    builds one single-backend proxy per backend via :func:`to_proxy_config_one`."""
+    return {"mcpServers": {b.name: backend_entry(b) for b in cfg.backends}}
 
 
 # Tool `_meta` hint that exempts a tool from Claude Code's tool-search deferral
@@ -218,13 +230,17 @@ ALWAYS_LOAD_META = {"anthropic/alwaysLoad": True}
 
 
 def build_transforms(
-    cfg: GatewayConfig, all_tools: dict[str, list[str]] | None = None
+    cfg: GatewayConfig,
+    backend: Backend,
+    all_tools: dict[str, list[str]] | None = None,
 ) -> tuple[ToolTransform, dict[str, str]]:
-    """Build the ``ToolTransform`` plus a ``{exposed_name: backend}`` index.
+    """Build the ``ToolTransform`` for ONE *backend*'s endpoint, plus a
+    ``{tool_name: backend}`` index for the startup reconcile.
 
-    The index lets the server reconcile configured tools against the live tool
-    list at startup and warn on any name that does not match a real backend
-    tool (a typo in ``original``).
+    Each backend is proxied alone, so transform keys are the BARE tool names
+    (no ``<backend>_`` prefix). The index lets the server reconcile configured
+    tools against the live tool list at startup and warn on any name that does
+    not match a real backend tool (a typo in ``original``).
 
     *all_tools* maps ``backend name -> [original tool names]`` (from captured
     defaults). It is needed only to apply a **per-backend** ``always_load`` to
@@ -232,71 +248,60 @@ def build_transforms(
     """
     transforms: dict[str, ToolTransformConfig] = {}
     index: dict[str, str] = {}
-    for b in cfg.backends:
-        for tool in b.tools:
-            key = exposed_name(cfg, b, tool.original)
-            index[key] = b.name
-            arguments: dict[str, ArgTransformConfig] = {}
-            for param in tool.params:
-                arg_kwargs: dict = {"hide": param.hide}
-                if param.name is not None:
-                    arg_kwargs["name"] = param.name
-                if param.description is not None:
-                    arg_kwargs["description"] = param.description
-                arguments[param.original] = ArgTransformConfig(**arg_kwargs)
+    b = backend
+    for tool in b.tools:
+        key = tool.original
+        index[key] = b.name
+        arguments: dict[str, ArgTransformConfig] = {}
+        for param in tool.params:
+            arg_kwargs: dict = {"hide": param.hide}
+            if param.name is not None:
+                arg_kwargs["name"] = param.name
+            if param.description is not None:
+                arg_kwargs["description"] = param.description
+            arguments[param.original] = ArgTransformConfig(**arg_kwargs)
 
-            tc_kwargs: dict = {"enabled": tool.enabled}
-            if tool.name is not None:
-                tc_kwargs["name"] = tool.name
-            if tool.title is not None:
-                tc_kwargs["title"] = tool.title
-            if tool.description is not None:
-                tc_kwargs["description"] = tool.description
-            if arguments:
-                tc_kwargs["arguments"] = arguments
-            if tool.always_load or b.always_load:
-                tc_kwargs["meta"] = dict(ALWAYS_LOAD_META)
-            transforms[key] = ToolTransformConfig(**tc_kwargs)
+        tc_kwargs: dict = {"enabled": tool.enabled}
+        if tool.name is not None:
+            tc_kwargs["name"] = tool.name
+        if tool.title is not None:
+            tc_kwargs["title"] = tool.title
+        if tool.description is not None:
+            tc_kwargs["description"] = tool.description
+        if arguments:
+            tc_kwargs["arguments"] = arguments
+        if tool.always_load or b.always_load:
+            tc_kwargs["meta"] = dict(ALWAYS_LOAD_META)
+        transforms[key] = ToolTransformConfig(**tc_kwargs)
 
-        # Per-backend always_load: also pin tools that have no override entry.
-        if b.always_load and all_tools and b.name in all_tools:
-            for original in all_tools[b.name]:
-                key = exposed_name(cfg, b, original)
-                if key not in transforms:
-                    transforms[key] = ToolTransformConfig(
-                        enabled=True, meta=dict(ALWAYS_LOAD_META)
-                    )
-                    index[key] = b.name
+    # Per-backend always_load: also pin tools that have no override entry.
+    if b.always_load and all_tools and b.name in all_tools:
+        for original in all_tools[b.name]:
+            if original not in transforms:
+                transforms[original] = ToolTransformConfig(
+                    enabled=True, meta=dict(ALWAYS_LOAD_META)
+                )
+                index[original] = b.name
     return ToolTransform(transforms), index
 
 
-def compose_instructions(
-    cfg: GatewayConfig, captured: dict[str, str | None]
+def backend_instructions(
+    backend: Backend, captured: dict[str, str | None]
 ) -> str | None:
-    """The gateway's effective server-level ``instructions``.
+    """The server-level ``instructions`` for ONE backend's endpoint.
 
-    A backend's server ``instructions`` (the always-loaded blurb it sends at
-    ``initialize``) are otherwise dropped by the proxy. This composes them back:
-
-    * If ``cfg.instructions`` is set, it is the entire result (full manual control).
-    * Otherwise aggregate each backend's *effective* instructions — its override
-      (``Backend.instructions``) if set, else the captured original from
-      *captured* (``backend name -> original instructions or None``) — under a
-      ``# <backend>`` header, in config order. Backends with no instructions are
-      skipped. Returns ``None`` if nothing to say (so the gateway stays silent).
+    Its override (``Backend.instructions``) if set, else the captured original;
+    ``None`` if neither (the endpoint stays silent). Because each backend is now
+    its own MCP endpoint, it carries only its own blurb — so each gets Claude
+    Code's full per-server ~2KB instructions budget instead of all backends
+    sharing one (issue #29).
     """
-    if cfg.instructions is not None:
-        return cfg.instructions
-    parts: list[tuple[str, str]] = []
-    for b in cfg.backends:
-        eff = b.instructions if b.instructions is not None else captured.get(b.name)
-        if eff and eff.strip():
-            parts.append((b.name, eff.strip()))
-    if not parts:
-        return None
-    if len(parts) == 1:
-        return parts[0][1]  # single source -> no header needed
-    return "\n\n".join(f"# {name}\n\n{text}" for name, text in parts)
+    eff = (
+        backend.instructions
+        if backend.instructions is not None
+        else captured.get(backend.name)
+    )
+    return eff.strip() if (eff and eff.strip()) else None
 
 
 def to_raw(cfg: GatewayConfig) -> dict:
@@ -357,8 +362,6 @@ def to_raw(cfg: GatewayConfig) -> dict:
         "port": cfg.port,
         "log_file": cfg.log_file,
     }
-    if cfg.instructions is not None:
-        out["instructions"] = cfg.instructions
     out["backends"] = [_backend(b) for b in cfg.backends]
     return out
 
