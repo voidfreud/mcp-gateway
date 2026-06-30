@@ -416,6 +416,30 @@ def test_duplicate_description_rejected(defaults_dir):
         )
 
 
+def test_cross_backend_same_broadcast_name_ok(defaults_dir):
+    # Two backends, each its own endpoint/MCP server now: renaming one backend's
+    # tool to match a tool name in ANOTHER backend must NOT collide.
+    _write_defaults_multi(defaults_dir, "b1", [("t1", "d1")])
+    _write_defaults_multi(defaults_dir, "b2", [("shared", "d2")])
+    cfg = cl.GatewayConfig.model_validate(
+        {
+            "backends": [
+                {"name": "b1", "transport": "stdio", "command": "/bin/x"},
+                {"name": "b2", "transport": "stdio", "command": "/bin/x"},
+            ]
+        }
+    )
+    admin.apply_tool_override(
+        cfg,
+        "b1",
+        {
+            "tool_original": "t1",
+            "override": {"name": "shared", "enabled": True, "params": []},
+        },
+    )
+    assert cfg.backends[0].tools[0].name == "shared"
+
+
 # --- instructions overrides (set_instructions) -----------------------------
 
 
@@ -430,19 +454,6 @@ def _write_defaults_instr(d, backend, instructions):
             }
         )
     )
-
-
-def test_gateway_instructions_value_stored(defaults_dir):
-    cfg = _single_cfg()
-    admin.set_instructions(cfg, None, "MANUAL BLURB")
-    assert cfg.instructions == "MANUAL BLURB"
-
-
-def test_gateway_instructions_empty_clears(defaults_dir):
-    cfg = _single_cfg()
-    cfg.instructions = "old"
-    admin.set_instructions(cfg, None, "   ")  # whitespace -> auto-compose
-    assert cfg.instructions is None
 
 
 def test_backend_instructions_equal_to_default_inherits(defaults_dir):
@@ -489,9 +500,6 @@ def test_build_state_surfaces_instructions(defaults_dir):
     assert bs["default_instructions"] == "ORIGINAL BLURB"
     assert bs["instructions"] == "EDITED BLURB"
     assert bs["server_info"] == {"name": "b", "version": "1.0"}
-    # gateway composes from the override
-    assert state["composed_instructions"] == "EDITED BLURB"
-    assert state["instructions"] is None
 
 
 # --- build_state merge -----------------------------------------------------
@@ -524,3 +532,9 @@ def test_build_state_merges_defaults_and_override(defaults_dir):
     assert tool["name"] == "renamed"  # override surfaced
     assert tool["default_description"] == "orig desc"
     assert tool["params"][0]["default_name"] == "p"
+
+
+def test_build_state_includes_endpoint(defaults_dir):
+    _write_defaults(defaults_dir, "b", "t")
+    cfg = _single_cfg()
+    assert admin.build_state(cfg)["backends"][0]["endpoint"] == "/b/mcp"

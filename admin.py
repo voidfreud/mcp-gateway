@@ -23,6 +23,7 @@ from pathlib import Path
 from starlette.background import BackgroundTask
 from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse
+from starlette.routing import Route
 
 from fastmcp import Client
 
@@ -182,8 +183,8 @@ def all_tools_from_defaults(cfg: GatewayConfig) -> dict[str, list[str]]:
 
 def captured_instructions(cfg: GatewayConfig) -> dict[str, str | None]:
     """``backend name -> its captured original server instructions (or None)``.
-    Feeds :func:`config_loader.compose_instructions` so the gateway can hand each
-    backend's always-loaded blurb back to Claude (the proxy otherwise drops it)."""
+    Feeds :func:`config_loader.backend_instructions` so each backend endpoint can
+    hand its always-loaded blurb back to Claude (the proxy otherwise drops it)."""
     out: dict[str, str | None] = {}
     for b in cfg.backends:
         d = load_defaults(b.name)
@@ -191,12 +192,13 @@ def captured_instructions(cfg: GatewayConfig) -> dict[str, str | None]:
     return out
 
 
-def apply_instructions(mcp, cfg: GatewayConfig) -> str | None:
-    """Compose and set the gateway's live server-level ``instructions``.
-    Returns the composed value (for logging). Read fresh per ``initialize``."""
-    composed = cl.compose_instructions(cfg, captured_instructions(cfg))
-    mcp.instructions = composed
-    return composed
+def apply_backend_instructions(proxy, cfg: GatewayConfig, b: Backend) -> str | None:
+    """(Re)set one backend proxy's live server-level ``instructions`` from its
+    effective blurb (override else captured original). Each backend endpoint
+    carries only its own, so each keeps Claude Code's full per-server budget."""
+    instr = cl.backend_instructions(b, captured_instructions(cfg))
+    proxy.instructions = instr
+    return instr
 
 
 def effective_tools(cfg: GatewayConfig) -> list[dict]:
@@ -231,7 +233,12 @@ def check_no_collision(
     b = next(x for x in cfg.backends if x.name == backend)
     eff_name = new.name or cl.exposed_name(cfg, b, original)
     for other in effective_tools(cfg):
-        if other["backend"] == backend and other["original"] == original:
+        # Each backend is its own endpoint/MCP server now, so broadcast names
+        # only need to be unique WITHIN a backend — a clash across backends can't
+        # confuse Claude (different server namespaces).
+        if other["backend"] != backend:
+            continue
+        if other["original"] == original:
             continue
         if other["name"] == eff_name:
             raise cl.ConfigError(
@@ -292,6 +299,7 @@ def build_state(cfg: GatewayConfig) -> dict:
         backends.append(
             {
                 "name": b.name,
+                "endpoint": f"/{b.name}/mcp",
                 "transport": b.transport,
                 "url": b.url,
                 "command": b.command,
@@ -312,12 +320,9 @@ def build_state(cfg: GatewayConfig) -> dict:
     return {
         "host": cfg.host,
         "port": cfg.port,
-        # gateway-level instructions: the manual override (None = auto-compose)
-        # and the composed value actually broadcast to Claude (read-only preview).
-        "instructions": cfg.instructions,
-        "composed_instructions": cl.compose_instructions(
-            cfg, captured_instructions(cfg)
-        ),
+        # Each backend is its own MCP endpoint with its own instructions now (no
+        # single cross-backend "gateway instructions"); the UI shows an endpoints
+        # overview + per-backend server-instructions editing.
         "backends": backends,
     }
 
@@ -433,20 +438,13 @@ def apply_tool_override(cfg: GatewayConfig, backend: str, payload: dict) -> None
 # ---------------------------------------------------------------------------
 
 
-def set_instructions(cfg: GatewayConfig, backend: str | None, value) -> None:
-    """Set the gateway-level (``backend is None``) or a per-backend instructions
-    override from a UI value.
+def set_instructions(cfg: GatewayConfig, backend: str, value) -> None:
+    """Set a per-backend server-instructions override from a UI value.
 
-    * Per-backend: diff against the captured original — empty or equal-to-default
-      inherits (stores nothing), so config stays minimal; a different value (incl.
-      one added where the backend sends none) is stored.
-    * Gateway: empty inherits (``None`` -> auto-compose from backends); any value
-      becomes the full manual override. No diff-vs-composed (the composed output
-      shifts with the backends, so freezing it on a match would surprise).
+    Diff against the captured original — empty or equal-to-default inherits
+    (stores nothing), so config stays minimal; a different value (incl. one added
+    where the backend sends none) is stored.
     """
-    if backend is None:
-        cfg.instructions = _clean(value)
-        return
     b = next((x for x in cfg.backends if x.name == backend), None)
     if b is None:
         raise cl.ConfigError(f"unknown backend {backend!r}")
@@ -454,23 +452,31 @@ def set_instructions(cfg: GatewayConfig, backend: str | None, value) -> None:
     b.instructions = _override_vs_default(value, default)
 
 
-def hot_reload(mcp, cfg: GatewayConfig, holder: list, log) -> None:
-    """Rebuild transforms from cfg and swap them into the live proxy in-process."""
-    new_transform, _index = cl.build_transforms(cfg, all_tools_from_defaults(cfg))
+def hot_reload(
+    registry: dict, holders: dict, cfg: GatewayConfig, backend: str, log
+) -> None:
+    """Rebuild ONE backend's transforms from cfg and swap them into its live
+    proxy in-process (no restart); also re-set that backend's instructions.
+
+    ``registry`` maps backend name -> live proxy, ``holders`` maps backend name
+    -> [current transform]; both are populated by the server lifespan."""
+    b = next((x for x in cfg.backends if x.name == backend), None)
+    proxy = registry.get(backend)
+    if b is None or proxy is None:
+        log.warning("hot_reload_skipped", backend=backend)
+        return
+    new_transform, _index = cl.build_transforms(cfg, b, all_tools_from_defaults(cfg))
+    holder = holders.get(backend) or []
     old = holder[0] if holder else None
-    if old is not None and old in mcp._transforms:
-        mcp._transforms.remove(old)
-    mcp.add_transform(new_transform)
-    if holder:
-        holder[0] = new_transform
-    else:
-        holder.append(new_transform)
-    # Re-compose + set the gateway's server instructions (read per initialize).
-    apply_instructions(mcp, cfg)
-    # The change is live in the gateway immediately (next tools/list reflects it).
-    # FastMCP exposes no tools/list_changed helper, so an already-connected Claude
-    # session refreshes on its next list / reconnect / new session.
-    log.info("hot_reload", backends=[b.name for b in cfg.backends])
+    if old is not None and old in proxy._transforms:
+        proxy._transforms.remove(old)
+    proxy.add_transform(new_transform)
+    holders[backend] = [new_transform]
+    apply_backend_instructions(proxy, cfg, b)
+    # Live immediately (next tools/list reflects it). FastMCP has no
+    # tools/list_changed helper, so a connected Claude session refreshes on its
+    # next list / reconnect / new session.
+    log.info("hot_reload", backend=backend)
 
 
 def restart_daemon(log) -> None:
@@ -503,21 +509,23 @@ def restart_daemon(log) -> None:
 # ---------------------------------------------------------------------------
 
 
-def register(mcp, config_path: str, log, holder: list) -> None:
-    """Attach the admin UI + API routes to the FastMCP server's HTTP app."""
+def register(app, config_path: str, log, registry: dict, holders: dict) -> None:
+    """Attach the admin UI + API routes to the parent Starlette *app*.
+
+    ``registry`` (backend name -> live proxy) and ``holders`` (backend name ->
+    [current transform]) are populated during the server lifespan and shared by
+    reference, so hot-reload targets the right backend's live proxy.
+    """
 
     def _load() -> GatewayConfig:
         return cl.load(config_path)
 
-    @mcp.custom_route("/admin", methods=["GET"])
     async def admin_page(_request: Request):
         return FileResponse(HERE / "admin.html")
 
-    @mcp.custom_route("/admin/api/state", methods=["GET"])
     async def get_state(_request: Request):
         return JSONResponse(build_state(_load()))
 
-    @mcp.custom_route("/admin/api/override", methods=["PUT"])
     async def put_override(request: Request):
         payload = await request.json()
         cfg = _load()
@@ -527,10 +535,9 @@ def register(mcp, config_path: str, log, holder: list) -> None:
             return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
         backup_config(config_path)
         cl.save(cfg, config_path)
-        hot_reload(mcp, cfg, holder, log)
+        hot_reload(registry, holders, cfg, payload["backend"], log)
         return JSONResponse({"ok": True, "reloaded": "in-process"})
 
-    @mcp.custom_route("/admin/api/reset", methods=["POST"])
     async def reset_tool(request: Request):
         """Clear all overrides for one tool (revert to the backend default)."""
         payload = await request.json()
@@ -543,27 +550,26 @@ def register(mcp, config_path: str, log, holder: list) -> None:
         b.tools = [t for t in b.tools if t.original != payload["tool_original"]]
         backup_config(config_path)
         cl.save(cfg, config_path)
-        hot_reload(mcp, cfg, holder, log)
+        hot_reload(registry, holders, cfg, payload["backend"], log)
         return JSONResponse({"ok": True})
 
-    @mcp.custom_route("/admin/api/instructions", methods=["PUT"])
     async def put_instructions(request: Request):
-        """Set the gateway-level (``backend`` null/absent) or a per-backend
-        server-instructions override. Hot-reloads — it only changes the blurb
-        Claude reads at initialize, no connection rebuild."""
+        """Set a per-backend server-instructions override (``backend`` = name).
+        Hot-reloads that backend's endpoint — it only changes the blurb Claude
+        reads at initialize, no connection rebuild."""
         payload = await request.json()
         cfg = _load()
+        backend = payload.get("backend")
         try:
-            set_instructions(cfg, payload.get("backend"), payload.get("value"))
+            set_instructions(cfg, backend, payload.get("value"))
         except (cl.ConfigError, KeyError) as exc:
             return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
         backup_config(config_path)
         cl.save(cfg, config_path)
-        hot_reload(mcp, cfg, holder, log)
-        composed = cl.compose_instructions(cfg, captured_instructions(cfg))
-        return JSONResponse({"ok": True, "composed": composed})
+        if backend is not None:
+            hot_reload(registry, holders, cfg, backend, log)
+        return JSONResponse({"ok": True})
 
-    @mcp.custom_route("/admin/api/backend/{name}/pin", methods=["POST"])
     async def pin_backend(request: Request):
         """Toggle per-backend always_load (pin all its tools upfront). Hot-reload —
         it only adds `_meta`, no connection change."""
@@ -578,10 +584,9 @@ def register(mcp, config_path: str, log, holder: list) -> None:
         b.always_load = bool(payload.get("value", False))
         backup_config(config_path)
         cl.save(cfg, config_path)
-        hot_reload(mcp, cfg, holder, log)
+        hot_reload(registry, holders, cfg, name, log)
         return JSONResponse({"ok": True, "reloaded": "in-process"})
 
-    @mcp.custom_route("/admin/api/backend", methods=["POST"])
     async def add_backend(request: Request):
         """Import a new backend MCP. Validates + introspects, then restarts."""
         payload = await request.json()
@@ -619,7 +624,6 @@ def register(mcp, config_path: str, log, holder: list) -> None:
             background=BackgroundTask(restart_daemon, log),
         )
 
-    @mcp.custom_route("/admin/api/backend/{name}", methods=["DELETE"])
     async def remove_backend(request: Request):
         name = request.path_params["name"]
         cfg = _load()
@@ -636,9 +640,22 @@ def register(mcp, config_path: str, log, holder: list) -> None:
             background=BackgroundTask(restart_daemon, log),
         )
 
-    @mcp.custom_route("/admin/api/introspect/{name}", methods=["POST"])
     async def reintrospect(request: Request):
         name = request.path_params["name"]
         cfg = _load()
         await ensure_defaults(cfg, log, force=name)
         return JSONResponse({"ok": True})
+
+    app.router.routes.extend(
+        [
+            Route("/admin", admin_page, methods=["GET"]),
+            Route("/admin/api/state", get_state, methods=["GET"]),
+            Route("/admin/api/override", put_override, methods=["PUT"]),
+            Route("/admin/api/reset", reset_tool, methods=["POST"]),
+            Route("/admin/api/instructions", put_instructions, methods=["PUT"]),
+            Route("/admin/api/backend/{name}/pin", pin_backend, methods=["POST"]),
+            Route("/admin/api/backend", add_backend, methods=["POST"]),
+            Route("/admin/api/backend/{name}", remove_backend, methods=["DELETE"]),
+            Route("/admin/api/introspect/{name}", reintrospect, methods=["POST"]),
+        ]
+    )

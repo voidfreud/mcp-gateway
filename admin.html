@@ -174,13 +174,13 @@ async function load() {
 function renderList() {
   const el = $('#list');
   el.innerHTML = '';
-  // Gateway pseudo-item: edit the server-level instructions Claude reads upfront.
+  // Gateway pseudo-item: a read-only overview of the per-backend MCP endpoints.
   const gw = document.createElement('div');
   gw.className = 'b-item gw' + (SELECTED === GATEWAY ? ' sel' : '');
   gw.onclick = () => { SELECTED = GATEWAY; renderList(); renderDetail(GATEWAY); };
-  const gwOverridden = STATE.instructions ? ' · custom' : '';
+  const nEp = STATE.backends.length;
   gw.innerHTML = `<div class="nm">⚙ Gateway</div>
-    <div class="meta"><span>server instructions${gwOverridden}</span></div>`;
+    <div class="meta"><span>${nEp} endpoint${nEp === 1 ? '' : 's'}</span></div>`;
   el.appendChild(gw);
   STATE.backends.forEach(b => {
     const d = document.createElement('div');
@@ -203,6 +203,7 @@ function renderDetail(name) {
   const conn = b.transport === 'http' ? esc(b.url || '') : esc((b.command || '') + ' ' + (b.args || []).join(' '));
   m.innerHTML = `
     <div class="b-head"><h2>${esc(b.name)}</h2><span class="badge">${b.transport}</span><code>${conn}</code></div>
+    <div class="hint" style="margin:-2px 0 12px">MCP endpoint <code>http://${esc(STATE.host)}:${STATE.port}${esc(b.endpoint || '')}</code> — register as its own server in Claude Code</div>
     <div class="b-actions">
       <label class="chk" title="pin ALL this backend's tools to load upfront (eager)">
         <input type="checkbox" id="b-pin" ${b.always_load ? 'checked' : ''}
@@ -276,33 +277,39 @@ function wireCaps(root) {
   });
 }
 
-// Gateway pseudo-detail: the server-level instructions Claude reads at connect.
-// A read-only preview of what's broadcast now, plus a full-override textarea
-// (empty = auto-compose from the backends).
+// Gateway pseudo-detail: a read-only overview of the per-backend MCP endpoints.
+// Each backend is its own MCP server now (its own URL + its own ~2KB
+// instructions budget), so there is no single cross-backend "gateway
+// instructions" — edit each backend's Server instructions on its own page. This
+// page lists the endpoints and how much of each 2KB instructions budget is used.
 function renderGateway() {
   const m = $('#detail');
-  const ov = STATE.instructions ?? '';
-  const composed = STATE.composed_instructions ?? '';
+  const base = `http://${esc(STATE.host)}:${STATE.port}`;
+  const enc = new TextEncoder();
+  const rows = STATE.backends.map(b => {
+    const instr = b.instructions ?? b.default_instructions ?? '';
+    const bytes = enc.encode(instr).length;
+    const over = bytes > 2048;
+    return `<tr>
+      <td style="padding:4px 8px"><b>${esc(b.name)}</b></td>
+      <td style="padding:4px 8px"><code>${esc(base + (b.endpoint || ''))}</code></td>
+      <td style="padding:4px 8px;text-align:right;color:${over ? '#ff9b9b' : 'var(--mut)'}">${bytes} / 2048 B</td>
+    </tr>`;
+  }).join('');
   m.innerHTML = `
-    <div class="b-head"><h2>⚙ Gateway</h2><code>server-level instructions</code></div>
-    <p class="hint" style="margin:0 0 14px">These are the <b>instructions</b> Claude reads upfront when it connects to the
-      gateway. By default they're composed from each backend's own server instructions (edit those on each MCP).
-      Override below to take full manual control.</p>
+    <div class="b-head"><h2>⚙ Gateway</h2><code>${STATE.backends.length} MCP endpoint(s)</code></div>
+    <p class="hint" style="margin:0 0 14px">Each backend is exposed as its <b>own MCP endpoint</b> below — register each as a
+      separate server in Claude Code, so each gets its own ~2KB instructions budget. Edit a backend's server
+      instructions on its own page (left).</p>
     <div class="instr">
-      <h3>Broadcast now <span class="si">(read-only — what Claude gets)</span></h3>
-      <div class="preview">${composed ? esc(composed) : '(none — no backend sends instructions and no override set)'}</div>
-    </div>
-    <div class="instr">
-      <h3>Full override</h3>
-      <div class="si">replaces the composed text entirely</div>
-      <textarea class="f-instr" data-cap="2048" placeholder="(empty = auto-compose from the backends ↑)">${esc(ov)}</textarea>
-      <div class="hint">Empty = auto-compose. Edits reload live.</div>
+      <h3>Endpoints</h3>
+      <table style="width:100%;border-collapse:collapse;font-size:13px">
+        <thead><tr style="color:var(--mut);text-align:left">
+          <th style="padding:4px 8px">Backend</th><th style="padding:4px 8px">URL</th>
+          <th style="padding:4px 8px;text-align:right">Instructions</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
     </div>`;
-  // Gateway override: no auto-refill on blur — empty is a real state (auto-compose).
-  const ta = $('.f-instr', m);
-  ta.addEventListener('input', () => scheduleInstr(null, ta));
-  ta.addEventListener('blur', () => flushInstr(null, ta));
-  wireCaps(m);  // live byte-count on the gateway "Full override" textarea
 }
 
 // Editable fields are PREFILLED with their effective value (override if set,
@@ -435,7 +442,7 @@ window.addEventListener('beforeunload', () => {
   Object.values(instrPending).forEach(({ backend, ta }) => doSaveInstr(backend, ta, true));
 });
 
-// --- instructions save (gateway-level: backend === null) ------------------
+// --- instructions save (per-backend: backend = name) ---------------------
 const instrPending = {};  // key -> textarea for an unsaved instructions edit
 function instrKey(backend) { return 'instr::' + (backend ?? GATEWAY); }
 
@@ -458,8 +465,6 @@ async function doSaveInstr(backend, ta, keepalive = false) {
       { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body, keepalive });
     const j = await r.json().catch(() => ({}));
     if (!r.ok) { toast('save failed: ' + (j.error || ('HTTP ' + r.status))); instrPending[key] = { backend, ta }; return; }
-    STATE.composed_instructions = j.composed;  // keep preview fresh
-    if (backend === null) STATE.instructions = ta.value.trim() || null;
     flashSaved();
   } catch (e) { toast('save failed: ' + e.message); instrPending[key] = { backend, ta }; }
 }
