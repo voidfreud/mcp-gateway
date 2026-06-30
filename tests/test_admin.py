@@ -212,6 +212,120 @@ def test_apply_param_hide_stored(defaults_dir):
     assert cfg.backends[0].tools[0].params[0].hide is True
 
 
+# --- required-param awareness + guard (issue #4) ---------------------------
+# capture_defaults needs a live backend, so we stub the captured-defaults file
+# (with per-param `required`, exactly the shape capture_defaults now writes) and
+# exercise the readers — build_state surfacing it + apply_tool_override's guard.
+
+
+def test_build_state_surfaces_param_required(defaults_dir):
+    _write_defaults(
+        defaults_dir,
+        "b",
+        "t",
+        params=[
+            {"original": "repoName", "description": "the repo", "required": True},
+            {"original": "page", "description": "page no.", "required": False},
+        ],
+    )
+    cfg = _single_cfg()
+    params = admin.build_state(cfg)["backends"][0]["tools"][0]["params"]
+    by_name = {p["original"]: p for p in params}
+    assert by_name["repoName"]["required"] is True
+    assert by_name["page"]["required"] is False
+
+
+def test_apply_rejects_hiding_required_param(defaults_dir):
+    _write_defaults(
+        defaults_dir,
+        "b",
+        "t",
+        params=[{"original": "repoName", "description": "d", "required": True}],
+    )
+    cfg = _single_cfg()
+    with pytest.raises(cl.ConfigError, match="required by the backend"):
+        admin.apply_tool_override(
+            cfg,
+            "b",
+            {
+                "tool_original": "t",
+                "override": {
+                    "enabled": True,
+                    "params": [
+                        {
+                            "original": "repoName",
+                            "name": None,
+                            "description": None,
+                            "hide": True,
+                        }
+                    ],
+                },
+            },
+        )
+    assert cfg.backends[0].tools == []  # rejected -> nothing stored
+
+
+def test_apply_hide_non_required_param_ok(defaults_dir):
+    # hiding an explicitly NON-required param still works
+    _write_defaults(
+        defaults_dir,
+        "b",
+        "t",
+        params=[{"original": "page", "description": "d", "required": False}],
+    )
+    cfg = _single_cfg()
+    admin.apply_tool_override(
+        cfg,
+        "b",
+        {
+            "tool_original": "t",
+            "override": {
+                "enabled": True,
+                "params": [
+                    {
+                        "original": "page",
+                        "name": None,
+                        "description": None,
+                        "hide": True,
+                    }
+                ],
+            },
+        },
+    )
+    assert cfg.backends[0].tools[0].params[0].hide is True
+
+
+def test_apply_required_param_not_hidden_ok(defaults_dir):
+    # a required param can still be edited (renamed) as long as it isn't hidden
+    _write_defaults(
+        defaults_dir,
+        "b",
+        "t",
+        params=[{"original": "repoName", "description": "d", "required": True}],
+    )
+    cfg = _single_cfg()
+    admin.apply_tool_override(
+        cfg,
+        "b",
+        {
+            "tool_original": "t",
+            "override": {
+                "enabled": True,
+                "params": [
+                    {
+                        "original": "repoName",
+                        "name": "repo",
+                        "description": None,
+                        "hide": False,
+                    }
+                ],
+            },
+        },
+    )
+    p = cfg.backends[0].tools[0].params[0]
+    assert p.name == "repo" and p.hide is False
+
+
 # --- collision validation (no duplicate broadcast names/descriptions) ------
 
 

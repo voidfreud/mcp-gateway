@@ -73,6 +73,7 @@
   .param { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin-top: 8px; background: var(--panel2); }
   .param .p-top { display: flex; align-items: center; gap: 10px; }
   .param .p-top .orig { font-family: ui-monospace, Menlo, monospace; color: var(--mut); font-size: 12px; }
+  .param .p-top .orig .req { color: var(--warn); font-weight: 700; cursor: help; }
   .chk { display: flex; align-items: center; gap: 6px; color: var(--mut); font-size: 12px; user-select: none; }
   .saved { font-size: 12px; color: var(--ok); opacity: 0; transition: opacity .2s; }
   .saved.show { opacity: 1; }
@@ -349,8 +350,9 @@ function toolCard(b, t) {
 function paramRow(p) {
   const name = p.name || p.default_name;
   const desc = p.description || p.default_description || '';
+  const req = p.required ? '<span class="req" title="required by the backend">*</span>' : '';
   return `<div class="param" data-original="${esc(p.original)}">
-    <div class="p-top"><span class="orig" title="real MCP parameter name (provider-facing, not editable)">${esc(p.original)}</span>
+    <div class="p-top"><span class="orig" title="real MCP parameter name (provider-facing, not editable)">${esc(p.original)}${req}</span>
       <label class="chk"><input type="checkbox" class="p-hide" ${p.hide?'checked':''}> hide</label></div>
     <div class="row" style="margin-top:8px;">
       <div><label>Broadcast name</label><input type="text" class="p-name" value="${esc(name)}" data-default="${esc(p.default_name)}"></div>
