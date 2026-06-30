@@ -61,6 +61,12 @@
   input:focus, textarea:focus { outline: none; border-color: var(--accent); }
   textarea { resize: vertical; min-height: 38px; }
   .hint { font-size: 11.5px; color: var(--mut); margin-top: 3px; }
+  /* live byte-count for capped fields ([data-cap]): bottom-right, gray; red at/over cap */
+  .cap-wrap { position: relative; }
+  .cap-wrap textarea { padding-bottom: 20px; }
+  .cap-count { position: absolute; right: 9px; bottom: 6px; pointer-events: none;
+               font: 11px/1 ui-monospace, Menlo, monospace; color: var(--mut); opacity: .55; }
+  .cap-count.over { color: #ff9b9b; opacity: 1; }
   .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
   .params { margin-top: 14px; border-top: 1px dashed var(--line); padding-top: 10px; }
   .params > .lbl { font-size: 11.5px; text-transform: uppercase; letter-spacing: .4px; color: var(--mut); }
@@ -207,6 +213,7 @@ function renderDetail(name) {
     ${backendInstrSection(b)}
     <div id="tools"></div>`;
   wireInstr(m, b.name, b.default_instructions);
+  wireCaps(m);  // live byte-count on the backend "Server instructions" textarea
   const tw = $('#tools', m);
   if (!b.introspected) { tw.innerHTML = '<div class="empty">Backend not introspected yet — click Re-introspect.</div>'; return; }
   b.tools.forEach(t => tw.appendChild(toolCard(b, t)));
@@ -222,7 +229,7 @@ function backendInstrSection(b) {
   return `<div class="instr">
     <h3>Server instructions</h3>
     <div class="si">${si ? esc(si) + ' · ' : ''}the always-loaded blurb this MCP sends; folded into the gateway's instructions</div>
-    <textarea class="f-instr" data-default="${esc(b.default_instructions ?? '')}"
+    <textarea class="f-instr" data-cap="2048" data-default="${esc(b.default_instructions ?? '')}"
       placeholder="${has ? '' : '(this server sends no instructions — type to add your own)'}">${esc(eff)}</textarea>
     <div class="hint">Empty = inherit the server's original${has ? '' : ' (none)'}. Edits reload live.</div>
   </div>`;
@@ -237,6 +244,34 @@ function wireInstr(root, backend, def) {
   ta.addEventListener('blur', () => {
     if (ta.value.trim() === '' && def) ta.value = def;
     flushInstr(backend, ta);
+  });
+}
+
+// Live byte-count for any [data-cap] field: a small bottom-right span showing
+// UTF-8 BYTES (TextEncoder, not .length — which is UTF-16 units) against the
+// field's own cap, red at/over the cap. Wraps the field for positioning.
+// Idempotent: re-running over the same field is a no-op (capWired guard).
+function wireCaps(root) {
+  const enc = new TextEncoder();
+  root.querySelectorAll('[data-cap]').forEach(field => {
+    if (field.dataset.capWired) return;            // never double-attach
+    field.dataset.capWired = '1';
+    const cap = parseInt(field.dataset.cap, 10);
+    const wrap = document.createElement('div');
+    wrap.className = 'cap-wrap';
+    field.parentNode.insertBefore(wrap, field);    // wrap field for bottom-right anchor
+    wrap.appendChild(field);
+    const count = document.createElement('span');
+    count.className = 'cap-count';
+    wrap.appendChild(count);
+    const upd = () => {
+      const n = enc.encode(field.value).length;    // UTF-8 bytes — matches CC's 2048-byte cap
+      count.textContent = n + ' / ' + cap;
+      count.classList.toggle('over', n >= cap);    // red at or beyond the cap
+    };
+    field.addEventListener('input', upd);
+    field.addEventListener('blur', upd);           // also catch programmatic refills on blur
+    upd();                                          // initial paint
   });
 }
 
@@ -259,13 +294,14 @@ function renderGateway() {
     <div class="instr">
       <h3>Full override</h3>
       <div class="si">replaces the composed text entirely</div>
-      <textarea class="f-instr" placeholder="(empty = auto-compose from the backends ↑)">${esc(ov)}</textarea>
+      <textarea class="f-instr" data-cap="2048" placeholder="(empty = auto-compose from the backends ↑)">${esc(ov)}</textarea>
       <div class="hint">Empty = auto-compose. Edits reload live.</div>
     </div>`;
   // Gateway override: no auto-refill on blur — empty is a real state (auto-compose).
   const ta = $('.f-instr', m);
   ta.addEventListener('input', () => scheduleInstr(null, ta));
   ta.addEventListener('blur', () => flushInstr(null, ta));
+  wireCaps(m);  // live byte-count on the gateway "Full override" textarea
 }
 
 // Editable fields are PREFILLED with their effective value (override if set,
@@ -296,7 +332,7 @@ function toolCard(b, t) {
         <div><label>Title</label><input type="text" class="f-title" value="${esc(title)}" data-default="${esc(t.default_title||'')}"></div>
       </div>
       <label>Description (what Claude reads)</label>
-      <textarea class="f-desc" data-default="${esc(t.default_description||'')}">${esc(desc)}</textarea>
+      <textarea class="f-desc" data-cap="2048" data-default="${esc(t.default_description||'')}">${esc(desc)}</textarea>
       <div class="params">
         <div class="lbl">Parameters</div>
         ${t.params.map(p => paramRow(p)).join('')}
@@ -306,6 +342,7 @@ function toolCard(b, t) {
       </div>
     </div>`;
   wireCard(b.name, t.original, card);
+  wireCaps(card);  // live byte-count on the tool "Description" textarea
   return card;
 }
 
