@@ -11,17 +11,17 @@ shared by all Claude Code sessions.
 Python 3.12 · FastMCP 3.x · Pydantic · structlog · `uv`.
 
 ## How to run
-- Dev: `uv run server.py` → `http://127.0.0.1:9100/mcp`, health at `/health`.
+- Dev: `uv run server.py` → one `/<backend>/mcp` endpoint per backend, plus `/admin` + `/health`.
 - Login: launchd LaunchAgent `com.void.mcp-gateway.plist` (see README "Run").
 
 ## How to verify
-With the daemon up: `uv run verify_rename.py http://127.0.0.1:9100/mcp` — asserts
-every configured rename/hide/disable + a real passthrough call.
+With the daemon up: `uv run verify_rename.py http://127.0.0.1:9100` — checks every
+backend endpoint (bare names, instructions <=2KB) + a real passthrough call.
 `uv run config_loader.py config.toml` prints parsed backends + transform keys.
 
 ## Layout
 - `config_loader.py` — Pydantic models + `config.toml` → proxy config + transforms; also `dump_toml`/`save` (admin writes config back).
-- `server.py` — `create_proxy` → reconcile → `add_transform` → register admin → run http.
+- `server.py` — one single-backend `create_proxy` per backend, each mounted at `/<backend>/mcp` under a parent Starlette (+ `/admin` + `/health`); lifespans composed via `AsyncExitStack`.
 - `admin.py` — admin UI/API at `/admin`: introspect/defaults, edit overrides, in-process hot-reload, import/remove (restart).
 - `admin.html` — single-file vanilla-JS admin page (no framework, no build).
 - `config.toml` — the LIVE, admin-managed config (**gitignored** — regenerated on
@@ -35,8 +35,9 @@ every configured rename/hide/disable + a real passthrough call.
   from the environment (LaunchAgent `EnvironmentVariables`). It's gitignored, so
   it never shows as a git change after a UI edit. To change the shipped seed,
   edit `config.default.toml`.
-- A tool's `original` is the bare backend tool name; the loader adds the
-  `<backend>_` prefix that FastMCP applies when there are 2+ backends.
+- A tool's `original` is the bare backend tool name. Each backend is proxied on
+  its OWN endpoint (`/<backend>/mcp`), so tools are exposed BARE — no `<backend>_`
+  prefix; the endpoint / Claude-Code server registration namespaces them.
 
 ## Workflow (how we work on this project)
 - **One branch per change, off `main`.** Never commit directly to `main`. Merge
@@ -64,9 +65,11 @@ every configured rename/hide/disable + a real passthrough call.
   `FastMCP.as_proxy`); transforms are `ToolTransform({name: ToolTransformConfig(
   ..., arguments={p: ArgTransformConfig(...)})})`; arg field is `arguments`,
   not `transform_args`.
-- Single backend → bare tool names; 2+ backends → `<backend>_<tool>` prefix.
-- Apply `add_transform` AFTER the startup reconcile, else every renamed tool is
-  falsely flagged `override_no_match` (reconcile must see source names).
+- Tools are exposed BARE on each backend's own endpoint (`exposed_name` returns
+  the original). The old `<backend>_` prefix is gone — per-backend endpoints
+  namespace by server registration (#29).
+- Apply `add_transform` AFTER the per-backend reconcile, else every renamed tool
+  is falsely flagged `override_no_match` (reconcile must see source names).
 - FastMCP's INFO "reusing existing session … context mixing" line is benign
   here (fresh session per request; no per-request user secrets). Quieted via
   `FASTMCP_LOG_LEVEL=WARNING`.
@@ -75,28 +78,31 @@ every configured rename/hide/disable + a real passthrough call.
   `apply_tool_override`) rejects a save whose broadcast NAME would equal another
   enabled tool's, or a deliberately-set DESCRIPTION identical to another's.
   `admin.effective_tools(cfg)` computes every enabled tool's effective name/desc.
-  Passthrough never collides (prefixed names unique) — only real renames do.
+  Scope is per-backend now: names only need to be unique WITHIN a backend (each
+  backend is its own endpoint/MCP server, so cross-backend clashes can't confuse
+  Claude).
 - **Eager loading (always_load):** `ToolOverride.always_load` (per-tool) /
   `Backend.always_load` (per-server) → `build_transforms` sets the tool's
   `_meta["anthropic/alwaysLoad"]=true` (FastMCP `ToolTransformConfig.meta`), which
   exempts it from Claude Code tool-search deferral (loads upfront). Verified the
   meta propagates to the wire `_meta`. Per-backend pinning needs the live tool
-  list, so `build_transforms(cfg, all_tools)` — startup builds transforms AFTER
-  `ensure_defaults` (see `server._startup`). Pinning hot-reloads (meta only).
-- **Server instructions:** a bare proxy drops each backend's server-level
-  `initialize.instructions`. The gateway captures them (in the defaults JSON,
-  alongside `server_info`/`capabilities`) and `config_loader.compose_instructions`
-  rebuilds the gateway's own `instructions` — `cfg.instructions` (gateway override)
-  wins entirely, else aggregate each backend's effective blurb (`Backend.instructions`
-  override else captured) under `# <backend>` headers (single contributor → no
-  header). Set live via `admin.apply_instructions(mcp, cfg)` in `server._startup`
-  and `hot_reload`. Edit through `PUT /admin/api/instructions` ({backend|null, value}).
-  Old defaults files (pre-capture) auto-re-introspect on startup (key-presence check
-  in `ensure_defaults`).
+  list, so `build_transforms(cfg, backend, all_tools)` — built per backend in the
+  server lifespan, after `ensure_defaults`. Pinning hot-reloads (meta only).
+- **Server instructions (per endpoint):** a bare proxy drops each backend's
+  server-level `initialize.instructions`. The gateway captures them (in the
+  defaults JSON, alongside `server_info`/`capabilities`) and
+  `config_loader.backend_instructions(b, captured)` sets EACH backend proxy's own
+  `instructions` (its `Backend.instructions` override else the captured original).
+  Each backend is its own endpoint → its own ~2KB budget (#29; no cross-backend
+  composition or gateway-level override anymore). Set live in
+  `server._mount_backend` and re-set on `admin.hot_reload`; edit via
+  `PUT /admin/api/instructions` ({backend, value}). Old defaults files
+  (pre-capture) auto-re-introspect on startup.
 - One resident subprocess per stdio backend — calls do NOT re-spawn it.
-- Hot-reload swaps the transform by mutating `mcp._transforms` (a list); tools/list
-  applies transforms live per request, so the swap is instant. Remove the old
-  transform before adding the new one or the list grows.
+- Hot-reload swaps a backend's transform by mutating its proxy's `_transforms`
+  (a list); tools/list applies transforms live per request, so the swap is
+  instant. `admin.hot_reload(registry, holders, cfg, backend, log)` targets that
+  one backend's live proxy (registry: name→proxy, holders: name→[transform]).
 - Backend topology changes restart via launchd; the restart runs as a Starlette
   `BackgroundTask` with `subprocess.run` (reaps the child — no zombie). Don't
   detach a `sleep` shell for this (it zombies).
