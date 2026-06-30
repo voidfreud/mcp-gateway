@@ -68,8 +68,16 @@ async def capture_defaults(b: Backend) -> dict:
     for t in tools:
         schema = t.inputSchema or {}
         props = schema.get("properties", {})
+        required = set(schema.get("required") or [])
         params = [
-            {"original": name, "description": (spec or {}).get("description")}
+            {
+                "original": name,
+                "description": (spec or {}).get("description"),
+                # whether the backend's inputSchema marks this param required —
+                # surfaced in the UI and used to block hiding it (Claude could
+                # never supply it, so every call would break).
+                "required": name in required,
+            }
             for name, spec in props.items()
         ]
         out_tools.append(
@@ -258,6 +266,9 @@ def build_state(cfg: GatewayConfig) -> dict:
                         # (params are never prefixed); the field prefills with this.
                         "default_name": dp["original"],
                         "default_description": dp.get("description"),
+                        # backend marks this param required (from inputSchema) —
+                        # the UI flags it and hiding it is rejected on save.
+                        "required": dp.get("required", False),
                         "name": p.name if p else None,
                         "description": p.description if p else None,
                         "hide": p.hide if p else False,
@@ -383,6 +394,14 @@ def apply_tool_override(cfg: GatewayConfig, backend: str, payload: dict) -> None
         pdesc = _override_vs_default(p.get("description"), dp.get("description"))
         _validate_name(pname, "parameter name")
         hide = bool(p.get("hide", False))
+        # Correctness guardrail (alongside check_no_collision): a param the
+        # backend marks required can't be hidden — Claude could never supply it,
+        # so every call would break. (No param-default injection exists yet.)
+        if hide and dp.get("required", False):
+            raise cl.ConfigError(
+                f"parameter {po!r} is required by the backend — hiding it "
+                f"would break the tool"
+            )
         if pname or pdesc or hide:
             params.append(
                 ParamOverride(original=po, name=pname, description=pdesc, hide=hide)
