@@ -46,7 +46,7 @@ so it never shows up as a git change). Edit it in the admin UI, or by hand.
 Foreground (dev):
 
 ```bash
-uv run server.py              # serves http://127.0.0.1:9100/mcp ; health at /health
+uv run server.py              # serves /admin, /health, and one /<backend>/mcp endpoint per backend
 ```
 
 At login (the intended mode) — a launchd LaunchAgent:
@@ -63,21 +63,29 @@ launchctl bootout   gui/$(id -u)/com.void.mcp-gateway     # stop + unload
 
 ## Wire into Claude Code
 
-Register once at user scope so every project hits the same shared gateway:
+The gateway exposes **one MCP endpoint per backend** (`/<backend>/mcp`) — each is
+its own MCP server in Claude Code, so each backend gets its own ~2KB `instructions`
+budget instead of all sharing one (see
+[#29](https://github.com/voidfreud/mcp-gateway/issues/29)). Register each at user
+scope, one line per backend:
 
 ```bash
-claude mcp add --transport http gateway --scope user http://127.0.0.1:9100/mcp
-claude mcp list               # expect: gateway ... ✔ Connected
+claude mcp add --transport http gateway-gitnexus --scope user http://127.0.0.1:9100/gitnexus/mcp
+claude mcp add --transport http gateway-deepwiki --scope user http://127.0.0.1:9100/deepwiki/mcp
+claude mcp add --transport http gateway-context7 --scope user http://127.0.0.1:9100/context7/mcp
+claude mcp list   # expect each: gateway-<backend> ... ✔ Connected
 ```
 
-Stored in `~/.claude.json` under `mcpServers`, active across all projects.
-Reversible with `claude mcp remove gateway`.
+Any prefix works (`gateway-` keeps them grouped). Tools then resolve as
+`mcp__gateway-deepwiki__ask_question`, etc. Stored in `~/.claude.json`, active
+across all projects; reversible with `claude mcp remove gateway-<backend>`.
 
-> **Heads-up on duplicates.** The gateway *proxies* backends. If you also have a
-> backend (e.g. `gitnexus`, `deepwiki`) registered directly with Claude Code,
-> Claude will see both the direct tools and the gateway's rewritten versions.
-> The intended end state is to register the gateway and **remove the direct
-> registrations** for the backends it fronts, so Claude sees only your rewrites.
+> **Heads-up on duplicates.** The gateway *proxies* backends. If a backend (e.g.
+> `gitnexus`, `deepwiki`) is also registered directly with Claude Code, Claude
+> sees both the direct tools and the gateway's rewritten versions. The intended
+> end state is to register the per-backend gateway endpoints and **remove the
+> direct registrations** for the backends it fronts, so Claude sees only your
+> rewrites.
 
 ## Admin UI
 
@@ -110,13 +118,14 @@ Pinning hot-reloads in-process. Takes effect for Claude on a fresh session.
 **Server instructions.** An MCP server can send a server-level `instructions`
 blurb at `initialize` — always-loaded context Claude reads upfront (e.g. "use
 this server whenever the user asks about a library"). A bare proxy **drops** it.
-The gateway captures each backend's original instructions and, by default,
-**composes** them back into its own `instructions` (one `# <backend>` section per
-contributing server; a single contributor gets no header). The **⚙ Gateway** item
-in the admin lets you see what's broadcast now and set a **full manual override**;
-each backend's detail has a **Server instructions** box to edit (or add, where the
-server sends none) its section. Empty = inherit the original / auto-compose.
-Composition hot-reloads in-process and is read fresh on each connect.
+Because each backend is its **own** endpoint/MCP server, the gateway captures each
+backend's original instructions and hands them back **on that backend's own
+endpoint** — so each gets Claude Code's full ~2KB budget, never a shared one (see
+[#29](https://github.com/voidfreud/mcp-gateway/issues/29)). Each backend's detail
+has a **Server instructions** box to edit (or add, where the server sends none);
+empty = inherit the original. The **⚙ Gateway** item shows a read-only overview of
+every endpoint and how much of each 2KB budget its instructions use. Edits
+hot-reload in-process and are read fresh on each connect.
 
 **Durability.** Saves write `config.toml` atomically with `fsync` (survives an
 unexpected crash/power-loss, never a partial file), debounced ~550 ms to avoid
@@ -173,12 +182,13 @@ value via the environment (the LaunchAgent's `EnvironmentVariables`, or a run
 shim). `config.toml` therefore holds only env *references* and public endpoints,
 and is safe to commit.
 
-**Tool-name prefixing.** With **one** backend, tools keep their bare name
-(`ask_question`). With **two or more**, FastMCP prefixes them with the backend
-name (`deepwiki_ask_question`). The `original` field in `config.toml` is always
-the bare backend name — the loader computes the prefix. On startup the gateway
-lists live tools and logs an `override_no_match` warning for any `original` that
-no backend exposes (catches typos).
+**Bare tool names.** Each backend is proxied on its **own** endpoint/MCP server,
+so its tools keep their bare names (`ask_question`) — the backend is namespaced by
+its endpoint and Claude-Code server registration (`mcp__gateway-deepwiki__…`), not
+by a tool-name prefix. The `original` field in `config.toml` is the bare backend
+tool name. On startup the gateway lists each backend's live tools and logs an
+`override_no_match` warning for any `original` that backend doesn't expose
+(catches typos).
 
 ## Safety
 
@@ -195,8 +205,9 @@ no backend exposes (catches typos).
 - **Health:** `curl -s http://127.0.0.1:9100/health` → `ok`.
 - **Restart:** `launchctl kickstart -k gui/$(id -u)/com.void.mcp-gateway`.
 - **Verify rewrites end-to-end:** with the gateway running,
-  `uv run verify_rename.py http://127.0.0.1:9100/mcp` asserts every configured
-  rename/hide/disable and makes a real passthrough call.
+  `uv run verify_rename.py http://127.0.0.1:9100` checks every backend endpoint
+  (bare tool names exposed, instructions within the 2KB budget) and makes a real
+  passthrough call.
 
 ### A benign log line
 
@@ -207,12 +218,15 @@ per-request user secrets, and a stdio backend stays one resident subprocess by
 design. It is quieted to WARNING in the daemon (`FASTMCP_LOG_LEVEL=WARNING`).
 > Per-session-isolation tripwire tracked at [#25](https://github.com/voidfreud/mcp-gateway/issues/25).
 
-## Session strategy (efficiency)
+## Session strategy (per backend)
 
-`stateless` is parsed per backend but the MVP uses FastMCP's default
-per-request sessions (one resident subprocess per stdio backend; HTTP backends
-re-handshake per call). Shared-session reuse for stateless HTTP backends is a
-tier-2 optimization — add it only if per-call latency bothers you.
+Each backend's `stateless` flag drives its session independently. A
+`stateless = false` backend (e.g. stdio `gitnexus`) is built from **one persistent
+connection reused for the daemon's lifetime** — warm, no per-call respawn. A
+`stateless = true` backend (e.g. remote HTTP `deepwiki`/`context7`) uses a fresh
+per-request session. Because every backend is its own endpoint, a backend that is
+down only fails its own endpoint — it never blocks the others or the daemon from
+booting (see [#9](https://github.com/voidfreud/mcp-gateway/issues/9)).
 
 ## Out of scope (parked for later)
 
