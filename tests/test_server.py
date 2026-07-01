@@ -7,9 +7,11 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
+import anyio
 import structlog
 
 from starlette.applications import Starlette
@@ -323,6 +325,50 @@ def test_import_hot_add_config_persisted(tmp_path, monkeypatch):
     # survives the daemon lifecycle: it's in config.toml, not only in memory
     names = [b.name for b in cl.load(str(tmp_path / "config.toml")).backends]
     assert names == ["b", "new"]
+
+
+# ---------------------------------------------------------------------------
+# #61 — backends mount concurrently; a hung backend can't serialize the others
+# ---------------------------------------------------------------------------
+
+
+def test_slow_backend_does_not_block_boot_or_others(tmp_path, monkeypatch):
+    """ "slow" is FIRST in config and hangs in connect. Sequential boot would
+    never yield (TestClient enter would hang); concurrent boot serves /health
+    immediately and mounts "fast" while slow is still stuck."""
+    monkeypatch.setattr(server, "SHUTDOWN_GRACE", 0.1)  # don't wait on the hung one
+    started, mounted = [], []
+
+    async def fake_mount(app, stack, b, cfg, all_tools, captured, reg, hold, log):
+        started.append(b.name)
+        if b.name == "slow":
+            await anyio.sleep(3600)  # hung connect; cancelled by SHUTDOWN_GRACE
+        mounted.append(b.name)
+        return True
+
+    monkeypatch.setattr(server, "_mount_backend", fake_mount)
+    cfg = cl.GatewayConfig.model_validate(
+        {
+            "backends": [
+                {"name": "slow", "transport": "stdio", "command": "/bin/x"},
+                {"name": "fast", "transport": "stdio", "command": "/bin/y"},
+            ]
+        }
+    )
+    path = tmp_path / "config.toml"
+    cl.save(cfg, str(path))
+    app = server._build_app(
+        cfg, structlog.get_logger("test"), {}, {}, config_path=str(path)
+    )
+    with TestClient(app) as client:
+        assert client.get("/health").status_code == 200  # ready despite the hang
+        for _ in range(100):  # fast mounts concurrently, behind no queue
+            if "fast" in mounted:
+                break
+            time.sleep(0.02)
+        assert set(started) == {"slow", "fast"}  # both began; nothing serialized
+        assert mounted == ["fast"]  # slow still stuck -> only its endpoint waits
+    # context exit returned -> shutdown didn't hang on the stuck runner
 
 
 def test_add_backend_does_not_lose_concurrent_edit(tmp_path, monkeypatch):
