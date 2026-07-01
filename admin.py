@@ -43,16 +43,14 @@ LAUNCHD_LABEL = "com.void.mcp-gateway"
 
 
 def _client_config(b: Backend) -> dict:
-    """Single-backend client config so tool names come back un-prefixed (bare)."""
-    if b.transport == "http":
-        entry: dict = {"url": cl.expand_env(b.url or ""), "transport": "http"}
-        if b.auth_header and b.auth_value:
-            entry["headers"] = {b.auth_header: cl.expand_env(b.auth_value)}
-    else:
-        entry = {"command": b.command, "args": list(b.args), "transport": "stdio"}
-        if b.env:
-            entry["env"] = {k: cl.expand_env(v) for k, v in b.env.items()}
-    return {"mcpServers": {b.name: entry}}
+    """Single-backend client config so tool names come back un-prefixed (bare).
+
+    Delegates to :func:`config_loader.to_proxy_config_one` so every transport
+    (http / streamable-http / sse / stdio) is handled identically to the live
+    proxy — otherwise import-time introspection of an sse/streamable-http backend
+    would mis-treat it as stdio and fail (issue #5).
+    """
+    return cl.to_proxy_config_one(b)
 
 
 def _annotations_to_dict(ann) -> dict | None:
