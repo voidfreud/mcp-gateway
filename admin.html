@@ -444,7 +444,9 @@ function toolCard(b, t) {
       ${schemaSection(t)}
       <div style="margin-top:12px;display:flex;gap:8px;">
         <button class="ghost" onclick="resetTool('${escJS(b.name)}','${escJS(t.original)}')">Reset to default</button>
+        <button class="ghost" onclick="toggleRun('${escJS(b.name)}','${escJS(t.original)}', this)">▶ Run</button>
       </div>
+      <div class="runbox" style="display:none"></div>
     </div>`;
   wireCard(b.name, t.original, card);
   wireCaps(card);  // live byte-count on the tool "Description" textarea
@@ -611,6 +613,59 @@ async function doSaveInstr(backend, ta, keepalive = false) {
     if (bs) bs.instructions = ovVal(ta.value, bs.default_instructions);
     flashSaved();
   } catch (e) { toast('save failed: ' + e.message); instrPending[key] = { backend, ta }; }
+}
+
+// --- Run tool (#3): mini-Inspector — execute through the live proxy ------
+function toggleRun(backend, original, btn) {
+  const card = btn.closest('.tool');
+  const box = card.querySelector('.runbox');
+  if (box.style.display !== 'none') { box.style.display = 'none'; return; }
+  const b = STATE.backends.find(x => x.name === backend);
+  const t = b && b.tools.find(x => x.original === original);
+  if (!t) return;
+  const rows = t.params.filter(p => !p.hide).map(p => {
+    const eff = p.name || p.default_name;
+    const req = p.required ? ' <span class="req">*</span>' : '';
+    const hint = p.description || p.default_description || '';
+    return `<div style="margin-top:8px;"><label>${esc(eff)}${req}${hint ? ` <span class="si">· ${esc(hint).slice(0, 120)}</span>` : ''}</label>
+      <input type="text" class="r-arg" data-arg="${esc(eff)}" placeholder="value (JSON or plain text)"></div>`;
+  }).join('');
+  box.innerHTML = `${rows || '<div class="si" style="margin-top:8px">no parameters</div>'}
+    <div style="margin-top:10px;display:flex;gap:8px;align-items:center;">
+      <button class="ghost r-go">Execute</button><span class="si r-status"></span></div>
+    <pre class="preview r-out" style="display:none;margin:8px 0 0"></pre>`;
+  box.style.display = '';
+  box.querySelector('.r-go').onclick = () => runTool(backend, t, box);
+}
+
+// A value that parses as JSON is sent typed (numbers, booleans, objects,
+// arrays); anything else is sent as the raw string. Empty inputs are omitted.
+function argValue(raw) {
+  const v = raw.trim();
+  if (v === '') return undefined;
+  try { return JSON.parse(v); } catch { return v; }
+}
+
+async function runTool(backend, t, box) {
+  const args = {};
+  box.querySelectorAll('.r-arg').forEach(inp => {
+    const v = argValue(inp.value);
+    if (v !== undefined) args[inp.dataset.arg] = v;
+  });
+  const status = box.querySelector('.r-status'), out = box.querySelector('.r-out');
+  const effName = t.name || t.default_name;  // call by the BROADCAST name, like Claude
+  status.textContent = 'running…'; out.style.display = 'none';
+  try {
+    const r = await api('POST', '/admin/api/run', { backend, tool: effName, args });
+    const text = (r.content || []).filter(c => c.type === 'text').map(c => c.text).join('\n');
+    let shown = '';
+    if (text) shown += text;
+    if (r.structured != null) shown += (shown ? '\n\n— structured —\n' : '') + JSON.stringify(r.structured, null, 2);
+    out.textContent = shown || '(empty result)';
+    out.style.display = '';
+    out.style.borderColor = r.is_error ? 'var(--warn)' : '';
+    status.textContent = (r.is_error ? '⚠ tool error' : '✓ ok') + ' · ' + r.ms + 'ms';
+  } catch (e) { status.textContent = ''; out.style.display = ''; out.style.borderColor = 'var(--warn)'; out.textContent = 'run failed: ' + e.message; }
 }
 
 async function resetTool(backend, original) {

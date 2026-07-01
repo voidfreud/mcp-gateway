@@ -371,6 +371,66 @@ def test_slow_backend_does_not_block_boot_or_others(tmp_path, monkeypatch):
     # context exit returned -> shutdown didn't hang on the stuck runner
 
 
+# ---------------------------------------------------------------------------
+# #3 — admin "Run tool": execute through the live proxy, show the result
+# ---------------------------------------------------------------------------
+
+
+def _run_app(tmp_path, registry):
+    cfg = cl.GatewayConfig.model_validate(
+        {"backends": [{"name": "b", "transport": "stdio", "command": "/bin/x"}]}
+    )
+    path = tmp_path / "config.toml"
+    cl.save(cfg, str(path))
+    app = Starlette()
+    admin.register(app, str(path), structlog.get_logger("test"), registry, {})
+    return app
+
+
+def _echo_server():
+    from fastmcp import FastMCP
+
+    m = FastMCP("b")
+
+    @m.tool
+    def echo(text: str) -> str:
+        """Echo the input back."""
+        return "echo: " + text
+
+    @m.tool
+    def boom() -> str:
+        raise ValueError("kaboom")
+
+    return m
+
+
+def test_run_tool_executes_through_proxy(tmp_path):
+    client = TestClient(_run_app(tmp_path, {"b": _echo_server()}))
+    r = client.post(
+        "/admin/api/run", json={"backend": "b", "tool": "echo", "args": {"text": "hi"}}
+    )
+    assert r.status_code == 200
+    j = r.json()
+    assert j["ok"] is True and j["is_error"] is False
+    texts = [c["text"] for c in j["content"] if c["type"] == "text"]
+    assert texts == ["echo: hi"]
+    assert j["ms"] >= 0
+
+
+def test_run_tool_surfaces_tool_error_not_500(tmp_path):
+    client = TestClient(_run_app(tmp_path, {"b": _echo_server()}))
+    r = client.post("/admin/api/run", json={"backend": "b", "tool": "boom", "args": {}})
+    assert r.status_code == 200  # transport ok; the TOOL failed
+    j = r.json()
+    assert j["ok"] is True and j["is_error"] is True
+
+
+def test_run_tool_unknown_backend_is_400(tmp_path):
+    client = TestClient(_run_app(tmp_path, {}))
+    r = client.post("/admin/api/run", json={"backend": "nope", "tool": "x", "args": {}})
+    assert r.status_code == 400
+
+
 def test_add_backend_does_not_lose_concurrent_edit(tmp_path, monkeypatch):
     """#52: add_backend awaits a network probe between config load and save. A
     config edit that lands during that await must NOT be overwritten — the
