@@ -18,6 +18,16 @@ transport = "http"
 url = "https://your-exa-endpoint/mcp"
 auth_header = "Authorization"      # optional; set BOTH or NEITHER
 auth_value = "Bearer ${EXA_TOKEN}" # ${ENV} resolved at startup
+# Richer auth (#6), all optional. Precedence on a same-name header clash:
+# auth_header/auth_value pair > headers table > headers_helper output.
+# headers = { "X-Client-Id" = "${MY_ID}" }  # extra static headers, ${ENV} ok
+# auth = "oauth"                     # OAuth-protected remote MCP: FastMCP runs
+#                                    # the flow (browser consent on first
+#                                    # connect, cached tokens after)
+# headers_helper = "my-sso-tool print-headers"  # command that prints a JSON
+#                                    # object of headers (short-lived tokens /
+#                                    # SSO); runs when the backend config is
+#                                    # built (mount / introspect), not per call
 stateless = true                   # parsed; shared-session reuse is a
                                    # tier-2 optimisation (see README)
 # always_load = true               # pin ALL this backend's tools to load upfront

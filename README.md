@@ -160,6 +160,12 @@ transport = "http"                       # http | streamable-http | sse | stdio
 url = "https://your-exa-endpoint/mcp"
 auth_header = "Authorization"            # optional; both or neither
 auth_value  = "Bearer ${EXA_TOKEN}"      # ${ENV} resolved at startup
+# richer auth (#6), all optional:
+# headers = { "X-Client-Id" = "${MY_ID}" }   # extra static headers (${ENV} ok)
+# auth = "oauth"                             # OAuth-protected MCP (FastMCP runs
+#                                            # the browser flow on first connect)
+# headers_helper = "my-sso print-headers"    # command printing a JSON object of
+#                                            # headers; runs at mount/introspect
 stateless = true
 
   [[backends.tools]]

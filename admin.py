@@ -795,6 +795,9 @@ def register(
                 args=payload.get("args") or [],
                 auth_header=_clean(payload.get("auth_header")),
                 auth_value=_clean(payload.get("auth_value")),
+                headers=payload.get("headers") or {},
+                auth=_clean(payload.get("auth")),
+                headers_helper=_clean(payload.get("headers_helper")),
                 stateless=bool(payload.get("stateless", False)),
             )
         except Exception as exc:  # noqa: BLE001 (pydantic/validation)

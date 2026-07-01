@@ -146,6 +146,13 @@
         <div><label>Auth header (optional)</label><input type="text" id="im_ah" placeholder="Authorization" /></div>
         <div><label>Auth value (optional)</label><input type="text" id="im_av" placeholder="Bearer ${EXA_TOKEN}" /></div>
       </div>
+      <label>Extra headers (optional, one per line: Name: value — ${ENV} ok)</label>
+      <textarea id="im_headers" rows="2" placeholder="X-Client-Id: ${MY_ID}"></textarea>
+      <div class="row">
+        <div><label>Headers helper (optional command printing JSON headers)</label>
+          <input type="text" id="im_hh" placeholder="my-sso-tool print-headers" /></div>
+        <div style="align-self:end"><label class="chk"><input type="checkbox" id="im_oauth"> OAuth (browser flow on first connect)</label></div>
+      </div>
     </div>
     <div id="im_stdio" style="display:none">
       <label>Command</label>
@@ -699,7 +706,17 @@ async function doImport() {
   const stdio = t === 'stdio';
   const body = { name: $('#im_name').value.trim(), transport: t,
     stateless: !stdio };
-  if (!stdio) { body.url = $('#im_url').value.trim(); body.auth_header = $('#im_ah').value.trim(); body.auth_value = $('#im_av').value.trim(); }
+  if (!stdio) {
+    body.url = $('#im_url').value.trim(); body.auth_header = $('#im_ah').value.trim(); body.auth_value = $('#im_av').value.trim();
+    const hdrs = {};
+    $('#im_headers').value.split('\n').forEach(line => {
+      const i = line.indexOf(':');
+      if (i > 0) { const k = line.slice(0, i).trim(), v = line.slice(i + 1).trim(); if (k && v) hdrs[k] = v; }
+    });
+    if (Object.keys(hdrs).length) body.headers = hdrs;
+    if ($('#im_hh').value.trim()) body.headers_helper = $('#im_hh').value.trim();
+    if ($('#im_oauth').checked) body.auth = 'oauth';
+  }
   else { body.command = $('#im_cmd').value.trim(); body.args = $('#im_args').value.trim() ? $('#im_args').value.trim().split(/\s+/) : []; }
   $('#im_go').disabled = true; $('#im_err').textContent = 'connecting…';
   try { const r = await api('POST', '/admin/api/backend', body); closeImport(); SELECTED = r.backend; afterRestart(r, 'imported'); }
