@@ -100,18 +100,35 @@ def test_configure_logging_rotates_and_keeps_json(tmp_path):
     log_path = tmp_path / "gateway.log"
     log = server._configure_logging(str(log_path))
 
-    stdlib = logging.getLogger("mcp-gateway")
-    assert len(stdlib.handlers) == 1
-    handler = stdlib.handlers[0]
+    # The single rotating handler lives on the ROOT logger (issue #50), so every
+    # logger — ours + uvicorn/fastmcp — flows into the one rotating file instead
+    # of launchd's err.log. mcp-gateway has no own handler; it propagates.
+    root = logging.getLogger()
+    assert len(root.handlers) == 1
+    handler = root.handlers[0]
     assert isinstance(handler, RotatingFileHandler)
     assert handler.maxBytes > 0 and handler.backupCount > 0
+    app_logger = logging.getLogger("mcp-gateway")
+    assert app_logger.handlers == []
+    assert app_logger.propagate is True
 
     log.info("hello_event", n=7)
-    for h in stdlib.handlers:
-        h.flush()
+    handler.flush()
 
     line = log_path.read_text(encoding="utf-8").strip().splitlines()[-1]
     rec = json.loads(line)  # must still be valid JSON
     assert rec["event"] == "hello_event"
     assert rec["n"] == 7
     assert rec["level"] == "info"
+
+
+def test_library_warnings_route_into_gateway_log(tmp_path):
+    """A stray library warning (uvicorn/fastmcp/etc.) must land in the rotating
+    gateway.log, not launchd's err.log — that's what bounds err.log (issue #50)."""
+    log_path = tmp_path / "gateway.log"
+    server._configure_logging(str(log_path))
+
+    logging.getLogger("uvicorn.error").warning("simulated library warning")
+    logging.getLogger().handlers[0].flush()
+
+    assert "simulated library warning" in log_path.read_text(encoding="utf-8")

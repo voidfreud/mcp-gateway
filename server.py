@@ -52,25 +52,37 @@ ADMIN_BODY_LIMIT = 64 * 1024
 
 
 def _configure_logging(log_file: str) -> structlog.BoundLogger:
-    """JSON structlog to *log_file* (created if missing)."""
-    # Quiet FastMCP's own INFO chatter (e.g. the benign "reusing existing
-    # session" proxy line) so the daemon's launchd out.log stays readable.
-    # Our structured events go through structlog below, not this logger.
-    logging.getLogger("fastmcp").setLevel(logging.WARNING)
+    """JSON structlog to a rotating *log_file* (created if missing).
 
+    Issue #50: the app's log must not grow unbounded, and neither must launchd's
+    ``err.log``/``out.log``. launchd owns those two file descriptors, so nothing
+    in-process can rotate them — instead we route ALL stdlib logging (uvicorn,
+    fastmcp, everything) into the single rotating ``gateway.log`` handler, so the
+    launchd files only ever catch rare pre-init / hard-crash text (and #48 already
+    removed the bad-JSON traceback flood that used to fill err.log). A single
+    shared handler on the root logger avoids two handlers racing on one file.
+    """
     path = Path(log_file).expanduser()
     path.parent.mkdir(parents=True, exist_ok=True)
-    # Rotate gateway.log so it can't grow unbounded (issue #50): 5 MB × 5 files.
-    # Route structlog through a stdlib RotatingFileHandler; the JSON line format
-    # is unchanged (JSONRenderer emits the string, the handler just writes it).
+    # One rotating handler for the whole process: 5 MB × 5 files.
     handler = RotatingFileHandler(
         path, maxBytes=5 * 1024 * 1024, backupCount=5, encoding="utf-8"
     )
     handler.setFormatter(logging.Formatter("%(message)s"))
-    stdlib = logging.getLogger("mcp-gateway")
-    stdlib.setLevel(logging.INFO)
-    stdlib.handlers = [handler]
-    stdlib.propagate = False
+
+    # Root owns the single file handler; every logger propagates into it.
+    root = logging.getLogger()
+    root.handlers = [handler]
+    root.setLevel(logging.WARNING)
+    # Quiet FastMCP's benign INFO chatter (e.g. "reusing existing session").
+    logging.getLogger("fastmcp").setLevel(logging.WARNING)
+    # Our own events emit at INFO and propagate up to the root handler (no own
+    # handler, so there's no second writer on the file).
+    app_logger = logging.getLogger("mcp-gateway")
+    app_logger.setLevel(logging.INFO)
+    app_logger.handlers = []
+    app_logger.propagate = True
+
     structlog.configure(
         processors=[
             structlog.processors.add_log_level,
@@ -353,6 +365,10 @@ async def _run(cfg: config_loader.GatewayConfig, log) -> None:
         host=cfg.host,
         port=cfg.port,
         log_level="warning",
+        # log_config=None → uvicorn installs no stderr handlers of its own, so
+        # its loggers propagate to our root rotating handler instead of launchd's
+        # err.log (issue #50).
+        log_config=None,
         timeout_graceful_shutdown=2,
     )
     await uvicorn.Server(config).serve()
