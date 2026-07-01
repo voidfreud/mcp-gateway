@@ -39,27 +39,6 @@ backend endpoint (bare names, instructions <=2KB) + a real passthrough call.
   its OWN endpoint (`/<backend>/mcp`), so tools are exposed BARE — no `<backend>_`
   prefix; the endpoint / Claude-Code server registration namespaces them.
 
-## Workflow (how we work on this project)
-- **One branch per change, off `main`.** Never commit directly to `main`. Merge
-  when done (fast-forward), then delete the branch — keep the repo flat. Claude
-  handles all the git; Alex never touches it.
-- **Commit each change atomically**, with a clear message and the co-author
-  trailer (`Co-Authored-By: Claude …`). **Never** put a session/transcript link
-  in a commit, PR, or issue.
-- **Gate before commit:** `just check` (ruff + pytest + import smoke) must be
-  green. For live behavior, also `just verify` against the running daemon.
-- **Sync the docs after every push.** Update the project memory at
-  `~/.claude/memory/project/mcp-gateway/` — `handoff.md` (STATUS + the two
-  trackers), `overview.md` if stable facts changed, the `MEMORY.md` index line,
-  and `reference/milestone-log.md` when something ships — then commit + push that
-  to the `~/.claude` repo (scoped to the files this change touched). Update this
-  repo's `README.md` / `CLAUDE.md` when behavior or a convention changes.
-- **Issues: the local handoff tracker is the source of truth.** Every actionable
-  item is a tracker row. Promote a row to a **GitHub issue** per-item (via `gh
-  issue create`) when it's worth tracking on GitHub; then put `[#N](url)` in the
-  row's PR/Issue column so both stay reconciled. Bugs (dropped/omitted info) get
-  the `bug` label; new capabilities get `enhancement`.
-
 ## Gotchas (verified against FastMCP 3.4.2)
 - Spec was written for FastMCP 2.x. v3 changes: `create_proxy()` (not
   `FastMCP.as_proxy`); transforms are `ToolTransform({name: ToolTransformConfig(
