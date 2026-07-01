@@ -35,22 +35,22 @@ def gw_config_dict(draw) -> dict:
     names = draw(st.lists(ident, min_size=1, max_size=4, unique=True))
     backends = []
     for nm in names:
-        transport = draw(st.sampled_from(["http", "stdio"]))
+        transport = draw(st.sampled_from(["http", "streamable-http", "sse", "stdio"]))
         b: dict = {"name": nm, "transport": transport, "stateless": draw(st.booleans())}
         if draw(st.booleans()):
             b["always_load"] = True
         if draw(st.booleans()):
             b["instructions"] = draw(free_text)
-        if transport == "http":
+        if transport == "stdio":
+            b["command"] = draw(st.sampled_from(["/bin/x", "uvx"]))
+            b["args"] = draw(st.lists(ident, max_size=3))
+        else:  # http / streamable-http / sse — all url-based
             b["url"] = draw(
                 st.sampled_from(["https://h/mcp", "http://127.0.0.1:9/mcp"])
             )
             if draw(st.booleans()):
                 b["auth_header"] = "Authorization"
                 b["auth_value"] = "Bearer ${T}"
-        else:
-            b["command"] = draw(st.sampled_from(["/bin/x", "uvx"]))
-            b["args"] = draw(st.lists(ident, max_size=3))
         tools = []
         for to in draw(st.lists(ident, max_size=3, unique=True)):
             t: dict = {"original": to, "enabled": draw(st.booleans())}
@@ -302,6 +302,83 @@ def test_stdio_backend_requires_command():
         cl.GatewayConfig.model_validate(
             {"backends": [{"name": "b", "transport": "stdio"}]}
         )
+
+
+# --- sse / streamable-http transports (issue #5) ---------------------------
+# FastMCP's RemoteMCPServer.transport accepts {"http","streamable-http","sse"}
+# (sse -> SSETransport; http/streamable-http -> StreamableHttpTransport), so we
+# pass the transport string through verbatim; all three are url-based.
+
+
+def test_sse_backend_validates_and_maps():
+    cfg = cl.GatewayConfig.model_validate(
+        {"backends": [{"name": "b", "transport": "sse", "url": "https://h/sse"}]}
+    )
+    assert cfg.backends[0].transport == "sse"
+    assert cl.backend_entry(cfg.backends[0]) == {
+        "url": "https://h/sse",
+        "transport": "sse",
+    }
+
+
+def test_streamable_http_backend_validates_and_maps():
+    cfg = cl.GatewayConfig.model_validate(
+        {
+            "backends": [
+                {"name": "b", "transport": "streamable-http", "url": "https://h/mcp"}
+            ]
+        }
+    )
+    assert cfg.backends[0].transport == "streamable-http"
+    assert cl.backend_entry(cfg.backends[0]) == {
+        "url": "https://h/mcp",
+        "transport": "streamable-http",
+    }
+
+
+def test_remote_backend_entry_includes_auth_header():
+    b = cl.Backend(
+        name="b",
+        transport="sse",
+        url="https://h/sse",
+        auth_header="Authorization",
+        auth_value="Bearer tok",
+    )
+    assert cl.backend_entry(b) == {
+        "url": "https://h/sse",
+        "transport": "sse",
+        "headers": {"Authorization": "Bearer tok"},
+    }
+
+
+def test_sse_backend_requires_url():
+    with pytest.raises(cl.ConfigError):
+        cl.GatewayConfig.model_validate(
+            {"backends": [{"name": "b", "transport": "sse"}]}
+        )
+
+
+def test_streamable_http_backend_requires_url():
+    with pytest.raises(cl.ConfigError):
+        cl.GatewayConfig.model_validate(
+            {"backends": [{"name": "b", "transport": "streamable-http"}]}
+        )
+
+
+def test_remote_transports_survive_toml_roundtrip():
+    # to_raw must serialize http/streamable-http/sse as url-based (not stdio).
+    for transport in ("http", "streamable-http", "sse"):
+        cfg = cl.GatewayConfig.model_validate(
+            {
+                "backends": [
+                    {"name": "b", "transport": transport, "url": "https://h/mcp"}
+                ]
+            }
+        )
+        reparsed = cl.GatewayConfig.model_validate(tomllib.loads(cl.dump_toml(cfg)))
+        assert reparsed.backends[0].transport == transport
+        assert reparsed.backends[0].url == "https://h/mcp"
+        assert reparsed.backends[0].command is None
 
 
 def test_duplicate_backend_names_rejected():

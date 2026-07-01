@@ -156,7 +156,7 @@ log_file = "~/.local/state/mcp-gateway/gateway.log"
 
 [[backends]]
 name = "exa"
-transport = "http"                       # "http" or "stdio"
+transport = "http"                       # http | streamable-http | sse | stdio
 url = "https://your-exa-endpoint/mcp"
 auth_header = "Authorization"            # optional; both or neither
 auth_value  = "Bearer ${EXA_TOKEN}"      # ${ENV} resolved at startup

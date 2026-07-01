@@ -88,7 +88,10 @@ class Backend(BaseModel, extra="forbid"):
     """One backend MCP server and its per-tool text overrides."""
 
     name: str
-    transport: Literal["http", "stdio"]
+    # http == FastMCP streamable-http; "streamable-http" is the explicit alias,
+    # "sse" is legacy SSE. http/streamable-http/sse are all url-based remote
+    # transports; stdio spawns a local command. (issue #5)
+    transport: Literal["http", "streamable-http", "sse", "stdio"]
     # http
     url: str | None = None
     auth_header: str | None = None
@@ -111,9 +114,11 @@ class Backend(BaseModel, extra="forbid"):
 
     @model_validator(mode="after")
     def _check_transport(self) -> "Backend":
-        if self.transport == "http":
+        if self.transport != "stdio":  # http / streamable-http / sse — url-based
             if not self.url:
-                raise ConfigError(f"backend {self.name!r}: http transport needs a url")
+                raise ConfigError(
+                    f"backend {self.name!r}: {self.transport} transport needs a url"
+                )
         else:  # stdio
             if not self.command:
                 raise ConfigError(
@@ -197,9 +202,16 @@ def exposed_name(cfg: GatewayConfig, backend: Backend, original: str) -> str:
 
 
 def backend_entry(b: Backend) -> dict:
-    """The FastMCP client-config entry for one backend (url/headers or command/env)."""
-    if b.transport == "http":
-        entry: dict = {"url": expand_env(b.url or ""), "transport": "http"}
+    """The FastMCP client-config entry for one backend (url/headers or command/env).
+
+    The transport string is passed through verbatim: FastMCP's
+    ``RemoteMCPServer.transport`` accepts ``http``/``streamable-http`` (both ->
+    StreamableHttpTransport) and ``sse`` (-> SSETransport) — see
+    ``fastmcp/mcp_config.py``. All three are url-based and share the url/auth shape;
+    only ``stdio`` takes a command.
+    """
+    if b.transport != "stdio":  # http / streamable-http / sse — url-based
+        entry: dict = {"url": expand_env(b.url or ""), "transport": b.transport}
         if b.auth_header and b.auth_value:
             entry["headers"] = {b.auth_header: expand_env(b.auth_value)}
     else:
@@ -311,7 +323,7 @@ def to_raw(cfg: GatewayConfig) -> dict:
 
     def _backend(b: Backend) -> dict:
         d: dict = {"name": b.name, "transport": b.transport}
-        if b.transport == "http":
+        if b.transport != "stdio":  # http / streamable-http / sse — url-based
             d["url"] = b.url
             if b.auth_header and b.auth_value:
                 d["auth_header"] = b.auth_header

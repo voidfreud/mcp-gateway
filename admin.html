@@ -122,6 +122,8 @@
     <select id="im_transport" onchange="importTransportChange()"
             style="width:100%;background:var(--panel2);border:1px solid var(--line);color:var(--fg);border-radius:7px;padding:7px 9px;">
       <option value="http">http</option>
+      <option value="streamable-http">streamable-http</option>
+      <option value="sse">sse</option>
       <option value="stdio">stdio</option>
     </select>
     <div id="im_http">
@@ -511,15 +513,17 @@ async function delBackend(name) {
 function openImport() { $('#importBg').classList.add('show'); $('#im_err').textContent = ''; }
 function closeImport() { $('#importBg').classList.remove('show'); }
 function importTransportChange() {
-  const http = $('#im_transport').value === 'http';
-  $('#im_http').style.display = http ? '' : 'none';
-  $('#im_stdio').style.display = http ? 'none' : '';
+  // http / streamable-http / sse all use the URL+auth fields; only stdio differs.
+  const stdio = $('#im_transport').value === 'stdio';
+  $('#im_http').style.display = stdio ? 'none' : '';
+  $('#im_stdio').style.display = stdio ? '' : 'none';
 }
 async function doImport() {
   const t = $('#im_transport').value;
+  const stdio = t === 'stdio';
   const body = { name: $('#im_name').value.trim(), transport: t,
-    stateless: t === 'http' };
-  if (t === 'http') { body.url = $('#im_url').value.trim(); body.auth_header = $('#im_ah').value.trim(); body.auth_value = $('#im_av').value.trim(); }
+    stateless: !stdio };
+  if (!stdio) { body.url = $('#im_url').value.trim(); body.auth_header = $('#im_ah').value.trim(); body.auth_value = $('#im_av').value.trim(); }
   else { body.command = $('#im_cmd').value.trim(); body.args = $('#im_args').value.trim() ? $('#im_args').value.trim().split(/\s+/) : []; }
   $('#im_go').disabled = true; $('#im_err').textContent = 'connecting…';
   try { const r = await api('POST', '/admin/api/backend', body); closeImport(); SELECTED = r.backend; toast('imported — restarting gateway…'); waitReload(); }
