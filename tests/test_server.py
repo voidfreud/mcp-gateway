@@ -236,6 +236,27 @@ def test_enable_all_route_sets_every_backend(tmp_path):
     assert all(not b.enabled for b in cl.load(_cfg_path(tmp_path)).backends)
 
 
+def test_remove_backend_prunes_defaults_file(tmp_path, monkeypatch):
+    # #54: removing a backend must also delete its captured defaults JSON
+    d = tmp_path / "defaults"
+    d.mkdir()
+    (d / "b.json").write_text("{}")
+    monkeypatch.setattr(admin, "DEFAULTS_DIR", d)
+    r = TestClient(_admin_app(tmp_path)).request("DELETE", "/admin/api/backend/b")
+    assert r.status_code == 200
+    assert not (d / "b.json").exists()
+
+
+def test_remove_backend_unknown_is_400_and_keeps_defaults(tmp_path, monkeypatch):
+    d = tmp_path / "defaults"
+    d.mkdir()
+    (d / "b.json").write_text("{}")
+    monkeypatch.setattr(admin, "DEFAULTS_DIR", d)
+    r = TestClient(_admin_app(tmp_path)).request("DELETE", "/admin/api/backend/nope")
+    assert r.status_code == 400
+    assert (d / "b.json").exists()
+
+
 def test_display_name_route_sets_and_clears(tmp_path):
     client = TestClient(_admin_app(tmp_path))
     r1 = client.post("/admin/api/backend/b/display-name", json={"value": "Nice Label"})
