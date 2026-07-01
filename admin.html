@@ -345,6 +345,7 @@ function toolCard(b, t) {
         <div class="lbl">Parameters</div>
         ${t.params.map(p => paramRow(p)).join('')}
       </div>
+      ${schemaSection(t)}
       <div style="margin-top:12px;display:flex;gap:8px;">
         <button class="ghost" onclick="resetTool('${esc(b.name)}','${esc(t.original)}')">Reset to default</button>
       </div>
@@ -365,6 +366,25 @@ function paramRow(p) {
       <div><label>Broadcast name</label><input type="text" class="p-name" value="${esc(name)}" data-default="${esc(p.default_name)}"></div>
       <div><label>Description</label><input type="text" class="p-desc" value="${esc(desc)}" data-default="${esc(p.default_description||'')}"></div>
     </div></div>`;
+}
+
+// Read-only schema surface (issue #2): a tool's outputSchema, _meta (FastMCP
+// tags + our anthropic/alwaysLoad pin) and ToolAnnotations (readOnly/destructive/
+// idempotent/openWorld) as captured from the wire. Shown only when the backend
+// advertises them; display only, never editable. Reuses the .instr card, the .si
+// muted label, and the .preview JSON box.
+function schemaSection(t) {
+  const block = (label, obj) =>
+    (obj && Object.keys(obj).length)
+      ? `<div class="si" style="margin-top:10px">${label}</div>
+         <pre class="preview" style="margin:4px 0 0">${esc(JSON.stringify(obj, null, 2))}</pre>`
+      : '';
+  const body = block('output schema', t.output_schema)
+    + block('_meta', t.meta)
+    + block('annotations', t.annotations);
+  if (!body) return '';
+  return `<div class="instr" style="margin:14px 0 4px">
+    <h3>Schema &amp; metadata <span class="si" style="font-weight:400">· read-only</span></h3>${body}</div>`;
 }
 
 // Wire auto-save: debounce on input; flush immediately on blur; refill a

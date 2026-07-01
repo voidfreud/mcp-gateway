@@ -79,22 +79,32 @@ def defaults_dir(tmp_path, monkeypatch):
     return d
 
 
-def _write_defaults(d, backend, tool, desc="orig desc", params=None):
-    (d / f"{backend}.json").write_text(
-        json.dumps(
-            {
-                "backend": backend,
-                "tools": [
-                    {
-                        "original": tool,
-                        "title": None,
-                        "description": desc,
-                        "params": params or [],
-                    }
-                ],
-            }
-        )
-    )
+def _write_defaults(
+    d,
+    backend,
+    tool,
+    desc="orig desc",
+    params=None,
+    output_schema=None,
+    meta=None,
+    annotations=None,
+):
+    t = {
+        "original": tool,
+        "title": None,
+        "description": desc,
+        "params": params or [],
+    }
+    # Read-only schema surface (issue #2): capture_defaults stores these keys only
+    # when the backend advertises them, so the stub mirrors that — keys present
+    # only when passed (older defaults files lack them entirely).
+    if output_schema is not None:
+        t["output_schema"] = output_schema
+    if meta is not None:
+        t["meta"] = meta
+    if annotations is not None:
+        t["annotations"] = annotations
+    (d / f"{backend}.json").write_text(json.dumps({"backend": backend, "tools": [t]}))
 
 
 def _single_cfg(backend="b", tool="t"):
@@ -324,6 +334,71 @@ def test_apply_required_param_not_hidden_ok(defaults_dir):
     )
     p = cfg.backends[0].tools[0].params[0]
     assert p.name == "repo" and p.hide is False
+
+
+# --- read-only schema surface (issue #2) -----------------------------------
+# The wire tools/list carries outputSchema, _meta (FastMCP tags + our
+# anthropic/alwaysLoad pin), and ToolAnnotations. capture_defaults needs a live
+# backend, so we stub the captured-defaults file (the exact shape capture_defaults
+# now writes) and exercise the readers — build_state surfacing them — plus the
+# pure annotations-serialization helper used on the capture side.
+
+
+def test_build_state_surfaces_output_schema_meta_annotations(defaults_dir):
+    _write_defaults(
+        defaults_dir,
+        "b",
+        "t",
+        output_schema={
+            "type": "object",
+            "properties": {"answer": {"type": "string"}},
+        },
+        meta={"_fastmcp": {"tags": ["search"]}, "anthropic/alwaysLoad": True},
+        annotations={"readOnlyHint": True, "destructiveHint": False},
+    )
+    cfg = _single_cfg()
+    tool = admin.build_state(cfg)["backends"][0]["tools"][0]
+    assert tool["output_schema"]["properties"]["answer"]["type"] == "string"
+    assert tool["meta"]["anthropic/alwaysLoad"] is True
+    assert tool["meta"]["_fastmcp"]["tags"] == ["search"]
+    assert tool["annotations"] == {"readOnlyHint": True, "destructiveHint": False}
+
+
+def test_build_state_schema_fields_none_when_absent(defaults_dir):
+    # An old defaults file (pre-#2) lacks these keys entirely -> readers must
+    # degrade to None, never KeyError, so the UI simply omits the section.
+    _write_defaults(defaults_dir, "b", "t")
+    cfg = _single_cfg()
+    tool = admin.build_state(cfg)["backends"][0]["tools"][0]
+    assert tool["output_schema"] is None
+    assert tool["meta"] is None
+    assert tool["annotations"] is None
+
+
+def test_annotations_to_dict_from_pydantic_model():
+    # capture side serializes mcp.types.ToolAnnotations -> plain JSON dict,
+    # dropping unset (None) hints while keeping explicit False.
+    from mcp.types import ToolAnnotations
+
+    ann = ToolAnnotations(readOnlyHint=True, destructiveHint=False)
+    assert admin._annotations_to_dict(ann) == {
+        "readOnlyHint": True,
+        "destructiveHint": False,
+    }
+
+
+def test_annotations_to_dict_none_and_empty_are_none():
+    from mcp.types import ToolAnnotations
+
+    assert admin._annotations_to_dict(None) is None
+    # all hints unset -> nothing worth storing -> None (so no key is written)
+    assert admin._annotations_to_dict(ToolAnnotations()) is None
+
+
+def test_annotations_to_dict_accepts_plain_dict():
+    assert admin._annotations_to_dict({"readOnlyHint": True, "x": None}) == {
+        "readOnlyHint": True
+    }
 
 
 # --- collision validation (no duplicate broadcast names/descriptions) ------
