@@ -68,6 +68,13 @@ def test_validate_rejects_unsafe(bad):
         admin._validate_name(bad, "tool name")
 
 
+def test_validate_length_cap_64():
+    # #41: 64 is the cap Claude Code / MCP expect for tool names
+    admin._validate_name("a" * 64, "tool name")  # at the cap -> fine
+    with pytest.raises(cl.ConfigError):
+        admin._validate_name("a" * 65, "tool name")
+
+
 # --- apply_tool_override (needs a defaults file) ---------------------------
 
 
