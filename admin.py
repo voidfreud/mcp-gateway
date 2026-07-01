@@ -350,6 +350,8 @@ def build_state(cfg: GatewayConfig) -> dict:
         backends.append(
             {
                 "name": b.name,
+                "display_name": b.display_name,
+                "enabled": b.enabled,
                 "endpoint": f"/{b.name}/mcp",
                 "transport": b.transport,
                 "url": b.url,
@@ -699,6 +701,55 @@ def register(app, config_path: str, log, registry: dict, holders: dict) -> None:
         hot_reload(registry, holders, cfg, name, log)
         return JSONResponse({"ok": True, "reloaded": "in-process"})
 
+    async def enable_backend(request: Request):
+        """Toggle a backend's broadcast switch (#38). Hot-reload — every tool's
+        enabled state flips in-process; the endpoint stays mounted, no restart."""
+        name = request.path_params["name"]
+        payload = await request.json()
+        cfg = _load()
+        b = next((x for x in cfg.backends if x.name == name), None)
+        if b is None:
+            return JSONResponse(
+                {"ok": False, "error": "unknown backend"}, status_code=400
+            )
+        b.enabled = bool(payload.get("value", True))
+        backup_config(config_path)
+        cl.save(cfg, config_path)
+        hot_reload(registry, holders, cfg, name, log)
+        return JSONResponse({"ok": True, "reloaded": "in-process"})
+
+    async def enable_all(request: Request):
+        """Master switch (#40): set every backend's enabled, then hot-reload each.
+        No topology change, so it's in-process like a per-backend toggle."""
+        payload = await request.json()
+        value = bool(payload.get("value", True))
+        cfg = _load()
+        for b in cfg.backends:
+            b.enabled = value
+        backup_config(config_path)
+        cl.save(cfg, config_path)
+        for b in cfg.backends:
+            hot_reload(registry, holders, cfg, b.name, log)
+        return JSONResponse({"ok": True, "reloaded": "in-process"})
+
+    async def set_display_name(request: Request):
+        """Set a backend's display-only name (#42). Purely cosmetic — routing,
+        endpoint URL, config keys and Claude Code registration all stay ``name`` —
+        so there's no hot-reload; empty clears it (falls back to ``name``)."""
+        name = request.path_params["name"]
+        payload = await request.json()
+        cfg = _load()
+        b = next((x for x in cfg.backends if x.name == name), None)
+        if b is None:
+            return JSONResponse(
+                {"ok": False, "error": "unknown backend"}, status_code=400
+            )
+        val = (payload.get("value") or "").strip()
+        b.display_name = val or None
+        backup_config(config_path)
+        cl.save(cfg, config_path)
+        return JSONResponse({"ok": True})
+
     async def add_backend(request: Request):
         """Import a new backend MCP. Validates + introspects, then restarts."""
         payload = await request.json()
@@ -772,6 +823,17 @@ def register(app, config_path: str, log, registry: dict, holders: dict) -> None:
             Route(
                 "/admin/api/backend/{name}/pin",
                 _needs_json(pin_backend),
+                methods=["POST"],
+            ),
+            Route(
+                "/admin/api/backend/{name}/enabled",
+                _needs_json(enable_backend),
+                methods=["POST"],
+            ),
+            Route("/admin/api/enabled", _needs_json(enable_all), methods=["POST"]),
+            Route(
+                "/admin/api/backend/{name}/display-name",
+                _needs_json(set_display_name),
                 methods=["POST"],
             ),
             Route("/admin/api/backend", _needs_json(add_backend), methods=["POST"]),

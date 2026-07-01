@@ -33,6 +33,16 @@
   .b-item.sel { background: var(--panel2); box-shadow: inset 3px 0 0 var(--accent); }
   .b-item .nm { font-weight: 600; }
   .b-item .meta { color: var(--mut); font-size: 12px; margin-top: 2px; display: flex; gap: 8px; }
+  /* sidebar row: name + per-row controls (enable toggle #38, delete ✕ #39) */
+  .b-item .b-row { display: flex; align-items: center; gap: 8px; }
+  .b-item .b-row .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .b-item .row-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+  .b-item .row-actions .tgl { cursor: pointer; margin: 0; }
+  .b-item .row-actions .x { border: none; background: none; color: var(--mut); padding: 0 3px;
+                            font-size: 14px; line-height: 1; opacity: 0; transition: opacity .12s; }
+  .b-item:hover .row-actions .x, .b-item.sel .row-actions .x { opacity: 1; }
+  .b-item .row-actions .x:hover { color: #ff9b9b; }
+  .b-item.off { opacity: .5; }                 /* disabled backend dimmed (#38) */
   .badge { font-size: 10.5px; text-transform: uppercase; letter-spacing: .4px;
            padding: 1px 6px; border-radius: 4px; border: 1px solid var(--line); color: var(--mut); }
   /* detail */
@@ -201,14 +211,28 @@ function renderList() {
   el.appendChild(gw);
   STATE.backends.forEach(b => {
     const d = document.createElement('div');
-    d.className = 'b-item' + (b.name === SELECTED ? ' sel' : '');
+    d.className = 'b-item' + (b.name === SELECTED ? ' sel' : '') + (b.enabled ? '' : ' off');
     d.onclick = () => { SELECTED = b.name; renderList(); renderDetail(b.name); };
     const overridden = b.tools.filter(t => t.name || t.title || t.description || !t.enabled
       || t.params.some(p => p.name || p.description || p.hide)).length;
-    d.innerHTML = `<div class="nm">${esc(b.name)}</div>
+    const label = esc(b.display_name || b.name);  // display-only name (#42)
+    d.innerHTML = `<div class="b-row">
+        <div class="nm" title="${esc(b.name)}">${label}</div>
+        <span class="row-actions">
+          <input type="checkbox" class="tgl" ${b.enabled ? 'checked' : ''}
+                 title="${b.enabled ? 'broadcasting — click to disable' : 'disabled — click to enable'}">
+          <button class="x" title="delete backend">✕</button>
+        </span>
+      </div>
       <div class="meta"><span class="badge">${b.transport}</span>
       <span>${b.tools.length} tools</span>${overridden ? `<span>· ${overridden} edited</span>` : ''}
-      ${b.introspected ? '' : '<span style="color:var(--warn)">· not introspected</span>'}</div>`;
+      ${b.introspected ? '' : '<span style="color:var(--warn)">· not introspected</span>'}
+      ${b.enabled ? '' : '<span style="color:var(--mut)">· off</span>'}</div>`;
+    // Controls must not trigger the row-select click.
+    const tgl = $('.tgl', d);
+    tgl.addEventListener('click', e => e.stopPropagation());
+    tgl.addEventListener('change', e => { e.stopPropagation(); enableBackend(b.name, tgl.checked); });
+    $('.x', d).addEventListener('click', e => { e.stopPropagation(); delBackend(b.name); });
     el.appendChild(d);
   });
 }
@@ -219,8 +243,8 @@ function renderDetail(name) {
   const m = $('#detail');
   const conn = b.transport === 'http' ? esc(b.url || '') : esc((b.command || '') + ' ' + (b.args || []).join(' '));
   m.innerHTML = `
-    <div class="b-head"><h2>${esc(b.name)}</h2><span class="badge">${b.transport}</span><code>${conn}</code></div>
-    <div class="hint" style="margin:-2px 0 12px">MCP endpoint <code>http://${esc(STATE.host)}:${STATE.port}${esc(b.endpoint || '')}</code> — register as its own server in Claude Code</div>
+    <div class="b-head"><h2>${esc(b.display_name || b.name)}</h2><span class="badge">${b.transport}</span>${b.enabled ? '' : '<span class="badge" style="border-color:var(--warn);color:var(--warn)">off</span>'}<code>${conn}</code></div>
+    <div class="hint" style="margin:-2px 0 12px">MCP endpoint <code>http://${esc(STATE.host)}:${STATE.port}${esc(b.endpoint || '')}</code> · registers in Claude Code as <code>gateway-${esc(b.name)}</code> — that is the routing identity (a display name below does not change it)</div>
     <div class="b-actions">
       <label class="chk" title="pin ALL this backend's tools to load upfront (eager)">
         <input type="checkbox" id="b-pin" ${b.always_load ? 'checked' : ''}
@@ -229,8 +253,19 @@ function renderDetail(name) {
       <button class="ghost" onclick="reintrospect('${escJS(b.name)}')">Re-introspect</button>
       <button class="ghost danger" onclick="delBackend('${escJS(b.name)}')">Remove backend</button>
     </div>
+    <div style="margin-bottom:16px">
+      <label>Display name <span style="text-transform:none;letter-spacing:0">(admin UI only)</span></label>
+      <input type="text" class="f-display" value="${esc(b.display_name || '')}" placeholder="${esc(b.name)}">
+      <div class="hint">Cosmetic label for the sidebar + header. Does <b>not</b> change the endpoint URL, config keys, or the
+        <code>gateway-${esc(b.name)}</code> registration in Claude Code. Empty = use <code>${esc(b.name)}</code>.</div>
+    </div>
     ${backendInstrSection(b)}
     <div id="tools"></div>`;
+  // Display name saves on blur/Enter (#42); reload refreshes header + sidebar label.
+  const dn = $('.f-display', m);
+  const saveDn = () => { if ((dn.value.trim() || null) !== (b.display_name || null)) setDisplayName(b.name, dn.value.trim()); };
+  dn.addEventListener('blur', saveDn);
+  dn.addEventListener('keydown', e => { if (e.key === 'Enter') dn.blur(); });
   wireInstr(m, b.name, b.default_instructions);
   wireCaps(m);  // live byte-count on the backend "Server instructions" textarea
   wireGrow(m);  // auto-size the "Server instructions" textarea (in DOM already)
@@ -327,12 +362,14 @@ function renderGateway() {
   const m = $('#detail');
   const base = `http://${esc(STATE.host)}:${STATE.port}`;
   const enc = new TextEncoder();
+  const total = STATE.backends.length;
+  const on = STATE.backends.filter(b => b.enabled).length;  // for the master toggle (#40)
   const rows = STATE.backends.map(b => {
     const instr = b.instructions ?? b.default_instructions ?? '';
     const bytes = enc.encode(instr).length;
     const over = bytes > 2048;
     return `<tr>
-      <td style="padding:4px 8px"><b>${esc(b.name)}</b></td>
+      <td style="padding:4px 8px"><b>${esc(b.name)}</b>${b.enabled ? '' : ' <span style="color:var(--warn)">off</span>'}</td>
       <td style="padding:4px 8px"><code>${esc(base + (b.endpoint || ''))}</code></td>
       <td style="padding:4px 8px;text-align:right;color:${over ? '#ff9b9b' : 'var(--mut)'}">${bytes} / 2048 B</td>
     </tr>`;
@@ -343,6 +380,11 @@ function renderGateway() {
     <p class="hint" style="margin:0 0 14px">Each backend is exposed as its <b>own MCP endpoint</b> below — register each as a
       separate server in Claude Code, so each gets its own ~2KB instructions budget. Edit a backend's server
       instructions on its own page (left).</p>
+    <div class="b-actions" style="margin-bottom:10px">
+      <label class="chk" title="enable or disable broadcast for ALL backends at once">
+        <input type="checkbox" id="masterTgl"> broadcast all backends</label>
+      <span class="hint" style="margin-top:0">${on}/${total} enabled${on > 0 && on < total ? ' · mixed' : ''}</span>
+    </div>
     <div class="b-actions" style="margin-bottom:16px">
       <button class="ghost danger" onclick="restartGateway()">Restart gateway</button>
       <span class="hint" style="margin-top:0">Restarts the daemon — briefly drops all live MCP connections.</span>
@@ -356,6 +398,14 @@ function renderGateway() {
         <tbody>${rows}</tbody>
       </table>
     </div>`;
+  // Master toggle (#40): checked = all on, indeterminate = mixed (set in JS since
+  // `indeterminate` has no HTML attribute), unchecked = all off.
+  const mt = $('#masterTgl');
+  if (mt) {
+    mt.checked = total > 0 && on === total;
+    mt.indeterminate = on > 0 && on < total;
+    mt.addEventListener('change', () => enableAll(mt.checked));
+  }
 }
 
 // Editable fields are PREFILLED with their effective value (override if set,
@@ -545,6 +595,23 @@ async function reintrospect(name) {
 async function pinBackend(name, value) {
   try { await api('POST', '/admin/api/backend/' + encodeURIComponent(name) + '/pin', { value }); toast(value ? 'pinned all tools (eager)' : 'unpinned'); }
   catch (e) { toast('pin failed: ' + e.message); }
+}
+// #38 — enable/disable one backend's broadcast (hot-reload). reload re-syncs the
+// sidebar toggle + dimming from the server's truth.
+async function enableBackend(name, value) {
+  try { await api('POST', '/admin/api/backend/' + encodeURIComponent(name) + '/enabled', { value }); await load(); toast(value ? 'enabled ' + name : 'disabled ' + name); }
+  catch (e) { toast('toggle failed: ' + e.message); await load(); }
+}
+// #40 — master switch: enable/disable every backend at once.
+async function enableAll(value) {
+  try { await api('POST', '/admin/api/enabled', { value }); await load(); toast(value ? 'all backends enabled' : 'all backends disabled'); }
+  catch (e) { toast('toggle failed: ' + e.message); await load(); }
+}
+// #42 — set a backend's display-only name (cosmetic; no restart). reload updates
+// the sidebar label + detail header.
+async function setDisplayName(name, value) {
+  try { await api('POST', '/admin/api/backend/' + encodeURIComponent(name) + '/display-name', { value }); await load(); }
+  catch (e) { toast('rename failed: ' + e.message); }
 }
 async function delBackend(name) {
   if (!confirm('Remove backend "' + name + '"? This restarts the gateway.')) return;

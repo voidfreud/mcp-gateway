@@ -88,6 +88,10 @@ class Backend(BaseModel, extra="forbid"):
     """One backend MCP server and its per-tool text overrides."""
 
     name: str
+    # Optional display-only label for the admin UI (#42). Cosmetic ONLY: it does
+    # NOT change routing, the endpoint URL, config keys, or the Claude Code
+    # registration — all of those keep using `name`. None/empty -> show `name`.
+    display_name: str | None = None
     # http == FastMCP streamable-http; "streamable-http" is the explicit alias,
     # "sse" is legacy SSE. http/streamable-http/sse are all url-based remote
     # transports; stdio spawns a local command. (issue #5)
@@ -105,6 +109,10 @@ class Backend(BaseModel, extra="forbid"):
     stateless: bool = False
     # Pin ALL of this backend's tools to load upfront (per-tool meta on each).
     always_load: bool = False
+    # Backend-level broadcast switch (#38). False -> NONE of this backend's tools
+    # are broadcast to Claude (every tool disabled via transforms). Hot-reloadable:
+    # the endpoint stays mounted and the backend process is not torn down.
+    enabled: bool = True
     # Override this backend's server-level `instructions` (the always-loaded
     # blurb the backend sends at `initialize`). None -> use the captured original
     # (see admin defaults); a string replaces it in the gateway's composed
@@ -273,7 +281,8 @@ def build_transforms(
                 arg_kwargs["description"] = param.description
             arguments[param.original] = ArgTransformConfig(**arg_kwargs)
 
-        tc_kwargs: dict = {"enabled": tool.enabled}
+        # Backend disabled (#38) forces every tool off, whatever its own state.
+        tc_kwargs: dict = {"enabled": tool.enabled and b.enabled}
         if tool.name is not None:
             tc_kwargs["name"] = tool.name
         if tool.title is not None:
@@ -286,8 +295,18 @@ def build_transforms(
             tc_kwargs["meta"] = dict(ALWAYS_LOAD_META)
         transforms[key] = ToolTransformConfig(**tc_kwargs)
 
-    # Per-backend always_load: also pin tools that have no override entry.
-    if b.always_load and all_tools and b.name in all_tools:
+    # Backend disabled (#38): force EVERY live tool off, including ones with no
+    # override entry. Runs before the always_load pin so "disabled" wins over a
+    # pin, and per-tool overrides above already got `enabled and b.enabled`.
+    if not b.enabled and all_tools and b.name in all_tools:
+        for original in all_tools[b.name]:
+            if original not in transforms:
+                transforms[original] = ToolTransformConfig(enabled=False)
+                index[original] = b.name
+
+    # Per-backend always_load: also pin tools that have no override entry. Skipped
+    # when the backend is disabled (nothing to pin — every tool is off).
+    if b.always_load and b.enabled and all_tools and b.name in all_tools:
         for original in all_tools[b.name]:
             if original not in transforms:
                 transforms[original] = ToolTransformConfig(
@@ -323,6 +342,8 @@ def to_raw(cfg: GatewayConfig) -> dict:
 
     def _backend(b: Backend) -> dict:
         d: dict = {"name": b.name, "transport": b.transport}
+        if b.display_name:
+            d["display_name"] = b.display_name
         if b.transport != "stdio":  # http / streamable-http / sse — url-based
             d["url"] = b.url
             if b.auth_header and b.auth_value:
@@ -337,6 +358,8 @@ def to_raw(cfg: GatewayConfig) -> dict:
         d["stateless"] = b.stateless
         if b.always_load:
             d["always_load"] = True
+        if not b.enabled:  # default True — only persist the off state (#38)
+            d["enabled"] = False
         if b.instructions is not None:
             d["instructions"] = b.instructions
         tools = [_tool(t) for t in b.tools]

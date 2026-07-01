@@ -219,6 +219,58 @@ def test_per_backend_always_load_pins_all_tools():
     assert all(t.meta == cl.ALWAYS_LOAD_META for t in tr._transforms.values())
 
 
+# --- backend-level enable/disable (#38) + display name (#42) ----------------
+
+
+def _one_backend(**kw):
+    return cl.GatewayConfig.model_validate(
+        {"backends": [{"name": "b", "transport": "stdio", "command": "/bin/x", **kw}]}
+    )
+
+
+def test_disabled_backend_disables_all_live_tools():
+    cfg = _one_backend(enabled=False)
+    tr, _ = cl.build_transforms(cfg, cfg.backends[0], all_tools={"b": ["t1", "t2"]})
+    assert set(tr._transforms) == {"t1", "t2"}
+    assert all(t.enabled is False for t in tr._transforms.values())
+
+
+def test_disabled_backend_overrides_per_tool_enabled():
+    cfg = _one_backend(enabled=False, tools=[{"original": "t1", "enabled": True}])
+    tr, _ = cl.build_transforms(cfg, cfg.backends[0], all_tools={"b": ["t1"]})
+    assert tr._transforms["t1"].enabled is False
+
+
+def test_disabled_backend_beats_always_load():
+    # disabled wins: tools stay off and are NOT pinned eager
+    cfg = _one_backend(enabled=False, always_load=True)
+    tr, _ = cl.build_transforms(cfg, cfg.backends[0], all_tools={"b": ["t1"]})
+    assert tr._transforms["t1"].enabled is False
+    assert tr._transforms["t1"].meta is None
+
+
+def test_enabled_backend_no_override_leaves_tool_untouched():
+    cfg = _one_backend()  # enabled defaults True, no overrides, no always_load
+    tr, _ = cl.build_transforms(cfg, cfg.backends[0], all_tools={"b": ["t1"]})
+    assert "t1" not in tr._transforms  # passes through, broadcast as-is
+
+
+def test_enabled_false_and_display_name_survive_roundtrip():
+    cfg = _one_backend(enabled=False, display_name="Nice Label")
+    raw = cl.to_raw(cfg)
+    assert raw["backends"][0]["enabled"] is False
+    assert raw["backends"][0]["display_name"] == "Nice Label"
+    reparsed = cl.GatewayConfig.model_validate(raw)
+    assert reparsed.backends[0].enabled is False
+    assert reparsed.backends[0].display_name == "Nice Label"
+
+
+def test_defaults_omit_enabled_and_display_name():
+    raw = cl.to_raw(_one_backend())  # enabled True + display_name None are defaults
+    assert "enabled" not in raw["backends"][0]
+    assert "display_name" not in raw["backends"][0]
+
+
 # --- per-backend instructions ----------------------------------------------
 # Each backend endpoint carries only its own server instructions (its override
 # else the captured original), so each gets Claude Code's full ~2KB budget (#29).
