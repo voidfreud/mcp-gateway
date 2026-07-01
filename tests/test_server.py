@@ -1,11 +1,14 @@
 """Tests for the robustness fixes: JSON-body 400 (#48), admin body-size cap
-(#49), and rotating gateway.log (#50)."""
+(#49), rotating gateway.log (#50), plus the admin-UX cluster: gateway version
+surfacing (#57) and honest dev/foreground restart reporting (#53/#56)."""
 
 from __future__ import annotations
 
 import json
 import logging
+import re
 from logging.handlers import RotatingFileHandler
+from pathlib import Path
 
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
@@ -14,6 +17,7 @@ from starlette.routing import Route
 from starlette.testclient import TestClient
 
 import admin
+import config_loader as cl
 import server
 
 
@@ -132,3 +136,65 @@ def test_library_warnings_route_into_gateway_log(tmp_path):
     logging.getLogger().handlers[0].flush()
 
     assert "simulated library warning" in log_path.read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# #57 — gateway version surfaced (single source) in /health and the admin state
+# ---------------------------------------------------------------------------
+
+
+def test_gateway_version_matches_pyproject():
+    text = (admin.HERE / "pyproject.toml").read_text(encoding="utf-8")
+    want = re.search(r'(?m)^version\s*=\s*"([^"]+)"', text).group(1)
+    assert admin.gateway_version() == want
+
+
+def test_health_reports_version():
+    client = TestClient(
+        Starlette(routes=[Route("/health", server._health, methods=["GET"])])
+    )
+    r = client.get("/health")
+    assert r.status_code == 200
+    # still starts with "ok" so existing liveness checks pass; version is visible
+    assert r.text.startswith("ok")
+    assert admin.gateway_version() in r.text
+
+
+# ---------------------------------------------------------------------------
+# #53/#56 — restart is only claimed when we're actually launchd-managed
+# ---------------------------------------------------------------------------
+
+
+def test_under_launchd_false_in_test_process():
+    # pytest is never the launchd-managed daemon, so this is False — which is what
+    # makes add/remove/restart report "dev-no-restart" instead of a stuck spinner.
+    assert admin.under_launchd() is False
+
+
+def _admin_app(tmp_path: Path) -> Starlette:
+    cfg = cl.GatewayConfig.model_validate(
+        {"backends": [{"name": "b", "transport": "stdio", "command": "/bin/x"}]}
+    )
+    path = tmp_path / "config.toml"
+    cl.save(cfg, str(path))
+    app = Starlette()
+    admin.register(app, str(path), logging.getLogger("test"), {}, {})
+    return app
+
+
+def test_restart_route_dev_reports_no_restart(tmp_path, monkeypatch):
+    monkeypatch.setattr(admin, "under_launchd", lambda: False)
+    r = TestClient(_admin_app(tmp_path)).post("/admin/api/restart")
+    assert r.status_code == 200
+    assert r.json()["reloaded"] == "dev-no-restart"
+
+
+def test_restart_route_managed_reports_restarting(tmp_path, monkeypatch):
+    monkeypatch.setattr(admin, "under_launchd", lambda: True)
+    calls = []
+    monkeypatch.setattr(admin, "restart_daemon", lambda log: calls.append(1))
+    r = TestClient(_admin_app(tmp_path)).post("/admin/api/restart")
+    assert r.status_code == 200
+    assert r.json()["reloaded"] == "restarting"
+    # the BackgroundTask (real kickstart, stubbed here) ran after the response
+    assert calls == [1]
