@@ -113,6 +113,22 @@ def _single_cfg(backend="b", tool="t"):
     )
 
 
+def test_client_config_handles_all_transports():
+    # admin import/introspection must build the client config for sse and
+    # streamable-http like the live proxy does — not mis-treat them as stdio (#5).
+    for transport in ("http", "streamable-http", "sse"):
+        b = cl.Backend(name="b", transport=transport, url="https://h/mcp")
+        assert admin._client_config(b) == {
+            "mcpServers": {"b": {"url": "https://h/mcp", "transport": transport}}
+        }
+    stdio = cl.Backend(name="s", transport="stdio", command="/bin/x", args=["mcp"])
+    assert admin._client_config(stdio) == {
+        "mcpServers": {
+            "s": {"command": "/bin/x", "args": ["mcp"], "transport": "stdio"}
+        }
+    }
+
+
 def test_apply_stores_override_when_changed(defaults_dir):
     _write_defaults(defaults_dir, "b", "t", desc="orig desc")
     cfg = _single_cfg()
