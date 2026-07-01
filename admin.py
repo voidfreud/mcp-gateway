@@ -857,6 +857,49 @@ def register(
         dev/foreground."""
         return _restart_response({})
 
+    async def run_tool(request: Request):
+        """Mini-Inspector (#3): execute one tool through the LIVE proxy — the
+        same path Claude uses, so renames/transforms apply and reverse-map —
+        and return structured + unstructured content + error state. Read-only
+        w.r.t. config, so no config_lock; call_tool_mcp doesn't raise on a
+        tool-level error (isError comes back in the payload)."""
+        payload = await request.json()
+        backend = payload.get("backend")
+        proxy = registry.get(backend)
+        if proxy is None:
+            return JSONResponse(
+                {"ok": False, "error": "backend not mounted"}, status_code=400
+            )
+        tool = payload.get("tool")
+        if not tool:
+            return JSONResponse({"ok": False, "error": "missing tool"}, status_code=400)
+        args = payload.get("args") or {}
+        if not isinstance(args, dict):
+            return JSONResponse(
+                {"ok": False, "error": "args must be an object"}, status_code=400
+            )
+        started = time.perf_counter()
+        try:
+            async with Client(proxy) as c:
+                res = await c.call_tool_mcp(tool, args, timeout=60)
+        except Exception as exc:  # noqa: BLE001 — surface, don't 500
+            return JSONResponse(
+                {"ok": False, "error": f"{type(exc).__name__}: {exc}"},
+                status_code=502,
+            )
+        return JSONResponse(
+            {
+                "ok": True,
+                "is_error": bool(res.isError),
+                "ms": round((time.perf_counter() - started) * 1000, 1),
+                "content": [
+                    blk.model_dump(mode="json", exclude_none=True)
+                    for blk in (res.content or [])
+                ],
+                "structured": res.structuredContent,
+            }
+        )
+
     async def reintrospect(request: Request):
         name = request.path_params["name"]
         cfg = _load()
@@ -903,6 +946,7 @@ def register(
             Route(
                 "/admin/api/backend/{name}", _locked(remove_backend), methods=["DELETE"]
             ),
+            Route("/admin/api/run", _needs_json(run_tool), methods=["POST"]),
             Route("/admin/api/restart", restart_gateway, methods=["POST"]),
             Route("/admin/api/introspect/{name}", reintrospect, methods=["POST"]),
         ]
