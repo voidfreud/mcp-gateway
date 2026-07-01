@@ -16,6 +16,7 @@ proxy over *two or more* backends prefixes them with the server name
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import sys
@@ -144,6 +145,18 @@ class Backend(BaseModel, extra="forbid"):
     url: str | None = None
     auth_header: str | None = None
     auth_value: str | None = None
+    # Extra static headers (#6) — values may reference ${ENV}. Merged with the
+    # legacy auth_header/auth_value pair (the pair wins on a same-name clash).
+    headers: dict[str, str] = Field(default_factory=dict)
+    # OAuth-protected remote MCP (#6): "oauth" is passed straight through to
+    # FastMCP's client config (RemoteMCPServer.auth), which runs the OAuth flow
+    # (browser consent on first connect, cached tokens after).
+    auth: Literal["oauth"] | None = None
+    # A command that prints a JSON object of headers to stdout (#6) — for
+    # short-lived tokens / SSO. Runs when the backend's client config is built
+    # (mount / introspect), NOT per request. Same trust level as a stdio
+    # backend's `command`: the config file is local-admin-owned.
+    headers_helper: str | None = None
     # stdio
     command: str | None = None
     args: list[str] = Field(default_factory=list)
@@ -253,6 +266,41 @@ def exposed_name(cfg: GatewayConfig, backend: Backend, original: str) -> str:
     return original
 
 
+def _run_headers_helper(b: Backend) -> dict[str, str]:
+    """Run ``headers_helper`` and parse its stdout as a JSON object of headers.
+
+    Raises ConfigError on a non-zero exit, timeout, or non-object output — a
+    misconfigured helper must fail loudly, not silently connect unauthenticated.
+    """
+    import subprocess
+
+    try:
+        out = subprocess.run(
+            b.headers_helper,
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=True,
+        ).stdout
+    except subprocess.SubprocessError as exc:
+        raise ConfigError(f"backend {b.name!r}: headers_helper failed: {exc}") from None
+    try:
+        data = json.loads(out)
+    except ValueError:
+        raise ConfigError(
+            f"backend {b.name!r}: headers_helper must print a JSON object"
+        ) from None
+    if not isinstance(data, dict) or not all(
+        isinstance(k, str) and isinstance(v, str) for k, v in data.items()
+    ):
+        raise ConfigError(
+            f"backend {b.name!r}: headers_helper must print a JSON object of "
+            f"string headers"
+        )
+    return data
+
+
 def backend_entry(b: Backend) -> dict:
     """The FastMCP client-config entry for one backend (url/headers or command/env).
 
@@ -264,8 +312,16 @@ def backend_entry(b: Backend) -> dict:
     """
     if b.transport != "stdio":  # http / streamable-http / sse — url-based
         entry: dict = {"url": expand_env(b.url or ""), "transport": b.transport}
-        if b.auth_header and b.auth_value:
-            entry["headers"] = {b.auth_header: expand_env(b.auth_value)}
+        headers: dict[str, str] = {}
+        if b.headers_helper:  # lowest precedence: refreshed on each config build
+            headers.update(_run_headers_helper(b))
+        headers.update({k: expand_env(v) for k, v in b.headers.items()})
+        if b.auth_header and b.auth_value:  # legacy single pair wins on clash
+            headers[b.auth_header] = expand_env(b.auth_value)
+        if headers:
+            entry["headers"] = headers
+        if b.auth:
+            entry["auth"] = b.auth
     else:
         entry = {"command": b.command, "args": list(b.args), "transport": "stdio"}
         if b.env:
@@ -393,6 +449,12 @@ def to_raw(cfg: GatewayConfig) -> dict:
             if b.auth_header and b.auth_value:
                 d["auth_header"] = b.auth_header
                 d["auth_value"] = b.auth_value
+            if b.headers:
+                d["headers"] = dict(b.headers)
+            if b.auth:
+                d["auth"] = b.auth
+            if b.headers_helper:
+                d["headers_helper"] = b.headers_helper
         else:
             d["command"] = b.command
             if b.args:

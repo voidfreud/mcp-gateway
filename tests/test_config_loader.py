@@ -482,3 +482,78 @@ def test_duplicate_backend_names_rejected():
                 ]
             }
         )
+
+
+# --- backend auth beyond a single header (#6) --------------------------------
+
+
+def _http_backend(**kw):
+    return cl.Backend.model_validate(
+        {"name": "b", "transport": "http", "url": "https://h/mcp", **kw}
+    )
+
+
+def test_multiple_headers_expand_env(monkeypatch):
+    monkeypatch.setenv("TOK6", "sec")
+    e = cl.backend_entry(_http_backend(headers={"X-A": "one", "X-B": "Bearer ${TOK6}"}))
+    assert e["headers"] == {"X-A": "one", "X-B": "Bearer sec"}
+
+
+def test_legacy_pair_wins_over_headers_on_clash():
+    e = cl.backend_entry(
+        _http_backend(
+            headers={"Authorization": "from-dict", "X-C": "keep"},
+            auth_header="Authorization",
+            auth_value="from-pair",
+        )
+    )
+    assert e["headers"] == {"Authorization": "from-pair", "X-C": "keep"}
+
+
+def test_oauth_passes_through():
+    e = cl.backend_entry(_http_backend(auth="oauth"))
+    assert e["auth"] == "oauth"
+    with pytest.raises(Exception):
+        _http_backend(auth="basic")  # only "oauth" is a valid literal
+
+
+def test_headers_helper_merges_lowest_precedence():
+    helper = "echo '" + '{"X-H": "helper", "Authorization": "helper-auth"}' + "'"
+    e = cl.backend_entry(
+        _http_backend(
+            headers_helper=helper,
+            headers={"Authorization": "dict-auth"},
+        )
+    )
+    assert e["headers"] == {"X-H": "helper", "Authorization": "dict-auth"}
+
+
+def test_headers_helper_failures_are_loud():
+    with pytest.raises(cl.ConfigError, match="failed"):
+        cl.backend_entry(_http_backend(headers_helper="exit 3"))
+    with pytest.raises(cl.ConfigError, match="JSON object"):
+        cl.backend_entry(_http_backend(headers_helper="echo not-json"))
+    with pytest.raises(cl.ConfigError, match="string headers"):
+        cl.backend_entry(_http_backend(headers_helper="echo '[1,2]'"))
+
+
+def test_auth_fields_roundtrip_toml(monkeypatch):
+    cfg = cl.GatewayConfig.model_validate(
+        {
+            "backends": [
+                {
+                    "name": "b",
+                    "transport": "http",
+                    "url": "https://h/mcp",
+                    "headers": {"X-A": "${T}"},
+                    "auth": "oauth",
+                    "headers_helper": "emit-headers",
+                }
+            ]
+        }
+    )
+    reparsed = cl.GatewayConfig.model_validate(tomllib.loads(cl.dump_toml(cfg)))
+    b = reparsed.backends[0]
+    assert b.headers == {"X-A": "${T}"}
+    assert b.auth == "oauth"
+    assert b.headers_helper == "emit-headers"
