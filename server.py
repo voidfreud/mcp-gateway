@@ -261,9 +261,9 @@ async def _mount_backend(
     registry: dict,
     holders: dict,
     log,
-) -> None:
+) -> bool:
     """Build ONE backend's proxy, apply its transforms + instructions, run its
-    http lifespan, and mount it at ``/<backend>/mcp``.
+    http lifespan, and mount it at ``/<backend>/mcp``. Returns True on success.
 
     ``stateless=false`` backends are built from a **persistent connected Client**
     (entered on *stack*, so one warm backend session is reused for the daemon's
@@ -306,8 +306,10 @@ async def _mount_backend(
             tools=len(index),
             instructions_chars=len(proxy.instructions or ""),
         )
+        return True
     except Exception as exc:  # noqa: BLE001
         log.warning("backend_mount_failed", backend=b.name, error=str(exc))
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -315,41 +317,72 @@ async def _mount_backend(
 # ---------------------------------------------------------------------------
 
 
-async def _run(cfg: config_loader.GatewayConfig, log) -> None:
-    # Capture each backend's tools + server instructions (no-op if already
-    # cached) so transforms (incl. per-backend always_load) and per-endpoint
-    # instructions can be built from the captured baseline.
-    await admin.ensure_defaults(cfg, log)
-    all_tools = admin.all_tools_from_defaults(cfg)
-    captured_instr = admin.captured_instructions(cfg)
+def _build_app(
+    cfg: config_loader.GatewayConfig,
+    log,
+    all_tools: dict,
+    captured_instr: dict,
+    config_path: str = CONFIG_PATH,
+) -> Starlette:
+    """Assemble the parent Starlette app: /health, admin, and a lifespan that
+    runs one **runner task per backend**, each owning that backend's
+    AsyncExitStack for its whole life.
 
+    Per-task ownership is load-bearing: the anyio cancel scopes inside a
+    backend's client/session-manager lifespans must be entered and exited by
+    the SAME task in LIFO order. A runner enters its stack, parks on the
+    shared ``stop`` event, and unwinds in itself on graceful shutdown — so a
+    request handler can never touch the scopes directly. Hot-add (#7) just
+    starts one more runner in the same task group and awaits its mount result
+    via ``tg.start``; the import endpoint responds when the backend is live.
+    """
     # Populated in the lifespan; the admin closes over both (by reference) so its
     # hot-reload can target the right backend's live proxy + transform holder.
     registry: dict = {}
     holders: dict = {}
+    hooks: dict = {}  # lifespan installs hooks["add"] (hot-add) for the admin
 
     @asynccontextmanager
     async def lifespan(app: Starlette):
-        async with AsyncExitStack() as stack:
-            for b in cfg.backends:
-                await _mount_backend(
-                    app,
-                    stack,
-                    b,
-                    cfg,
-                    all_tools,
-                    captured_instr,
-                    registry,
-                    holders,
-                    log,
+        stop = anyio.Event()  # set on shutdown -> every runner unwinds itself
+
+        async def runner(b, cfg_, all_tools_, captured_, *, task_status):
+            async with AsyncExitStack() as stack:
+                ok = await _mount_backend(
+                    app, stack, b, cfg_, all_tools_, captured_, registry, holders, log
                 )
+                task_status.started(ok)
+                if ok:
+                    await stop.wait()
+
+        async with anyio.create_task_group() as tg:
+            for b in cfg.backends:
+                await tg.start(runner, b, cfg, all_tools, captured_instr)
+
+            async def hot_add(b: config_loader.Backend) -> bool:
+                """Mount a just-imported backend live (#7). Config is already
+                saved; a fresh load picks the new backend's transforms up."""
+                cfg2 = config_loader.load(config_path)
+                return await tg.start(
+                    runner,
+                    b,
+                    cfg2,
+                    admin.all_tools_from_defaults(cfg2),
+                    admin.captured_instructions(cfg2),
+                )
+
+            hooks["add"] = hot_add
             log.info(
                 "gateway_starting",
                 backends=list(registry),
                 endpoints=[f"http://{cfg.host}:{cfg.port}/{n}/mcp" for n in registry],
                 admin=f"http://{cfg.host}:{cfg.port}/admin",
             )
-            yield
+            try:
+                yield
+            finally:
+                hooks.pop("add", None)
+                stop.set()  # graceful: runners exit their stacks, tg drains
 
     # Admin + health are static (no backend connection needed); the per-backend
     # MCP mounts are added during the lifespan (they need connected clients).
@@ -360,7 +393,19 @@ async def _run(cfg: config_loader.GatewayConfig, log) -> None:
             StarletteMiddleware(BodyLimitMiddleware, max_bytes=ADMIN_BODY_LIMIT)
         ],
     )
-    admin.register(parent, CONFIG_PATH, log, registry, holders)
+    admin.register(parent, config_path, log, registry, holders, hooks)
+    return parent
+
+
+async def _run(cfg: config_loader.GatewayConfig, log) -> None:
+    # Capture each backend's tools + server instructions (no-op if already
+    # cached) so transforms (incl. per-backend always_load) and per-endpoint
+    # instructions can be built from the captured baseline.
+    await admin.ensure_defaults(cfg, log)
+    all_tools = admin.all_tools_from_defaults(cfg)
+    captured_instr = admin.captured_instructions(cfg)
+
+    parent = _build_app(cfg, log, all_tools, captured_instr)
 
     config = uvicorn.Config(
         parent,
