@@ -13,6 +13,7 @@ so those write config and restart the daemon.
 
 from __future__ import annotations
 
+import importlib.metadata
 import json
 import os
 import re
@@ -35,6 +36,24 @@ DEFAULTS_DIR = STATE_DIR / "defaults"
 BACKUP_DIR = STATE_DIR / "backups"
 HERE = Path(__file__).resolve().parent
 LAUNCHD_LABEL = "com.void.mcp-gateway"
+
+
+def gateway_version() -> str:
+    """The gateway's own version, from a single source (package metadata, else
+    the ``version = "..."`` line in pyproject.toml). Surfaced in the admin UI and
+    ``/health`` so the running build is visible after a restart/upgrade (#57)."""
+    try:
+        return importlib.metadata.version("mcp-gateway")
+    except importlib.metadata.PackageNotFoundError:
+        pass
+    try:
+        text = (HERE / "pyproject.toml").read_text(encoding="utf-8")
+        m = re.search(r'(?m)^version\s*=\s*"([^"]+)"', text)
+        if m:
+            return m.group(1)
+    except OSError:
+        pass
+    return "unknown"
 
 
 # ---------------------------------------------------------------------------
@@ -352,6 +371,7 @@ def build_state(cfg: GatewayConfig) -> dict:
     return {
         "host": cfg.host,
         "port": cfg.port,
+        "version": gateway_version(),
         # Each backend is its own MCP endpoint with its own instructions now (no
         # single cross-backend "gateway instructions"); the UI shows an endpoints
         # overview + per-backend server-instructions editing.
@@ -511,13 +531,36 @@ def hot_reload(
     log.info("hot_reload", backend=backend)
 
 
+def under_launchd() -> bool:
+    """True iff *this* process is the one launchd manages, i.e. a kickstart would
+    actually restart us. We ask launchctl for the loaded job's pid and compare it
+    to our own — so a stale/other launchd copy, or a foreground dev run with no
+    job loaded, both correctly report False. Lets callers tell the UI the truth
+    instead of a blanket "restarting" (#53)."""
+    uid = os.getuid()
+    try:
+        r = subprocess.run(
+            ["launchctl", "print", f"gui/{uid}/{LAUNCHD_LABEL}"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if r.returncode != 0:
+        return False
+    m = re.search(r"(?m)^\s*pid\s*=\s*(\d+)", r.stdout)
+    return m is not None and int(m.group(1)) == os.getpid()
+
+
 def restart_daemon(log) -> None:
     """Restart the launchd service (for backend topology changes).
 
     Run as a Starlette BackgroundTask, i.e. AFTER the HTTP response has flushed,
     so no `sleep` shell is needed. ``subprocess.run`` waits on (reaps) the child,
     so it never leaves a zombie; in production launchd then kills+restarts us.
-    No-op (logs a warning) if not running under launchd (dev/foreground).
+    Callers gate this on ``under_launchd()`` so it's only scheduled when it will
+    actually take effect; the kickstart-failed warning stays as a safety net.
     """
     uid = os.getuid()
     target = f"gui/{uid}/{LAUNCHD_LABEL}"
@@ -572,6 +615,19 @@ def register(app, config_path: str, log, registry: dict, holders: dict) -> None:
 
     def _load() -> GatewayConfig:
         return cl.load(config_path)
+
+    def _restart_response(extra: dict) -> JSONResponse:
+        """Response for a topology change that needs a full restart. Only
+        schedules (and claims) the restart when we're actually launchd-managed;
+        in dev/foreground it says so honestly instead of a stuck "restarting"
+        (#53). Config is already written either way — it takes effect on the next
+        real restart."""
+        if under_launchd():
+            return JSONResponse(
+                {"ok": True, "reloaded": "restarting", **extra},
+                background=BackgroundTask(restart_daemon, log),
+            )
+        return JSONResponse({"ok": True, "reloaded": "dev-no-restart", **extra})
 
     async def admin_page(_request: Request):
         return FileResponse(HERE / "admin.html")
@@ -672,10 +728,7 @@ def register(app, config_path: str, log, registry: dict, holders: dict) -> None:
         cfg.backends.append(b)
         backup_config(config_path)
         cl.save(cfg, config_path)
-        return JSONResponse(
-            {"ok": True, "reloaded": "restarting", "backend": b.name},
-            background=BackgroundTask(restart_daemon, log),
-        )
+        return _restart_response({"backend": b.name})
 
     async def remove_backend(request: Request):
         name = request.path_params["name"]
@@ -688,10 +741,13 @@ def register(app, config_path: str, log, registry: dict, holders: dict) -> None:
             )
         backup_config(config_path)
         cl.save(cfg, config_path)
-        return JSONResponse(
-            {"ok": True, "reloaded": "restarting"},
-            background=BackgroundTask(restart_daemon, log),
-        )
+        return _restart_response({})
+
+    async def restart_gateway(_request: Request):
+        """Manual on-demand restart of the daemon (#56). Same launchd-gated
+        semantics as a topology change: restarts when managed, honest no-op in
+        dev/foreground."""
+        return _restart_response({})
 
     async def reintrospect(request: Request):
         name = request.path_params["name"]
@@ -717,6 +773,7 @@ def register(app, config_path: str, log, registry: dict, holders: dict) -> None:
             ),
             Route("/admin/api/backend", _needs_json(add_backend), methods=["POST"]),
             Route("/admin/api/backend/{name}", remove_backend, methods=["DELETE"]),
+            Route("/admin/api/restart", restart_gateway, methods=["POST"]),
             Route("/admin/api/introspect/{name}", reintrospect, methods=["POST"]),
         ]
     )

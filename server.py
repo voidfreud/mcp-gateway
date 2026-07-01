@@ -246,7 +246,9 @@ async def _reconcile(proxy: FastMCP, index: dict[str, str], log) -> None:
 
 
 async def _health(_request: Request) -> PlainTextResponse:
-    return PlainTextResponse("ok")
+    # Body starts with "ok" so existing liveness checks still pass; the version
+    # tail lets you confirm which build answered (#57).
+    return PlainTextResponse(f"ok mcp-gateway {admin.gateway_version()}")
 
 
 async def _mount_backend(

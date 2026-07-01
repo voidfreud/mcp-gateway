@@ -59,7 +59,10 @@
     border-radius: 7px; padding: 7px 9px; font: inherit; }
   input[readonly] { background: var(--ro); color: var(--mut); }
   input:focus, textarea:focus { outline: none; border-color: var(--accent); }
-  textarea { resize: vertical; min-height: 38px; }
+  /* min-height is the floor; autoGrow() (JS) sizes height to content up to a
+     ~40vh cap, then lets it scroll. overflow starts hidden so a short box shows
+     no scrollbar before JS runs. */
+  textarea { resize: vertical; min-height: 38px; overflow-y: hidden; }
   .hint { font-size: 11.5px; color: var(--mut); margin-top: 3px; }
   /* live byte-count for capped fields ([data-cap]): bottom-right, gray; red at/over cap */
   .cap-wrap { position: relative; }
@@ -218,9 +221,11 @@ function renderDetail(name) {
     <div id="tools"></div>`;
   wireInstr(m, b.name, b.default_instructions);
   wireCaps(m);  // live byte-count on the backend "Server instructions" textarea
+  wireGrow(m);  // auto-size the "Server instructions" textarea (in DOM already)
   const tw = $('#tools', m);
   if (!b.introspected) { tw.innerHTML = '<div class="empty">Backend not introspected yet — click Re-introspect.</div>'; return; }
   b.tools.forEach(t => tw.appendChild(toolCard(b, t)));
+  wireGrow(m);  // auto-size tool Description + param Description textareas (now in DOM)
 }
 
 // Per-backend server instructions: prefilled with the override else the captured
@@ -233,7 +238,7 @@ function backendInstrSection(b) {
   return `<div class="instr">
     <h3>Server instructions</h3>
     <div class="si">${si ? esc(si) + ' · ' : ''}the always-loaded blurb this MCP sends; folded into the gateway's instructions</div>
-    <textarea class="f-instr" data-cap="2048" data-default="${esc(b.default_instructions ?? '')}"
+    <textarea class="f-instr grow" data-cap="2048" data-default="${esc(b.default_instructions ?? '')}"
       placeholder="${has ? '' : '(this server sends no instructions — type to add your own)'}">${esc(eff)}</textarea>
     <div class="hint">Empty = inherit the server's original${has ? '' : ' (none)'}. Edits reload live.</div>
   </div>`;
@@ -279,6 +284,28 @@ function wireCaps(root) {
   });
 }
 
+// Auto-size a textarea to its content: height = scrollHeight, floored by CSS
+// min-height and capped at ~40vh (then it scrolls) so a big blurb can't push the
+// layout off-screen (#58). Must run once the element is laid out in the DOM.
+function autoGrow(el) {
+  const max = Math.round(window.innerHeight * 0.4);
+  el.style.height = 'auto';                         // reset so scrollHeight shrinks too
+  const h = Math.min(el.scrollHeight, max);
+  el.style.height = h + 'px';
+  el.style.overflowY = el.scrollHeight > max ? 'auto' : 'hidden';
+}
+// Wire every .grow textarea under root. Call AFTER root is in the DOM (a detached
+// node reports scrollHeight 0). Idempotent per element.
+function wireGrow(root) {
+  root.querySelectorAll('textarea.grow').forEach(ta => {
+    if (ta.dataset.growWired) return;
+    ta.dataset.growWired = '1';
+    ta.addEventListener('input', () => autoGrow(ta));
+    ta.addEventListener('blur', () => autoGrow(ta));  // catch programmatic refills
+    autoGrow(ta);
+  });
+}
+
 // Gateway pseudo-detail: a read-only overview of the per-backend MCP endpoints.
 // Each backend is its own MCP server now (its own URL + its own ~2KB
 // instructions budget), so there is no single cross-backend "gateway
@@ -299,10 +326,15 @@ function renderGateway() {
     </tr>`;
   }).join('');
   m.innerHTML = `
-    <div class="b-head"><h2>⚙ Gateway</h2><code>${STATE.backends.length} MCP endpoint(s)</code></div>
+    <div class="b-head"><h2>⚙ Gateway</h2><code>${STATE.backends.length} MCP endpoint(s)</code>
+      <span class="badge" title="running gateway build">v${esc(STATE.version || '?')}</span></div>
     <p class="hint" style="margin:0 0 14px">Each backend is exposed as its <b>own MCP endpoint</b> below — register each as a
       separate server in Claude Code, so each gets its own ~2KB instructions budget. Edit a backend's server
       instructions on its own page (left).</p>
+    <div class="b-actions" style="margin-bottom:16px">
+      <button class="ghost danger" onclick="restartGateway()">Restart gateway</button>
+      <span class="hint" style="margin-top:0">Restarts the daemon — briefly drops all live MCP connections.</span>
+    </div>
     <div class="instr">
       <h3>Endpoints</h3>
       <table style="width:100%;border-collapse:collapse;font-size:13px">
@@ -342,7 +374,7 @@ function toolCard(b, t) {
         <div><label>Title</label><input type="text" class="f-title" value="${esc(title)}" data-default="${esc(t.default_title||'')}"></div>
       </div>
       <label>Description (what Claude reads)</label>
-      <textarea class="f-desc" data-cap="2048" data-default="${esc(t.default_description||'')}">${esc(desc)}</textarea>
+      <textarea class="f-desc grow" data-cap="2048" data-default="${esc(t.default_description||'')}">${esc(desc)}</textarea>
       <div class="params">
         <div class="lbl">Parameters</div>
         ${t.params.map(p => paramRow(p)).join('')}
@@ -364,10 +396,9 @@ function paramRow(p) {
   return `<div class="param" data-original="${esc(p.original)}">
     <div class="p-top"><span class="orig" title="real MCP parameter name (provider-facing, not editable)">${esc(p.original)}${req}</span>
       <label class="chk"><input type="checkbox" class="p-hide" ${p.hide?'checked':''}> hide</label></div>
-    <div class="row" style="margin-top:8px;">
-      <div><label>Broadcast name</label><input type="text" class="p-name" value="${esc(name)}" data-default="${esc(p.default_name)}"></div>
-      <div><label>Description</label><input type="text" class="p-desc" value="${esc(desc)}" data-default="${esc(p.default_description||'')}"></div>
-    </div></div>`;
+    <div style="margin-top:8px;"><label>Broadcast name</label><input type="text" class="p-name" value="${esc(name)}" data-default="${esc(p.default_name)}"></div>
+    <div style="margin-top:8px;"><label>Description</label><textarea class="p-desc grow" data-default="${esc(p.default_description||'')}">${esc(desc)}</textarea></div>
+    </div>`;
 }
 
 // Read-only schema surface (issue #2): a tool's outputSchema, _meta (FastMCP
@@ -505,8 +536,20 @@ async function pinBackend(name, value) {
 }
 async function delBackend(name) {
   if (!confirm('Remove backend "' + name + '"? This restarts the gateway.')) return;
-  try { await api('DELETE', '/admin/api/backend/' + encodeURIComponent(name)); SELECTED = null; toast('removed — restarting…'); waitReload(); }
+  try { const r = await api('DELETE', '/admin/api/backend/' + encodeURIComponent(name)); SELECTED = null; afterRestart(r, 'removed'); }
   catch (e) { toast('remove failed: ' + e.message); }
+}
+// Manual on-demand restart of the daemon (#56).
+async function restartGateway() {
+  if (!confirm('Restart the gateway now? This briefly drops all live MCP connections.')) return;
+  try { const r = await api('POST', '/admin/api/restart'); afterRestart(r, 'restart requested'); }
+  catch (e) { toast('restart failed: ' + e.message); }
+}
+// Honor the honest reloaded state (#53): a real launchd restart → poll back; in
+// dev/foreground there is no restart, so just say so and refresh from disk.
+function afterRestart(r, verb) {
+  if (r && r.reloaded === 'restarting') { toast(verb + ' — restarting gateway…'); waitReload(); }
+  else { toast(verb + ' (dev: no launchd restart — applies on next manual restart)'); load(); }
 }
 
 // import modal
@@ -526,7 +569,7 @@ async function doImport() {
   if (!stdio) { body.url = $('#im_url').value.trim(); body.auth_header = $('#im_ah').value.trim(); body.auth_value = $('#im_av').value.trim(); }
   else { body.command = $('#im_cmd').value.trim(); body.args = $('#im_args').value.trim() ? $('#im_args').value.trim().split(/\s+/) : []; }
   $('#im_go').disabled = true; $('#im_err').textContent = 'connecting…';
-  try { const r = await api('POST', '/admin/api/backend', body); closeImport(); SELECTED = r.backend; toast('imported — restarting gateway…'); waitReload(); }
+  try { const r = await api('POST', '/admin/api/backend', body); closeImport(); SELECTED = r.backend; afterRestart(r, 'imported'); }
   catch (e) { $('#im_err').textContent = e.message; }
   finally { $('#im_go').disabled = false; }
 }
