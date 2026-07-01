@@ -608,13 +608,23 @@ def _needs_json(handler):
     return guarded
 
 
-def register(app, config_path: str, log, registry: dict, holders: dict) -> None:
+def register(
+    app,
+    config_path: str,
+    log,
+    registry: dict,
+    holders: dict,
+    hooks: dict | None = None,
+) -> None:
     """Attach the admin UI + API routes to the parent Starlette *app*.
 
     ``registry`` (backend name -> live proxy) and ``holders`` (backend name ->
     [current transform]) are populated during the server lifespan and shared by
-    reference, so hot-reload targets the right backend's live proxy.
+    reference, so hot-reload targets the right backend's live proxy. ``hooks``
+    is likewise filled by the lifespan: ``hooks["add"]`` mounts a just-imported
+    backend live (#7) so an import needs no daemon restart.
     """
+    hooks = hooks if hooks is not None else {}
 
     def _load() -> GatewayConfig:
         return cl.load(config_path)
@@ -808,6 +818,19 @@ def register(app, config_path: str, log, registry: dict, holders: dict) -> None:
             cfg.backends.append(b)
             backup_config(config_path)
             cl.save(cfg, config_path)
+        # Hot-add (#7): mount the new backend into the RUNNING daemon — no
+        # restart, no /health polling race. Config is already saved either way,
+        # so a failed mount still lands the backend on the next real restart.
+        hot_add = hooks.get("add")
+        if hot_add is not None:
+            if await hot_add(b):
+                log.info("backend_hot_added", backend=b.name)
+                return JSONResponse(
+                    {"ok": True, "reloaded": "hot-add", "backend": b.name}
+                )
+            return JSONResponse(
+                {"ok": True, "reloaded": "mount-failed", "backend": b.name}
+            )
         return _restart_response({"backend": b.name})
 
     async def remove_backend(request: Request):

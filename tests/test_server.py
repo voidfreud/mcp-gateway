@@ -257,6 +257,74 @@ def test_remove_backend_unknown_is_400_and_keeps_defaults(tmp_path, monkeypatch)
     assert (d / "b.json").exists()
 
 
+# ---------------------------------------------------------------------------
+# #7 — import hot-adds the backend into the running daemon (no restart)
+# ---------------------------------------------------------------------------
+
+
+def _live_app(tmp_path):
+    """The REAL parent app via _build_app — TestClient's context manager runs the
+    lifespan, so the mounter task is live and hooks["add"] is installed."""
+    cfg = cl.GatewayConfig.model_validate(
+        {"backends": [{"name": "b", "transport": "stdio", "command": "/bin/x"}]}
+    )
+    path = tmp_path / "config.toml"
+    cl.save(cfg, str(path))
+    return server._build_app(
+        cfg, structlog.get_logger("test"), {}, {}, config_path=str(path)
+    )
+
+
+def test_import_hot_adds_backend_without_restart(tmp_path, monkeypatch):
+    monkeypatch.setattr(admin, "DEFAULTS_DIR", tmp_path / "defaults")
+
+    async def fake_capture(b):
+        return {"backend": b.name, "instructions": None, "tools": []}
+
+    monkeypatch.setattr(admin, "capture_defaults", fake_capture)
+    with TestClient(_live_app(tmp_path)) as client:
+        # stateless=True builds the proxy lazily, so mounting needs no live
+        # backend; the (dead) URL only matters at call time.
+        r = client.post(
+            "/admin/api/backend",
+            json={
+                "name": "new",
+                "transport": "http",
+                "url": "http://127.0.0.1:9/mcp",
+                "stateless": True,
+            },
+        )
+        assert r.status_code == 200
+        assert r.json()["reloaded"] == "hot-add"
+        # The endpoint is mounted in the RUNNING app — same process, no restart.
+        assert client.get("/new/mcp").status_code != 404
+        # And the admin state serves it immediately (what the UI re-renders from).
+        st = client.get("/admin/api/state").json()
+        assert "new" in [b["name"] for b in st["backends"]]
+
+
+def test_import_hot_add_config_persisted(tmp_path, monkeypatch):
+    monkeypatch.setattr(admin, "DEFAULTS_DIR", tmp_path / "defaults")
+
+    async def fake_capture(b):
+        return {"backend": b.name, "instructions": None, "tools": []}
+
+    monkeypatch.setattr(admin, "capture_defaults", fake_capture)
+    with TestClient(_live_app(tmp_path)) as client:
+        client.post(
+            "/admin/api/backend",
+            json={
+                "name": "new",
+                "transport": "http",
+                "url": "http://127.0.0.1:9/mcp",
+                "stateless": True,
+            },
+        )
+    # survives the daemon lifecycle: it's in config.toml, not only in memory
+    names = [b.name for b in cl.load(str(tmp_path / "config.toml")).backends]
+    assert names == ["b", "new"]
+
+
 def test_add_backend_does_not_lose_concurrent_edit(tmp_path, monkeypatch):
     """#52: add_backend awaits a network probe between config load and save. A
     config edit that lands during that await must NOT be overwritten — the

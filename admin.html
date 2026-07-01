@@ -677,8 +677,11 @@ async function doRestartNow() {
 }
 // Honor the honest reloaded state (#53): a real launchd restart → poll back; in
 // dev/foreground there is no restart, so just say so and refresh from disk.
+// #7: an import hot-adds into the running daemon — live immediately, no restart.
 function afterRestart(r, verb) {
-  if (r && r.reloaded === 'restarting') { toast(verb + ' — restarting gateway…'); waitReload(); }
+  if (r && r.reloaded === 'hot-add') { toast(verb + ' — live, no restart needed'); load(); }
+  else if (r && r.reloaded === 'mount-failed') { toast(verb + ' — saved, but mounting failed; check logs / restart gateway'); load(); }
+  else if (r && r.reloaded === 'restarting') { toast(verb + ' — restarting gateway…'); waitReload(); }
   else { toast(verb + ' (dev: no launchd restart — applies on next manual restart)'); load(); }
 }
 
