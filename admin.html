@@ -107,6 +107,7 @@
   .modal h3 { margin: 0 0 14px; }
   .modal .foot { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
   .modal .err { color: #ff9b9b; font-size: 12.5px; min-height: 16px; margin-top: 8px; }
+  input.bad { border-color: #ff9b9b; outline: 1px solid #ff9b9b; }
   .toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%);
            background: var(--panel2); border: 1px solid var(--accent); color: var(--fg);
            padding: 10px 16px; border-radius: 8px; display: none; }
@@ -520,8 +521,25 @@ function gather(card) {
 
 const pending = {};  // key -> {backend, original, card} for edits not yet persisted
 
+// #41 — client mirror of the server's _NAME_RE. Empty is fine (inherit default).
+const NAME_RE = /^[A-Za-z0-9_-]{1,64}$/;
+function namesValid(card) {
+  let ok = true;
+  [...card.querySelectorAll('.f-name, .p-name')].forEach(inp => {
+    const bad = inp.value.trim() !== '' && !NAME_RE.test(inp.value.trim());
+    inp.classList.toggle('bad', bad);
+    if (bad) ok = false;
+  });
+  return ok;
+}
+
 function scheduleSave(backend, original, card) {
   const key = backend + '::' + original;
+  if (!namesValid(card)) {  // #41: never send an invalid broadcast name
+    clearTimeout(timers[key]); delete timers[key]; delete pending[key];
+    toast("invalid name: letters, digits, '_' or '-' only, max 64 chars");
+    return;
+  }
   clearTimeout(timers[key]);
   pending[key] = { backend, original, card };
   card.classList.toggle('disabled', !$('.f-enabled', card).checked);
@@ -533,6 +551,7 @@ function scheduleSave(backend, original, card) {
 // fsync) server-side, so nothing is lost on crash. keepalive lets it finish
 // during page unload.
 async function doSave(backend, original, card, keepalive = false) {
+  if (!namesValid(card)) return;  // #41
   const key = backend + '::' + original;
   clearTimeout(timers[key]); delete timers[key]; delete pending[key];
   const body = JSON.stringify({ backend, tool_original: original, override: gather(card) });

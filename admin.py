@@ -394,15 +394,17 @@ def _clean(v):
     return v
 
 
-_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
 def _validate_name(name: str | None, what: str) -> None:
-    """MCP-safe identifier guard. Conservative ([A-Za-z0-9_-]) so an edited name
-    can't break the tool listing or `mcp__server__tool` resolution."""
+    """MCP-safe identifier guard. Conservative ([A-Za-z0-9_-], max 64 chars —
+    #41) so an edited name can't break the tool listing or `mcp__server__tool`
+    resolution."""
     if name is not None and not _NAME_RE.match(name):
         raise cl.ConfigError(
-            f"invalid {what} {name!r}: use only letters, digits, '_' or '-'"
+            f"invalid {what} {name!r}: use only letters, digits, '_' or '-' "
+            f"(max 64 chars)"
         )
 
 
