@@ -795,6 +795,9 @@ def register(app, config_path: str, log, registry: dict, holders: dict) -> None:
             )
         backup_config(config_path)
         cl.save(cfg, config_path)
+        # prune the captured defaults so removed backends don't accumulate
+        # orphaned files (#54); best-effort — the file may never have existed
+        (DEFAULTS_DIR / f"{name}.json").unlink(missing_ok=True)
         return _restart_response({})
 
     async def restart_gateway(_request: Request):
