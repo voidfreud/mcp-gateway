@@ -60,6 +60,20 @@ async def main() -> int:
             continue
         check(True, f"{name}: endpoint {url} reachable")
 
+        # A backend switched off at the BACKEND level (#38) must broadcast
+        # nothing: zero tools (and, since #72, no instructions) — while its
+        # endpoint stays mounted/reachable by design.
+        if not b.get("enabled", True):
+            check(
+                not exposed,
+                f"{name}: disabled backend broadcasts no tools ({len(exposed)})",
+            )
+            check(
+                not instr,
+                f"{name}: disabled backend broadcasts no instructions",
+            )
+            continue
+
         # Every ENABLED tool is exposed under its effective name, which is BARE
         # (no '<backend>_' prefix) — each backend is its own endpoint now (#29).
         expected = {
@@ -84,6 +98,8 @@ async def main() -> int:
     # Call by the EFFECTIVE (possibly renamed) broadcast name, like every other
     # check — a hardcoded original breaks the probe the moment the tool is
     # renamed in the admin (which is the product's whole point).
+    if deepwiki is not None and not deepwiki.get("enabled", True):
+        deepwiki = None  # backend switched off (#38) -> nothing to call
     if deepwiki is not None:
         ask = next(
             (
