@@ -10,6 +10,8 @@ import re
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
+import structlog
+
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.responses import JSONResponse
@@ -178,7 +180,9 @@ def _admin_app(tmp_path: Path) -> Starlette:
     path = tmp_path / "config.toml"
     cl.save(cfg, str(path))
     app = Starlette()
-    admin.register(app, str(path), logging.getLogger("test"), {}, {})
+    # structlog logger: the app logs with kwargs (e.g. log.info("x", backend=...)),
+    # which a stdlib logger rejects.
+    admin.register(app, str(path), structlog.get_logger("test"), {}, {})
     return app
 
 
@@ -198,3 +202,46 @@ def test_restart_route_managed_reports_restarting(tmp_path, monkeypatch):
     assert r.json()["reloaded"] == "restarting"
     # the BackgroundTask (real kickstart, stubbed here) ran after the response
     assert calls == [1]
+
+
+# ---------------------------------------------------------------------------
+# #38/#40/#42 — backend enable/disable, master toggle, display-name routes
+# ---------------------------------------------------------------------------
+
+
+def _cfg_path(tmp_path) -> str:
+    return str(tmp_path / "config.toml")
+
+
+def test_enable_backend_route_persists_disabled(tmp_path):
+    r = TestClient(_admin_app(tmp_path)).post(
+        "/admin/api/backend/b/enabled", json={"value": False}
+    )
+    assert r.status_code == 200
+    assert cl.load(_cfg_path(tmp_path)).backends[0].enabled is False
+
+
+def test_enable_backend_unknown_is_400(tmp_path):
+    r = TestClient(_admin_app(tmp_path)).post(
+        "/admin/api/backend/nope/enabled", json={"value": True}
+    )
+    assert r.status_code == 400
+
+
+def test_enable_all_route_sets_every_backend(tmp_path):
+    r = TestClient(_admin_app(tmp_path)).post(
+        "/admin/api/enabled", json={"value": False}
+    )
+    assert r.status_code == 200
+    assert all(not b.enabled for b in cl.load(_cfg_path(tmp_path)).backends)
+
+
+def test_display_name_route_sets_and_clears(tmp_path):
+    client = TestClient(_admin_app(tmp_path))
+    r1 = client.post("/admin/api/backend/b/display-name", json={"value": "Nice Label"})
+    assert r1.status_code == 200
+    assert cl.load(_cfg_path(tmp_path)).backends[0].display_name == "Nice Label"
+    # blank clears back to None (falls back to the canonical name)
+    r2 = client.post("/admin/api/backend/b/display-name", json={"value": "   "})
+    assert r2.status_code == 200
+    assert cl.load(_cfg_path(tmp_path)).backends[0].display_name is None
