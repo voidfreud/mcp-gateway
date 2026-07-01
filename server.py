@@ -45,6 +45,11 @@ CONFIG_PATH = os.environ.get("MCP_GATEWAY_CONFIG", "config.toml")
 # config); anything larger is rejected before it's buffered/parsed. Issue #49.
 ADMIN_BODY_LIMIT = 64 * 1024
 
+# On shutdown, how long runners get to unwind gracefully before a backend stuck
+# mid-connect is cancelled (it never reaches stop.wait(), so without this the
+# daemon could hang forever on shutdown). Issue #61.
+SHUTDOWN_GRACE = 5.0
+
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -335,6 +340,9 @@ def _build_app(
     request handler can never touch the scopes directly. Hot-add (#7) just
     starts one more runner in the same task group and awaits its mount result
     via ``tg.start``; the import endpoint responds when the backend is live.
+    Boot starts all runners concurrently and yields immediately (#61): the app
+    is ready as soon as admin/health are, and each endpoint appears the moment
+    its backend connects — boot cost ≈ the slowest backend, not the sum.
     """
     # Populated in the lifespan; the admin closes over both (by reference) so its
     # hot-reload can target the right backend's live proxy + transform holder.
@@ -346,7 +354,9 @@ def _build_app(
     async def lifespan(app: Starlette):
         stop = anyio.Event()  # set on shutdown -> every runner unwinds itself
 
-        async def runner(b, cfg_, all_tools_, captured_, *, task_status):
+        async def runner(
+            b, cfg_, all_tools_, captured_, *, task_status=anyio.TASK_STATUS_IGNORED
+        ):
             async with AsyncExitStack() as stack:
                 ok = await _mount_backend(
                     app, stack, b, cfg_, all_tools_, captured_, registry, holders, log
@@ -356,8 +366,12 @@ def _build_app(
                     await stop.wait()
 
         async with anyio.create_task_group() as tg:
+            # #61: start every backend's runner CONCURRENTLY and don't block
+            # readiness on any of them — boot ≈ the slowest backend instead of
+            # the sum, and a slow/hung backend delays only its own endpoint
+            # (each runner appends its Mount when ready, same path as hot-add).
             for b in cfg.backends:
-                await tg.start(runner, b, cfg, all_tools, captured_instr)
+                tg.start_soon(runner, b, cfg, all_tools, captured_instr)
 
             async def hot_add(b: config_loader.Backend) -> bool:
                 """Mount a just-imported backend live (#7). Config is already
@@ -374,8 +388,10 @@ def _build_app(
             hooks["add"] = hot_add
             log.info(
                 "gateway_starting",
-                backends=list(registry),
-                endpoints=[f"http://{cfg.host}:{cfg.port}/{n}/mcp" for n in registry],
+                backends=[b.name for b in cfg.backends],
+                endpoints=[
+                    f"http://{cfg.host}:{cfg.port}/{b.name}/mcp" for b in cfg.backends
+                ],
                 admin=f"http://{cfg.host}:{cfg.port}/admin",
             )
             try:
@@ -383,6 +399,9 @@ def _build_app(
             finally:
                 hooks.pop("add", None)
                 stop.set()  # graceful: runners exit their stacks, tg drains
+                # A runner stuck mid-connect never reaches stop.wait(); without a
+                # deadline it would hang shutdown forever. Grace, then cancel.
+                tg.cancel_scope.deadline = anyio.current_time() + SHUTDOWN_GRACE
 
     # Admin + health are static (no backend connection needed); the per-backend
     # MCP mounts are added during the lifespan (they need connected clients).
