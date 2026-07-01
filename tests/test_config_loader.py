@@ -3,6 +3,7 @@ name prefixing, and durable save."""
 
 from __future__ import annotations
 
+import os
 import string
 
 import pytest
@@ -130,10 +131,48 @@ def test_expand_env_substitutes(monkeypatch):
     assert cl.expand_env("Bearer ${MY_TOK}") == "Bearer secret123"
 
 
-def test_expand_env_missing_raises(monkeypatch):
+def test_expand_env_missing_raises(monkeypatch, tmp_path):
     monkeypatch.delenv("NOPE_VAR", raising=False)
+    monkeypatch.setenv("MCP_GATEWAY_SECRETS", str(tmp_path / "absent.env"))
     with pytest.raises(cl.ConfigError):
         cl.expand_env("${NOPE_VAR}")
+
+
+def test_expand_env_falls_back_to_secrets_file(monkeypatch, tmp_path):
+    monkeypatch.delenv("FILE_TOK", raising=False)
+    secrets = tmp_path / "secrets.env"
+    secrets.write_text(
+        "# gateway secrets\n"
+        "\n"
+        'export FILE_TOK="from-file"\n'
+        "OTHER='single'\n"
+        "PLAIN=bare value\n"
+        "not a kv line\n"
+    )
+    monkeypatch.setenv("MCP_GATEWAY_SECRETS", str(secrets))
+    assert cl.expand_env("Bearer ${FILE_TOK}") == "Bearer from-file"
+    assert cl.load_secrets() == {
+        "FILE_TOK": "from-file",
+        "OTHER": "single",
+        "PLAIN": "bare value",
+    }
+
+
+def test_expand_env_environ_wins_over_secrets_file(monkeypatch, tmp_path):
+    secrets = tmp_path / "secrets.env"
+    secrets.write_text("DUP_TOK=file\n")
+    monkeypatch.setenv("MCP_GATEWAY_SECRETS", str(secrets))
+    monkeypatch.setenv("DUP_TOK", "env")
+    assert cl.expand_env("${DUP_TOK}") == "env"
+
+
+def test_expand_env_secrets_not_leaked_to_environ(monkeypatch, tmp_path):
+    secrets = tmp_path / "secrets.env"
+    secrets.write_text("LEAK_TOK=hush\n")
+    monkeypatch.setenv("MCP_GATEWAY_SECRETS", str(secrets))
+    monkeypatch.delenv("LEAK_TOK", raising=False)
+    assert cl.expand_env("${LEAK_TOK}") == "hush"
+    assert "LEAK_TOK" not in os.environ
 
 
 # --- name prefixing (exposed_name) -----------------------------------------

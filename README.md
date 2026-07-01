@@ -178,9 +178,14 @@ stateless = true
 ```
 
 **Secrets** are never written in `config.toml` — put `${ENV_VAR}` and supply the
-value via the environment (the LaunchAgent's `EnvironmentVariables`, or a run
-shim). `config.toml` therefore holds only env *references* and public endpoints,
-and is safe to commit.
+value either via the environment or, since the daemon's launchd env is minimal,
+via the gateway-scoped secrets file `~/.config/mcp-gateway/secrets.env`
+(`KEY=VALUE` lines; path overridable with `MCP_GATEWAY_SECRETS`). The environment
+wins on conflict. Put ONLY the tokens the gateway's backends need there — never
+point it at a global key store: secrets from this file are kept out of
+`os.environ`, so stdio backend subprocesses can't read them, but every backend's
+auth ref resolves from the same file. `config.toml` therefore holds only env
+*references* and public endpoints, and is safe to commit.
 
 **Bare tool names.** Each backend is proxied on its **own** endpoint/MCP server,
 so its tools keep their bare names (`ask_question`) — the backend is namespaced by
