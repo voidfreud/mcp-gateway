@@ -200,8 +200,12 @@ tool name. On startup the gateway lists each backend's live tools and logs an
 ## Operations
 
 - **Logs:** structured JSON via structlog to `~/.local/state/mcp-gateway/gateway.log`
-  (`gateway_built`, `reconcile_done`, `tool_call` with latency, errors).
-  launchd stdout/stderr go to `out.log` / `err.log` in the same dir.
+  (`gateway_built`, `reconcile_done`, `tool_call` with latency, errors). The file
+  **rotates** (5 MB × 5 via `RotatingFileHandler`), and *all* library logging
+  (uvicorn, fastmcp) is routed into it too — so launchd's `out.log` / `err.log`
+  only ever catch rare pre-init or hard-crash text and stay bounded. For a
+  belt-and-suspenders cap on those two, an optional `newsyslog` config ships at
+  `deploy/newsyslog-mcp-gateway.conf` (install per the comments in that file).
 - **Health:** `curl -s http://127.0.0.1:9100/health` → `ok`.
 - **Restart:** `launchctl kickstart -k gui/$(id -u)/com.void.mcp-gateway`.
 - **Verify rewrites end-to-end:** with the gateway running,

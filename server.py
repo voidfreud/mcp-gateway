@@ -20,12 +20,14 @@ import logging
 import os
 import time
 from contextlib import AsyncExitStack, asynccontextmanager
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 import anyio
 import structlog
 import uvicorn
 from starlette.applications import Starlette
+from starlette.middleware import Middleware as StarletteMiddleware
 from starlette.requests import Request
 from starlette.responses import PlainTextResponse
 from starlette.routing import Mount, Route
@@ -39,6 +41,10 @@ import config_loader
 
 CONFIG_PATH = os.environ.get("MCP_GATEWAY_CONFIG", "config.toml")
 
+# Cap admin-API request bodies. Admin payloads are tiny (tool text, backend
+# config); anything larger is rejected before it's buffered/parsed. Issue #49.
+ADMIN_BODY_LIMIT = 64 * 1024
+
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -46,22 +52,44 @@ CONFIG_PATH = os.environ.get("MCP_GATEWAY_CONFIG", "config.toml")
 
 
 def _configure_logging(log_file: str) -> structlog.BoundLogger:
-    """JSON structlog to *log_file* (created if missing)."""
-    # Quiet FastMCP's own INFO chatter (e.g. the benign "reusing existing
-    # session" proxy line) so the daemon's launchd out.log stays readable.
-    # Our structured events go through structlog below, not this logger.
-    logging.getLogger("fastmcp").setLevel(logging.WARNING)
+    """JSON structlog to a rotating *log_file* (created if missing).
 
+    Issue #50: the app's log must not grow unbounded, and neither must launchd's
+    ``err.log``/``out.log``. launchd owns those two file descriptors, so nothing
+    in-process can rotate them — instead we route ALL stdlib logging (uvicorn,
+    fastmcp, everything) into the single rotating ``gateway.log`` handler, so the
+    launchd files only ever catch rare pre-init / hard-crash text (and #48 already
+    removed the bad-JSON traceback flood that used to fill err.log). A single
+    shared handler on the root logger avoids two handlers racing on one file.
+    """
     path = Path(log_file).expanduser()
     path.parent.mkdir(parents=True, exist_ok=True)
-    fh = path.open("a", encoding="utf-8")
+    # One rotating handler for the whole process: 5 MB × 5 files.
+    handler = RotatingFileHandler(
+        path, maxBytes=5 * 1024 * 1024, backupCount=5, encoding="utf-8"
+    )
+    handler.setFormatter(logging.Formatter("%(message)s"))
+
+    # Root owns the single file handler; every logger propagates into it.
+    root = logging.getLogger()
+    root.handlers = [handler]
+    root.setLevel(logging.WARNING)
+    # Quiet FastMCP's benign INFO chatter (e.g. "reusing existing session").
+    logging.getLogger("fastmcp").setLevel(logging.WARNING)
+    # Our own events emit at INFO and propagate up to the root handler (no own
+    # handler, so there's no second writer on the file).
+    app_logger = logging.getLogger("mcp-gateway")
+    app_logger.setLevel(logging.INFO)
+    app_logger.handlers = []
+    app_logger.propagate = True
+
     structlog.configure(
         processors=[
             structlog.processors.add_log_level,
             structlog.processors.TimeStamper(fmt="iso"),
             structlog.processors.JSONRenderer(),
         ],
-        logger_factory=structlog.WriteLoggerFactory(file=fh),
+        logger_factory=structlog.stdlib.LoggerFactory(),
     )
     return structlog.get_logger("mcp-gateway")
 
@@ -101,6 +129,86 @@ class CallLogMiddleware(Middleware):
             ms=round((time.perf_counter() - started) * 1000, 2),
         )
         return result
+
+
+# ---------------------------------------------------------------------------
+# Admin request-body size limit (pure-ASGI middleware)
+# ---------------------------------------------------------------------------
+
+
+class BodyLimitMiddleware:
+    """Reject oversized admin-API request bodies with 413 before they're parsed.
+
+    Caps the large-body CPU + err.log amplification (issue #49). Only paths under
+    ``path_prefix`` are guarded; the per-backend MCP mounts pass straight through.
+    Rejects on a declared Content-Length over the cap, and — for chunked or
+    length-less bodies — buffers under the cap and rejects once it's exceeded,
+    replaying the buffered body to the wrapped app when it fits.
+    """
+
+    def __init__(self, app, *, max_bytes: int, path_prefix: str = "/admin/api"):
+        self.app = app
+        self.max_bytes = max_bytes
+        self.path_prefix = path_prefix
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or not scope.get("path", "").startswith(
+            self.path_prefix
+        ):
+            await self.app(scope, receive, send)
+            return
+
+        headers = dict(scope.get("headers", []))
+        declared = headers.get(b"content-length")
+        if declared is not None:
+            try:
+                if int(declared) > self.max_bytes:
+                    await self._reject(send)
+                    return
+            except ValueError:
+                await self._reject(send)
+                return
+
+        buffered: list[dict] = []
+        total = 0
+        more = True
+        while more:
+            message = await receive()
+            if message["type"] != "http.request":
+                buffered.append(message)
+                break
+            total += len(message.get("body", b""))
+            if total > self.max_bytes:
+                await self._reject(send)
+                return
+            buffered.append(message)
+            more = message.get("more_body", False)
+
+        pending = iter(buffered)
+
+        async def replay():
+            try:
+                return next(pending)
+            except StopIteration:
+                return await receive()
+
+        await self.app(scope, replay, send)
+
+    @staticmethod
+    async def _reject(send):
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 413,
+                "headers": [(b"content-type", b"application/json")],
+            }
+        )
+        await send(
+            {
+                "type": "http.response.body",
+                "body": b'{"ok": false, "error": "request body too large"}',
+            }
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -244,7 +352,11 @@ async def _run(cfg: config_loader.GatewayConfig, log) -> None:
     # Admin + health are static (no backend connection needed); the per-backend
     # MCP mounts are added during the lifespan (they need connected clients).
     parent = Starlette(
-        routes=[Route("/health", _health, methods=["GET"])], lifespan=lifespan
+        routes=[Route("/health", _health, methods=["GET"])],
+        lifespan=lifespan,
+        middleware=[
+            StarletteMiddleware(BodyLimitMiddleware, max_bytes=ADMIN_BODY_LIMIT)
+        ],
     )
     admin.register(parent, CONFIG_PATH, log, registry, holders)
 
@@ -253,6 +365,10 @@ async def _run(cfg: config_loader.GatewayConfig, log) -> None:
         host=cfg.host,
         port=cfg.port,
         log_level="warning",
+        # log_config=None → uvicorn installs no stderr handlers of its own, so
+        # its loggers propagate to our root rotating handler instead of launchd's
+        # err.log (issue #50).
+        log_config=None,
         timeout_graceful_shutdown=2,
     )
     await uvicorn.Server(config).serve()

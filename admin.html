@@ -209,10 +209,10 @@ function renderDetail(name) {
     <div class="b-actions">
       <label class="chk" title="pin ALL this backend's tools to load upfront (eager)">
         <input type="checkbox" id="b-pin" ${b.always_load ? 'checked' : ''}
-               onchange="pinBackend('${esc(b.name)}', this.checked)"> 📌 pin all tools (eager)</label>
+               onchange="pinBackend('${escJS(b.name)}', this.checked)"> 📌 pin all tools (eager)</label>
       <span class="spacer" style="flex:1"></span>
-      <button class="ghost" onclick="reintrospect('${esc(b.name)}')">Re-introspect</button>
-      <button class="ghost danger" onclick="delBackend('${esc(b.name)}')">Remove backend</button>
+      <button class="ghost" onclick="reintrospect('${escJS(b.name)}')">Re-introspect</button>
+      <button class="ghost danger" onclick="delBackend('${escJS(b.name)}')">Remove backend</button>
     </div>
     ${backendInstrSection(b)}
     <div id="tools"></div>`;
@@ -349,7 +349,7 @@ function toolCard(b, t) {
       </div>
       ${schemaSection(t)}
       <div style="margin-top:12px;display:flex;gap:8px;">
-        <button class="ghost" onclick="resetTool('${esc(b.name)}','${esc(t.original)}')">Reset to default</button>
+        <button class="ghost" onclick="resetTool('${escJS(b.name)}','${escJS(t.original)}')">Reset to default</button>
       </div>
     </div>`;
   wireCard(b.name, t.original, card);
@@ -540,7 +540,14 @@ async function waitReload() {
   toast('gateway did not come back — check logs');
 }
 
-function esc(s) { return String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+// HTML-context escape (text nodes + quoted attribute values).
+function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+// For a value dropped into an inline on*="fn('…')" handler: the handler is a JS
+// single-quoted string that itself lives inside an HTML double-quoted attribute,
+// so the parser HTML-decodes ONCE before JS runs. JS-escape ( \ and ' ) first,
+// THEN HTML-escape, so the decode leaves a correctly JS-escaped string and a
+// backend-controlled tool name like  x');alert(1)//  can't break out. Issue #51.
+function escJS(s) { return esc(String(s ?? '').replace(/\\/g, '\\\\').replace(/'/g, "\\'")); }
 
 load();
 </script>

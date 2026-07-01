@@ -541,6 +541,27 @@ def restart_daemon(log) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _needs_json(handler):
+    """Wrap a body-reading route so a missing/malformed JSON body returns 400
+    instead of an unhandled ``JSONDecodeError`` → 500 + traceback (issue #48).
+
+    Starlette caches the parsed body on the request object, so the wrapped
+    handler's own ``await request.json()`` reuses this parse at no extra cost.
+    """
+
+    async def guarded(request: Request):
+        try:
+            await request.json()
+        except (json.JSONDecodeError, ValueError):
+            return JSONResponse(
+                {"ok": False, "error": "malformed or missing JSON body"},
+                status_code=400,
+            )
+        return await handler(request)
+
+    return guarded
+
+
 def register(app, config_path: str, log, registry: dict, holders: dict) -> None:
     """Attach the admin UI + API routes to the parent Starlette *app*.
 
@@ -682,11 +703,19 @@ def register(app, config_path: str, log, registry: dict, holders: dict) -> None:
         [
             Route("/admin", admin_page, methods=["GET"]),
             Route("/admin/api/state", get_state, methods=["GET"]),
-            Route("/admin/api/override", put_override, methods=["PUT"]),
-            Route("/admin/api/reset", reset_tool, methods=["POST"]),
-            Route("/admin/api/instructions", put_instructions, methods=["PUT"]),
-            Route("/admin/api/backend/{name}/pin", pin_backend, methods=["POST"]),
-            Route("/admin/api/backend", add_backend, methods=["POST"]),
+            Route("/admin/api/override", _needs_json(put_override), methods=["PUT"]),
+            Route("/admin/api/reset", _needs_json(reset_tool), methods=["POST"]),
+            Route(
+                "/admin/api/instructions",
+                _needs_json(put_instructions),
+                methods=["PUT"],
+            ),
+            Route(
+                "/admin/api/backend/{name}/pin",
+                _needs_json(pin_backend),
+                methods=["POST"],
+            ),
+            Route("/admin/api/backend", _needs_json(add_backend), methods=["POST"]),
             Route("/admin/api/backend/{name}", remove_backend, methods=["DELETE"]),
             Route("/admin/api/introspect/{name}", reintrospect, methods=["POST"]),
         ]
