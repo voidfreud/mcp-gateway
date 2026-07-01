@@ -32,7 +32,9 @@ backend endpoint (bare names, instructions <=2KB) + a real passthrough call.
 
 ## Conventions
 - `config.toml` holds only `${ENV}` refs + public endpoints; secret VALUES come
-  from the environment (LaunchAgent `EnvironmentVariables`). It's gitignored, so
+  from the environment or the gateway-scoped `~/.config/mcp-gateway/secrets.env`
+  (override via `MCP_GATEWAY_SECRETS`; env wins; file values are kept out of
+  `os.environ` so stdio backends can't read them). It's gitignored, so
   it never shows as a git change after a UI edit. To change the shipped seed,
   edit `config.default.toml`.
 - A tool's `original` is the bare backend tool name. Each backend is proxied on

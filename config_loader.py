@@ -31,27 +31,71 @@ from fastmcp.tools.tool_transform import ArgTransformConfig, ToolTransformConfig
 
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
+DEFAULT_SECRETS_PATH = "~/.config/mcp-gateway/secrets.env"
+
 
 class ConfigError(RuntimeError):
     """Raised for any malformed or unresolvable configuration."""
 
 
-def expand_env(value: str) -> str:
-    """Replace every ``${VAR}`` in *value* with the environment variable.
+def secrets_path() -> Path:
+    """The gateway-scoped secrets file (``MCP_GATEWAY_SECRETS`` overrides)."""
+    return Path(
+        os.environ.get("MCP_GATEWAY_SECRETS", DEFAULT_SECRETS_PATH)
+    ).expanduser()
 
-    Raises :class:`ConfigError` if a referenced variable is unset, so a missing
-    secret fails loudly at startup instead of sending an empty auth header.
+
+def load_secrets() -> dict[str, str]:
+    """Parse the gateway-scoped secrets file into a dict.
+
+    KEY=VALUE lines; blank lines, ``#`` comments, and an ``export `` prefix are
+    tolerated; surrounding single/double quotes on the value are stripped.
+    Values stay OUT of ``os.environ`` on purpose: stdio backend subprocesses
+    inherit the daemon's environment, and one backend must not be able to read
+    secrets meant for another. Re-read on every call (the file is tiny) so a
+    newly added secret works without a daemon restart.
     """
+    path = secrets_path()
+    secrets: dict[str, str] = {}
+    if not path.is_file():
+        return secrets
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :]
+        key, sep, value = line.partition("=")
+        if not sep:
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+            value = value[1:-1]
+        secrets[key.strip()] = value
+    return secrets
+
+
+def expand_env(value: str) -> str:
+    """Replace every ``${VAR}`` in *value* from the environment, falling back
+    to the gateway-scoped secrets file (:func:`secrets_path`).
+
+    Raises :class:`ConfigError` if a referenced variable is found in neither,
+    so a missing secret fails loudly at startup instead of sending an empty
+    auth header.
+    """
+
+    secrets = load_secrets() if _ENV_PATTERN.search(value) else {}
 
     def _sub(match: re.Match[str]) -> str:
         name = match.group(1)
-        try:
+        if name in os.environ:
             return os.environ[name]
-        except KeyError:
-            raise ConfigError(
-                f"config references ${{{name}}} but environment variable "
-                f"{name!r} is not set"
-            ) from None
+        if name in secrets:
+            return secrets[name]
+        raise ConfigError(
+            f"config references ${{{name}}} but {name!r} is set neither in the "
+            f"environment nor in the gateway secrets file ({secrets_path()})"
+        )
 
     return _ENV_PATTERN.sub(_sub, value)
 
