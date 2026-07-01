@@ -13,6 +13,7 @@ so those write config and restart the daemon.
 
 from __future__ import annotations
 
+import asyncio
 import importlib.metadata
 import json
 import os
@@ -618,6 +619,24 @@ def register(app, config_path: str, log, registry: dict, holders: dict) -> None:
     def _load() -> GatewayConfig:
         return cl.load(config_path)
 
+    # Guards every config read-modify-write (#52). Uvicorn runs a single worker,
+    # so load->mutate->save WAS implicitly atomic as long as no handler awaited
+    # between load and save — a fragile invariant (add_backend already awaits a
+    # network probe mid-section). The explicit lock makes it safe to add an
+    # `await` inside a critical section without silently losing concurrent edits.
+    config_lock = asyncio.Lock()
+
+    def _locked(handler):
+        """Serialize a whole mutating handler under ``config_lock``. Fine for the
+        in-process handlers (they only parse JSON + touch local files);
+        add_backend manages the lock itself so its network probe stays outside."""
+
+        async def inner(request: Request):
+            async with config_lock:
+                return await handler(request)
+
+        return inner
+
     def _restart_response(extra: dict) -> JSONResponse:
         """Response for a topology change that needs a full restart. Only
         schedules (and claims) the restart when we're actually launchd-managed;
@@ -753,8 +772,7 @@ def register(app, config_path: str, log, registry: dict, holders: dict) -> None:
     async def add_backend(request: Request):
         """Import a new backend MCP. Validates + introspects, then restarts."""
         payload = await request.json()
-        cfg = _load()
-        if any(b.name == payload.get("name") for b in cfg.backends):
+        if any(b.name == payload.get("name") for b in _load().backends):
             return JSONResponse(
                 {"ok": False, "error": "backend name already exists"}, status_code=400
             )
@@ -771,7 +789,8 @@ def register(app, config_path: str, log, registry: dict, holders: dict) -> None:
             )
         except Exception as exc:  # noqa: BLE001 (pydantic/validation)
             return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
-        # Probe + capture defaults before committing it to config.
+        # Probe + capture defaults before committing it to config — and BEFORE
+        # taking config_lock, so a slow backend can't block other admin edits.
         try:
             save_defaults(await capture_defaults(b))
         except Exception as exc:  # noqa: BLE001
@@ -779,9 +798,16 @@ def register(app, config_path: str, log, registry: dict, holders: dict) -> None:
                 {"ok": False, "error": f"could not connect to backend: {exc}"},
                 status_code=400,
             )
-        cfg.backends.append(b)
-        backup_config(config_path)
-        cl.save(cfg, config_path)
+        async with config_lock:
+            cfg = _load()  # re-load + re-check: the probe await is a real gap
+            if any(x.name == b.name for x in cfg.backends):
+                return JSONResponse(
+                    {"ok": False, "error": "backend name already exists"},
+                    status_code=400,
+                )
+            cfg.backends.append(b)
+            backup_config(config_path)
+            cl.save(cfg, config_path)
         return _restart_response({"backend": b.name})
 
     async def remove_backend(request: Request):
@@ -816,31 +842,42 @@ def register(app, config_path: str, log, registry: dict, holders: dict) -> None:
         [
             Route("/admin", admin_page, methods=["GET"]),
             Route("/admin/api/state", get_state, methods=["GET"]),
-            Route("/admin/api/override", _needs_json(put_override), methods=["PUT"]),
-            Route("/admin/api/reset", _needs_json(reset_tool), methods=["POST"]),
+            Route(
+                "/admin/api/override",
+                _needs_json(_locked(put_override)),
+                methods=["PUT"],
+            ),
+            Route(
+                "/admin/api/reset", _needs_json(_locked(reset_tool)), methods=["POST"]
+            ),
             Route(
                 "/admin/api/instructions",
-                _needs_json(put_instructions),
+                _needs_json(_locked(put_instructions)),
                 methods=["PUT"],
             ),
             Route(
                 "/admin/api/backend/{name}/pin",
-                _needs_json(pin_backend),
+                _needs_json(_locked(pin_backend)),
                 methods=["POST"],
             ),
             Route(
                 "/admin/api/backend/{name}/enabled",
-                _needs_json(enable_backend),
+                _needs_json(_locked(enable_backend)),
                 methods=["POST"],
             ),
-            Route("/admin/api/enabled", _needs_json(enable_all), methods=["POST"]),
+            Route(
+                "/admin/api/enabled", _needs_json(_locked(enable_all)), methods=["POST"]
+            ),
             Route(
                 "/admin/api/backend/{name}/display-name",
-                _needs_json(set_display_name),
+                _needs_json(_locked(set_display_name)),
                 methods=["POST"],
             ),
+            # add_backend takes config_lock itself (probe stays outside the lock)
             Route("/admin/api/backend", _needs_json(add_backend), methods=["POST"]),
-            Route("/admin/api/backend/{name}", remove_backend, methods=["DELETE"]),
+            Route(
+                "/admin/api/backend/{name}", _locked(remove_backend), methods=["DELETE"]
+            ),
             Route("/admin/api/restart", restart_gateway, methods=["POST"]),
             Route("/admin/api/introspect/{name}", reintrospect, methods=["POST"]),
         ]

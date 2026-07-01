@@ -257,6 +257,52 @@ def test_remove_backend_unknown_is_400_and_keeps_defaults(tmp_path, monkeypatch)
     assert (d / "b.json").exists()
 
 
+def test_add_backend_does_not_lose_concurrent_edit(tmp_path, monkeypatch):
+    """#52: add_backend awaits a network probe between config load and save. A
+    config edit that lands during that await must NOT be overwritten — the
+    handler re-loads the config under config_lock before committing."""
+    monkeypatch.setattr(admin, "DEFAULTS_DIR", tmp_path / "defaults")
+    cfg_path = _cfg_path(tmp_path)
+
+    async def fake_capture(b):
+        # simulate a concurrent admin edit landing while the probe is in flight
+        cfg = cl.load(cfg_path)
+        cfg.backends[0].display_name = "edited-during-probe"
+        cl.save(cfg, cfg_path)
+        return {"backend": b.name, "instructions": None, "tools": []}
+
+    monkeypatch.setattr(admin, "capture_defaults", fake_capture)
+    r = TestClient(_admin_app(tmp_path)).post(
+        "/admin/api/backend",
+        json={"name": "new", "transport": "stdio", "command": "/bin/y"},
+    )
+    assert r.status_code == 200
+    after = cl.load(cfg_path)
+    assert [b.name for b in after.backends] == ["b", "new"]  # backend added
+    assert after.backends[0].display_name == "edited-during-probe"  # edit kept
+
+
+def test_add_backend_duplicate_after_probe_is_400(tmp_path, monkeypatch):
+    """The dup-check re-runs under the lock: a same-named backend appearing
+    during the probe await is rejected instead of appended twice."""
+    monkeypatch.setattr(admin, "DEFAULTS_DIR", tmp_path / "defaults")
+    cfg_path = _cfg_path(tmp_path)
+
+    async def fake_capture(b):
+        cfg = cl.load(cfg_path)
+        cfg.backends.append(cl.Backend(name="new", transport="stdio", command="/bin/z"))
+        cl.save(cfg, cfg_path)
+        return {"backend": b.name, "instructions": None, "tools": []}
+
+    monkeypatch.setattr(admin, "capture_defaults", fake_capture)
+    r = TestClient(_admin_app(tmp_path)).post(
+        "/admin/api/backend",
+        json={"name": "new", "transport": "stdio", "command": "/bin/y"},
+    )
+    assert r.status_code == 400
+    assert [b.name for b in cl.load(cfg_path).backends] == ["b", "new"]
+
+
 def test_display_name_route_sets_and_clears(tmp_path):
     client = TestClient(_admin_app(tmp_path))
     r1 = client.post("/admin/api/backend/b/display-name", json={"value": "Nice Label"})
