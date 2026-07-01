@@ -557,3 +557,19 @@ def test_auth_fields_roundtrip_toml(monkeypatch):
     assert b.headers == {"X-A": "${T}"}
     assert b.auth == "oauth"
     assert b.headers_helper == "emit-headers"
+
+
+def test_disabled_backend_broadcasts_no_instructions():
+    # #72: disabled -> nil, not just tool-less; override AND captured suppressed
+    b = cl.Backend.model_validate(
+        {
+            "name": "b",
+            "transport": "http",
+            "url": "https://h/mcp",
+            "enabled": False,
+            "instructions": "my override",
+        }
+    )
+    assert cl.backend_instructions(b, {"b": "captured blurb"}) is None
+    b.enabled = True
+    assert cl.backend_instructions(b, {"b": "captured blurb"}) == "my override"

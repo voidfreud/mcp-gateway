@@ -426,7 +426,14 @@ def backend_instructions(
     its own MCP endpoint, it carries only its own blurb — so each gets Claude
     Code's full per-server ~2KB instructions budget instead of all backends
     sharing one (issue #29).
+
+    A DISABLED backend broadcasts nothing at all (#72): its tools are already
+    all disabled via transforms (#38), and its instructions must go too — nil,
+    not just tool-less. Both serving paths (mount + hot-reload) call this, and
+    the enable toggle hot-reloads, so the blurb comes and goes live.
     """
+    if not backend.enabled:
+        return None
     eff = (
         backend.instructions
         if backend.instructions is not None
