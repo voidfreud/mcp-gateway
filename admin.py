@@ -55,6 +55,22 @@ def _client_config(b: Backend) -> dict:
     return {"mcpServers": {b.name: entry}}
 
 
+def _annotations_to_dict(ann) -> dict | None:
+    """Serialize a tool's ``annotations`` (an MCP ``ToolAnnotations`` pydantic
+    model) to a plain JSON dict for the defaults file, dropping unset hints.
+    Returns None when there is nothing to store. Tolerant of a plain dict or None
+    so the reader survives MCP-SDK shape changes."""
+    if ann is None:
+        return None
+    if hasattr(ann, "model_dump"):
+        d = ann.model_dump(exclude_none=True, mode="json")
+    elif isinstance(ann, dict):
+        d = {k: v for k, v in ann.items() if v is not None}
+    else:
+        d = getattr(ann, "__dict__", None)
+    return d or None
+
+
 async def capture_defaults(b: Backend) -> dict:
     """Connect to one backend and return its original broadcast as a baseline.
 
@@ -81,14 +97,26 @@ async def capture_defaults(b: Backend) -> dict:
             }
             for name, spec in props.items()
         ]
-        out_tools.append(
-            {
-                "original": t.name,
-                "title": getattr(t, "title", None),
-                "description": t.description,
-                "params": params,
-            }
-        )
+        tool = {
+            "original": t.name,
+            "title": getattr(t, "title", None),
+            "description": t.description,
+            "params": params,
+        }
+        # Read-only schema surface (issue #2): the wire tools/list also carries an
+        # outputSchema, _meta (FastMCP tags + our anthropic/alwaysLoad pin), and
+        # ToolAnnotations (readOnly/destructive/idempotent/openWorld). Capture each
+        # only when present so pre-#2 defaults files (which lack these keys) still
+        # load — downstream readers use ``dt.get(...)``.
+        if getattr(t, "outputSchema", None):
+            tool["output_schema"] = t.outputSchema
+        meta = getattr(t, "meta", None)  # mcp.types.Tool.meta (wire alias `_meta`)
+        if meta:
+            tool["meta"] = meta
+        annotations = _annotations_to_dict(getattr(t, "annotations", None))
+        if annotations:
+            tool["annotations"] = annotations
+        out_tools.append(tool)
     server_info = None
     capabilities = None
     instructions = None
@@ -293,6 +321,12 @@ def build_state(cfg: GatewayConfig) -> dict:
                     "description": ov.description if ov else None,
                     "enabled": ov.enabled if ov else True,
                     "always_load": ov.always_load if ov else False,
+                    # Read-only schema surface (issue #2): surfaced as-captured;
+                    # None when the backend didn't advertise them or the defaults
+                    # file predates the capture (use .get so old files degrade).
+                    "output_schema": dt.get("output_schema"),
+                    "meta": dt.get("meta"),
+                    "annotations": dt.get("annotations"),
                     "params": params,
                 }
             )
