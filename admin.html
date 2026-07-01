@@ -541,8 +541,34 @@ async function doSave(backend, original, card, keepalive = false) {
       { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body, keepalive });
     const j = await r.json().catch(() => ({}));
     if (!r.ok) { toast('save failed: ' + (j.error || ('HTTP ' + r.status))); pending[key] = { backend, original, card }; return; }
+    patchToolState(backend, original, gather(card));
     flashSaved();
   } catch (e) { toast('save failed: ' + e.message); pending[key] = { backend, original, card }; }
+}
+
+// #62 — keep the in-memory STATE current after a debounced text save WITHOUT a
+// full load() (a re-render on every keystroke would yank focus mid-typing).
+// Mirrors the server's _override_vs_default: empty or equal-to-default -> null.
+function ovVal(v, dflt) {
+  v = (v || '').trim();
+  return v && v !== (dflt || '') ? v : null;
+}
+function patchToolState(backend, original, o) {
+  const b = STATE && STATE.backends.find(x => x.name === backend);
+  const t = b && b.tools.find(x => x.original === original);
+  if (!t) return;
+  t.name = ovVal(o.name, t.default_name);
+  t.title = ovVal(o.title, t.default_title);
+  t.description = ovVal(o.description, t.default_description);
+  t.enabled = o.enabled;
+  t.always_load = o.always_load;
+  o.params.forEach(op => {
+    const p = t.params.find(x => x.original === op.original);
+    if (!p) return;
+    p.name = ovVal(op.name, p.default_name);
+    p.description = ovVal(op.description, p.default_description);
+    p.hide = op.hide;
+  });
 }
 
 // Flush an edit immediately (on blur), but only if there is an unsaved change.
@@ -580,6 +606,9 @@ async function doSaveInstr(backend, ta, keepalive = false) {
       { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body, keepalive });
     const j = await r.json().catch(() => ({}));
     if (!r.ok) { toast('save failed: ' + (j.error || ('HTTP ' + r.status))); instrPending[key] = { backend, ta }; return; }
+    // #62 — patch STATE in place (same rule as set_instructions server-side)
+    const bs = STATE && STATE.backends.find(x => x.name === backend);
+    if (bs) bs.instructions = ovVal(ta.value, bs.default_instructions);
     flashSaved();
   } catch (e) { toast('save failed: ' + e.message); instrPending[key] = { backend, ta }; }
 }
@@ -593,8 +622,9 @@ async function reintrospect(name) {
   catch (e) { toast('introspect failed: ' + e.message); }
 }
 async function pinBackend(name, value) {
-  try { await api('POST', '/admin/api/backend/' + encodeURIComponent(name) + '/pin', { value }); toast(value ? 'pinned all tools (eager)' : 'unpinned'); }
-  catch (e) { toast('pin failed: ' + e.message); }
+  // #62 — reload re-syncs STATE so navigating away and back keeps the tick
+  try { await api('POST', '/admin/api/backend/' + encodeURIComponent(name) + '/pin', { value }); await load(); toast(value ? 'pinned all tools (eager)' : 'unpinned'); }
+  catch (e) { toast('pin failed: ' + e.message); await load(); }
 }
 // #38 — enable/disable one backend's broadcast (hot-reload). reload re-syncs the
 // sidebar toggle + dimming from the server's truth.
