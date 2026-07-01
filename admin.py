@@ -630,7 +630,10 @@ def register(app, config_path: str, log, registry: dict, holders: dict) -> None:
         return JSONResponse({"ok": True, "reloaded": "dev-no-restart", **extra})
 
     async def admin_page(_request: Request):
-        return FileResponse(HERE / "admin.html")
+        # no-cache so a plain browser reload always revalidates (ETag → 304 when
+        # unchanged) and picks up admin.html edits. Without it the browser serves
+        # a stale cached page and even a daemon restart doesn't refresh the UI.
+        return FileResponse(HERE / "admin.html", headers={"Cache-Control": "no-cache"})
 
     async def get_state(_request: Request):
         return JSONResponse(build_state(_load()))
