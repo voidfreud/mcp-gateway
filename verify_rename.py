@@ -81,13 +81,23 @@ async def main() -> int:
         check(nbytes <= 2048, f"{name}: instructions within 2KB budget ({nbytes} B)")
 
     # Passthrough call (bare name) on deepwiki, if present — proves forwarding.
+    # Call by the EFFECTIVE (possibly renamed) broadcast name, like every other
+    # check — a hardcoded original breaks the probe the moment the tool is
+    # renamed in the admin (which is the product's whole point).
     if deepwiki is not None:
-        print(
-            "\npassthrough call: deepwiki ask_question(repoName=prefecthq/fastmcp, …)"
+        ask = next(
+            (
+                t.get("name") or t["original"]
+                for t in deepwiki["tools"]
+                if t["original"] == "ask_question" and t.get("enabled", True)
+            ),
+            None,
         )
+    if deepwiki is not None and ask is not None:
+        print(f"\npassthrough call: deepwiki {ask}(repoName=prefecthq/fastmcp, …)")
         async with Client(f"{BASE}{deepwiki['endpoint']}") as c:
             res = await c.call_tool(
-                "ask_question",
+                ask,
                 {
                     "repoName": "prefecthq/fastmcp",
                     "question": "What transport does the proxy use?",
