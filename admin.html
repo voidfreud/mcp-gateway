@@ -150,6 +150,18 @@
     </div>
   </div>
 </div>
+<div class="modal-bg" id="restartBg">
+  <div class="modal">
+    <h3>Restart gateway</h3>
+    <p class="hint" style="margin:0 0 10px">Briefly drops all live MCP connections. The grace window below lets in-flight
+      requests finish before the restart fires — Cancel to abort, or Restart now to skip the wait.</p>
+    <div style="font-size:14px">Restarting in <b id="rs_n">10</b>s…</div>
+    <div class="foot">
+      <button class="ghost" onclick="cancelRestart()">Cancel</button>
+      <button class="primary danger" id="rs_now" onclick="doRestartNow()">Restart now</button>
+    </div>
+  </div>
+</div>
 <div class="toast" id="toast"></div>
 
 <script>
@@ -539,9 +551,30 @@ async function delBackend(name) {
   try { const r = await api('DELETE', '/admin/api/backend/' + encodeURIComponent(name)); SELECTED = null; afterRestart(r, 'removed'); }
   catch (e) { toast('remove failed: ' + e.message); }
 }
-// Manual on-demand restart of the daemon (#56).
-async function restartGateway() {
-  if (!confirm('Restart the gateway now? This briefly drops all live MCP connections.')) return;
+// Manual on-demand restart of the daemon (#56) with a ~10s grace countdown so
+// in-flight requests can drain and the restart is never a surprise; Cancel aborts,
+// "Restart now" skips the wait. The daemon keeps serving during the countdown
+// (the POST that triggers the kickstart only fires at 0), so that IS the drain.
+let _rsTimer = null;
+function restartGateway() {
+  let n = 10;
+  $('#rs_n').textContent = n;
+  $('#restartBg').classList.add('show');
+  clearInterval(_rsTimer);
+  _rsTimer = setInterval(() => {
+    n -= 1;
+    if (n <= 0) { doRestartNow(); return; }
+    $('#rs_n').textContent = n;
+  }, 1000);
+}
+function cancelRestart() {
+  clearInterval(_rsTimer); _rsTimer = null;
+  $('#restartBg').classList.remove('show');
+  toast('restart cancelled');
+}
+async function doRestartNow() {
+  clearInterval(_rsTimer); _rsTimer = null;
+  $('#restartBg').classList.remove('show');
   try { const r = await api('POST', '/admin/api/restart'); afterRestart(r, 'restart requested'); }
   catch (e) { toast('restart failed: ' + e.message); }
 }
