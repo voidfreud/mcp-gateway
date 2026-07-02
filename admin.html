@@ -382,6 +382,46 @@ function renderGateway() {
       <td style="padding:4px 8px;text-align:right;color:${over ? '#ff9b9b' : 'var(--mut)'}">${bytes} / 2048 B</td>
     </tr>`;
   }).join('');
+
+  // #20: context footprint in UTF-8 bytes. Per enabled backend, sum the broadcast
+  // text of ALL enabled tools vs EAGER (pinned) tools only — the latter, plus
+  // instructions, is the real UPFRONT per-session cost (deferred tools are ~free
+  // until used). A disabled backend broadcasts nothing (#72), so it contributes 0.
+  const tbytes = t => {
+    const eff = (v, d) => (v || d || '');
+    let n = enc.encode(eff(t.name, t.default_name)).length
+          + enc.encode(eff(t.title, t.default_title)).length
+          + enc.encode(eff(t.description, t.default_description)).length;
+    for (const p of t.params || []) {
+      if (p.hide) continue;  // hidden params aren't broadcast
+      n += enc.encode(eff(p.name, p.default_name)).length
+         + enc.encode(eff(p.description, p.default_description)).length;
+    }
+    return n;
+  };
+  let allTot = 0, eagerTot = 0, instrTot = 0;
+  const mRows = STATE.backends.map(b => {
+    if (!b.enabled) return `<tr style="color:var(--mut)">
+      <td style="padding:4px 8px">${esc(b.name)} <span style="color:var(--warn)">off</span></td>
+      <td colspan="3" style="padding:4px 8px">— not broadcast —</td></tr>`;
+    let all = 0, eager = 0;
+    for (const t of b.tools) {
+      if (!t.enabled) continue;  // disabled tool -> not broadcast
+      const n = tbytes(t);
+      all += n;
+      if (t.always_load || b.always_load) eager += n;  // pinned -> upfront
+    }
+    const instr = enc.encode(b.instructions ?? b.default_instructions ?? '').length;
+    allTot += all; eagerTot += eager; instrTot += instr;
+    return `<tr>
+      <td style="padding:4px 8px"><b>${esc(b.name)}</b></td>
+      <td style="padding:4px 8px;text-align:right">${all.toLocaleString()} B</td>
+      <td style="padding:4px 8px;text-align:right;color:${eager ? 'var(--warn)' : 'var(--mut)'}">${eager.toLocaleString()} B</td>
+      <td style="padding:4px 8px;text-align:right;color:var(--mut)">${instr.toLocaleString()} B</td></tr>`;
+  }).join('');
+  const upfront = eagerTot + instrTot;
+  const pct = allTot ? Math.round(100 * eagerTot / allTot) : 0;
+
   m.innerHTML = `
     <div class="b-head"><h2>⚙ Gateway</h2><code>${STATE.backends.length} MCP endpoint(s)</code>
       <span class="badge" title="running gateway build">v${esc(STATE.version || '?')}</span></div>
@@ -396,6 +436,30 @@ function renderGateway() {
     <div class="b-actions" style="margin-bottom:16px">
       <button class="ghost danger" onclick="restartGateway()">Restart gateway</button>
       <span class="hint" style="margin-top:0">Restarts the daemon — briefly drops all live MCP connections.</span>
+    </div>
+    <div class="instr">
+      <h3>Context footprint <span class="si" style="font-weight:400">· UTF-8 bytes broadcast to Claude</span></h3>
+      <table style="width:100%;border-collapse:collapse;font-size:13px">
+        <thead><tr style="color:var(--mut);text-align:left">
+          <th style="padding:4px 8px">Backend</th>
+          <th style="padding:4px 8px;text-align:right">All tools</th>
+          <th style="padding:4px 8px;text-align:right">Eager (upfront)</th>
+          <th style="padding:4px 8px;text-align:right">Instructions</th></tr></thead>
+        <tbody>${mRows}</tbody>
+        <tfoot><tr style="border-top:1px solid var(--ro);font-weight:600">
+          <td style="padding:6px 8px">All backends</td>
+          <td style="padding:6px 8px;text-align:right">${allTot.toLocaleString()} B</td>
+          <td style="padding:6px 8px;text-align:right;color:var(--warn)">${eagerTot.toLocaleString()} B</td>
+          <td style="padding:6px 8px;text-align:right;color:var(--mut)">${instrTot.toLocaleString()} B</td></tr></tfoot>
+      </table>
+      <div style="margin:12px 8px 4px;height:10px;background:var(--ro);border-radius:5px;overflow:hidden"
+           title="eager tools as a share of the full tool catalog">
+        <div style="height:100%;width:${pct}%;background:var(--warn)"></div></div>
+      <div class="hint" style="margin:4px 8px">
+        <b>${upfront.toLocaleString()} B upfront</b> every session — eager tools
+        (${eagerTot.toLocaleString()} B, ${pct}% of the ${allTot.toLocaleString()} B
+        full catalog) + instructions (${instrTot.toLocaleString()} B). Deferred tools
+        cost nothing upfront until Claude reaches for them.</div>
     </div>
     <div class="instr">
       <h3>Endpoints</h3>
