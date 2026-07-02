@@ -258,6 +258,8 @@ function renderDetail(name) {
         <input type="checkbox" id="b-pin" ${b.always_load ? 'checked' : ''}
                onchange="pinBackend('${escJS(b.name)}', this.checked)"> 📌 pin all tools (eager)</label>
       <span class="spacer" style="flex:1"></span>
+      <button class="ghost" onclick="saveSnapshot('${escJS(b.name)}')" title="download this backend's field values as a JSON file">Save fields</button>
+      <button class="ghost" onclick="loadSnapshot('${escJS(b.name)}')" title="restore this backend's field values from a saved JSON file (overwrites current)">Load fields</button>
       <button class="ghost" onclick="reintrospect('${escJS(b.name)}')">Re-introspect</button>
       <button class="ghost danger" onclick="delBackend('${escJS(b.name)}')">Remove backend</button>
     </div>
@@ -433,6 +435,11 @@ function renderGateway() {
         <input type="checkbox" id="masterTgl"> broadcast all backends</label>
       <span class="hint" style="margin-top:0">${on}/${total} enabled${on > 0 && on < total ? ' · mixed' : ''}</span>
     </div>
+    <div class="b-actions" style="margin-bottom:10px">
+      <button class="ghost" onclick="saveSnapshot(GATEWAY)" title="download EVERY backend's field values as one JSON file">Save all fields</button>
+      <button class="ghost" onclick="loadSnapshot(GATEWAY)" title="restore EVERY backend's field values from a saved JSON file (overwrites current)">Load all fields</button>
+      <span class="hint" style="margin-top:0">Snapshot or restore every editable field across all backends (instructions, names, descriptions, params, pins, enable state).</span>
+    </div>
     <div class="b-actions" style="margin-bottom:16px">
       <button class="ghost danger" onclick="restartGateway()">Restart gateway</button>
       <span class="hint" style="margin-top:0">Restarts the daemon — briefly drops all live MCP connections.</span>
@@ -590,6 +597,125 @@ function gather(card) {
     always_load: $('.f-always', card).checked,
     params,
   };
+}
+
+// ---- #113: Save / Load field snapshots ------------------------------------
+// A snapshot is a plain JSON file the browser downloads (Save) and re-uploads
+// (Load) — no server-side storage. It captures every EDITABLE field's effective
+// value (override if set, else the backend default) so a restore reproduces
+// exactly what Claude Code sees. Load replays the existing, lock-guarded save
+// endpoints (override / instructions / pin / display-name / enabled), so it goes
+// through the same validation + hot-reload as manual edits.
+const SNAP_KIND = 'mcp-gateway-fields';
+const EMPTY_OVERRIDE = { name: '', title: '', description: '', enabled: true, always_load: false, params: [] };
+
+function backendSnapshot(b) {
+  return {
+    name: b.name,
+    display_name: b.display_name || '',
+    enabled: b.enabled,
+    always_load: !!b.always_load,               // backend-level pin (all tools)
+    instructions: b.instructions ?? b.default_instructions ?? '',
+    tools: (b.tools || []).map(t => ({
+      original: t.original,
+      name: t.name || t.default_name || '',
+      title: t.title || t.default_title || '',
+      description: t.description || t.default_description || '',
+      enabled: t.enabled !== false,
+      always_load: !!t.always_load,
+      params: (t.params || []).map(p => ({
+        original: p.original,
+        name: p.name || p.default_name || '',
+        description: p.description || p.default_description || '',
+        hide: !!p.hide,
+      })),
+    })),
+  };
+}
+
+function saveSnapshot(scope) {
+  const gw = scope === GATEWAY;
+  const backends = gw ? STATE.backends : STATE.backends.filter(b => b.name === scope);
+  if (!backends.length) { toast('nothing to save'); return; }
+  const snap = {
+    kind: SNAP_KIND, version: 1,
+    scope: gw ? 'gateway' : scope,
+    host: STATE.host, port: STATE.port,
+    backends: backends.map(backendSnapshot),
+  };
+  const url = URL.createObjectURL(new Blob([JSON.stringify(snap, null, 2)], { type: 'application/json' }));
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `mcp-gateway-${gw ? 'gateway' : scope}-fields.json`;
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+  toast(gw ? 'saved all fields' : `saved ${scope} fields`);
+}
+
+function loadSnapshot(scope) {
+  const inp = document.createElement('input');
+  inp.type = 'file'; inp.accept = 'application/json,.json';
+  inp.onchange = async () => {
+    const file = inp.files && inp.files[0];
+    if (!file) return;
+    let snap;
+    try { snap = JSON.parse(await file.text()); }
+    catch { toast('load failed: not valid JSON'); return; }
+    if (!snap || snap.kind !== SNAP_KIND || !Array.isArray(snap.backends)) {
+      toast('load failed: not an mcp-gateway field snapshot'); return;
+    }
+    await applySnapshot(scope, snap);
+  };
+  inp.click();
+}
+
+async function applySnapshot(scope, snap) {
+  const gw = scope === GATEWAY;
+  const byName = {};
+  snap.backends.forEach(sb => { byName[sb.name] = sb; });
+  // Restore only live backends the snapshot names: gateway = all matching, single
+  // = just this one (which must appear in the file).
+  const targets = (gw ? STATE.backends : STATE.backends.filter(b => b.name === scope))
+    .filter(b => byName[b.name]);
+  if (!targets.length) {
+    toast(gw ? 'load failed: no matching backends' : `load failed: snapshot has no "${scope}"`);
+    return;
+  }
+  if (!confirm(`Restore ${gw ? 'ALL backends' : `"${scope}"`} from this file? This overwrites the current field values (instructions, names, descriptions, params, pins, enable state).`)) return;
+
+  let failed = 0;
+  for (const b of targets) {
+    const sb = byName[b.name];
+    try {
+      // Text + pin first (live backends hot-reload; disabled ones just write
+      // config), enabled LAST so a re-mount reflects everything above.
+      await api('PUT', '/admin/api/instructions', { backend: b.name, value: sb.instructions ?? '' });
+      await api('POST', `/admin/api/backend/${encodeURIComponent(b.name)}/display-name`, { value: sb.display_name || '' });
+      await api('POST', `/admin/api/backend/${encodeURIComponent(b.name)}/pin`, { value: !!sb.always_load });
+      // Pass 1 — reset every CURRENT tool to its default. Clears edits absent
+      // from the snapshot AND avoids a transient name collision when the snapshot
+      // swaps two tools' broadcast names (check_no_collision would reject it).
+      for (const ct of b.tools)
+        await api('PUT', '/admin/api/override', { backend: b.name, tool_original: ct.original, override: EMPTY_OVERRIDE });
+      // Pass 2 — apply the snapshot's overrides for tools that still exist.
+      const live = new Set(b.tools.map(t => t.original));
+      for (const st of (sb.tools || [])) {
+        if (!live.has(st.original)) continue;  // tool removed upstream — skip
+        await api('PUT', '/admin/api/override', {
+          backend: b.name, tool_original: st.original,
+          override: {
+            name: st.name || '', title: st.title || '', description: st.description || '',
+            enabled: st.enabled !== false, always_load: !!st.always_load,
+            params: (st.params || []).map(p => ({ original: p.original, name: p.name || '', description: p.description || '', hide: !!p.hide })),
+          },
+        });
+      }
+      if (!!sb.enabled !== !!b.enabled)
+        await api('POST', `/admin/api/backend/${encodeURIComponent(b.name)}/enabled`, { value: !!sb.enabled });
+    } catch (e) { failed++; toast(`restore of ${b.name} failed: ${e.message}`, 4000); }
+  }
+  await load();
+  if (!failed) toast(gw ? 'restored all fields' : `restored ${scope} fields`);
 }
 
 const pending = {};  // key -> {backend, original, card} for edits not yet persisted
