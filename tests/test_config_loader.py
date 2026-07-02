@@ -344,6 +344,17 @@ def test_disabled_backend_beats_always_load():
     assert tr._transforms["t1"].meta is None
 
 
+def test_disabled_backend_beats_per_tool_always_load():
+    # #116: a PER-TOOL eager pin (an override entry, not the per-backend pin) on a
+    # disabled backend must yield a tool that is off AND not eager. Before the fix
+    # this path set the alwaysLoad meta without a b.enabled gate, emitting the
+    # contradictory {enabled: False, meta: alwaysLoad}.
+    cfg = _one_backend(enabled=False, tools=[{"original": "t1", "always_load": True}])
+    tr, _ = cl.build_transforms(cfg, cfg.backends[0], all_tools={"b": ["t1"]})
+    assert tr._transforms["t1"].enabled is False
+    assert tr._transforms["t1"].meta is None
+
+
 def test_enabled_backend_no_override_leaves_tool_untouched():
     cfg = _one_backend()  # enabled defaults True, no overrides, no always_load
     tr, _ = cl.build_transforms(cfg, cfg.backends[0], all_tools={"b": ["t1"]})
