@@ -32,7 +32,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse
 from starlette.routing import Mount, Route
 
-from fastmcp import Client, FastMCP
+from fastmcp import Client
 from fastmcp.server import create_proxy
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 
@@ -230,30 +230,28 @@ class BodyLimitMiddleware:
 # ---------------------------------------------------------------------------
 
 
-async def _reconcile(proxy: FastMCP, index: dict[str, str], log) -> None:
-    """List one backend proxy's live tools; warn on transform keys with no match.
+def _reconcile(index: dict[str, str], known_tools, log) -> None:
+    """Warn on transform keys (config ``original`` names) that no tool in the
+    backend's CAPTURED defaults matches — almost always a typo in config.toml.
 
-    Best-effort and non-fatal: a network/backend hiccup here must not stop the
-    daemon from starting. A mismatch almost always means a typo in a tool's
-    ``original`` in config.toml.
+    Reconciles against the captured defaults, not a live round-trip (#105): the
+    boot path stays connection-free (no extra list_tools per backend). If a
+    backend's live tools have drifted from the captured baseline, re-introspect
+    to refresh it.
     """
     if not index:
-        return  # no overrides to reconcile — skip the boot-time round-trip (#79)
-    try:
-        async with Client(proxy) as client:
-            live = {t.name for t in await client.list_tools()}
-    except Exception as exc:  # noqa: BLE001
-        log.warning("reconcile_skipped", reason=str(exc))
-        return
+        return  # no overrides to reconcile
+    known = set(known_tools)
     for key, backend in index.items():
-        if key not in live:
+        if key not in known:
             log.warning(
                 "override_no_match",
                 tool=key,
                 backend=backend,
-                hint="check 'original' in config.toml; backend may not expose it",
+                hint="not in captured defaults — check 'original' in config.toml, "
+                "or re-introspect if the backend changed",
             )
-    log.info("reconcile_done", live_tools=len(live), overrides=len(index))
+    log.info("reconcile_done", known_tools=len(known), overrides=len(index))
 
 
 # ---------------------------------------------------------------------------
@@ -304,7 +302,9 @@ async def _mount_backend(
         transforms, index = config_loader.build_transforms(
             cfg, b, all_tools, captured_meta
         )
-        await _reconcile(proxy, index, log)  # SOURCE names, before renames apply
+        # Reconcile config `original` names against captured defaults (no live
+        # round-trip, #105); SOURCE names, before renames apply.
+        _reconcile(index, all_tools.get(b.name, []), log)
         proxy.add_transform(transforms)
         # Per-endpoint instructions: only this backend's blurb -> its own 2KB.
         proxy.instructions = config_loader.backend_instructions(b, captured_instr)

@@ -45,6 +45,9 @@ def secrets_path() -> Path:
     ).expanduser()
 
 
+_secrets_cache: dict[str, tuple[float, dict[str, str]]] = {}
+
+
 def load_secrets() -> dict[str, str]:
     """Parse the gateway-scoped secrets file into a dict.
 
@@ -52,13 +55,21 @@ def load_secrets() -> dict[str, str]:
     tolerated; surrounding single/double quotes on the value are stripped.
     Values stay OUT of ``os.environ`` on purpose: stdio backend subprocesses
     inherit the daemon's environment, and one backend must not be able to read
-    secrets meant for another. Re-read on every call (the file is tiny) so a
-    newly added secret works without a daemon restart.
+    secrets meant for another.
+
+    Cached by (path, mtime) (#105): a config build expands many ``${VAR}`` values
+    but only reads the file once; a freshly-edited secrets file is still picked up
+    because its mtime changes (so a new secret works without a daemon restart).
     """
     path = secrets_path()
-    secrets: dict[str, str] = {}
     if not path.is_file():
-        return secrets
+        return {}
+    ckey = str(path)
+    mtime = path.stat().st_mtime
+    cached = _secrets_cache.get(ckey)
+    if cached is not None and cached[0] == mtime:
+        return cached[1]
+    secrets: dict[str, str] = {}
     for line in path.read_text().splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
@@ -72,6 +83,7 @@ def load_secrets() -> dict[str, str]:
         if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
             value = value[1:-1]
         secrets[key.strip()] = value
+    _secrets_cache[ckey] = (mtime, secrets)
     return secrets
 
 

@@ -193,6 +193,19 @@ def test_expand_env_secrets_not_leaked_to_environ(monkeypatch, tmp_path):
     assert "LEAK_TOK" not in os.environ
 
 
+def test_load_secrets_reloads_on_mtime_change(monkeypatch, tmp_path):
+    # #105: cached by (path, mtime) — a fresh edit (newer mtime) is still picked
+    # up without a restart, so the cache never serves a stale secret.
+    p = tmp_path / "s.env"
+    p.write_text("A=one\n")
+    monkeypatch.setenv("MCP_GATEWAY_SECRETS", str(p))
+    assert cl.load_secrets() == {"A": "one"}
+    p.write_text("A=two\nB=three\n")
+    st = p.stat()
+    os.utime(p, (st.st_atime, st.st_mtime + 5))  # force a newer mtime
+    assert cl.load_secrets() == {"A": "two", "B": "three"}
+
+
 # --- eager / always_load meta ----------------------------------------------
 
 

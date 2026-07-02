@@ -593,9 +593,24 @@ def test_capture_defaults_times_out(monkeypatch):
 
 
 def test_reconcile_skips_when_no_overrides():
-    # Empty index -> no round-trip; proxy is never touched (None would crash if
-    # it tried to connect). Returns cleanly.
-    anyio.run(server._reconcile, None, {}, structlog.get_logger("test"))
+    # Empty index -> no-op (returns cleanly, never inspects the tool list).
+    server._reconcile({}, [], structlog.get_logger("test"))
+
+
+def test_reconcile_warns_on_override_missing_from_captured_defaults():
+    # #105: reconcile against captured defaults (no live round-trip). A config
+    # `original` not in the captured tool list is flagged.
+    warned = []
+
+    class _L:
+        def warning(self, _event, **kw):
+            warned.append(kw.get("tool"))
+
+        def info(self, *a, **kw):
+            pass
+
+    server._reconcile({"typo": "b", "real": "b"}, ["real"], _L())
+    assert warned == ["typo"]  # only the unknown key warns
 
 
 def test_gateway_version_is_cached():
