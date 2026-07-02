@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Literal
 
 import tomli_w
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from fastmcp.server.transforms import ToolTransform
 from fastmcp.tools.tool_transform import ArgTransformConfig, ToolTransformConfig
@@ -152,11 +152,15 @@ class Backend(BaseModel, extra="forbid"):
     # FastMCP's client config (RemoteMCPServer.auth), which runs the OAuth flow
     # (browser consent on first connect, cached tokens after).
     auth: Literal["oauth"] | None = None
-    # A command that prints a JSON object of headers to stdout (#6) — for
-    # short-lived tokens / SSO. Runs when the backend's client config is built
-    # (mount / introspect), NOT per request. Same trust level as a stdio
-    # backend's `command`: the config file is local-admin-owned.
-    headers_helper: str | None = None
+    # A helper that prints a JSON object of headers to stdout (#6) — for tokens
+    # resolved at connect time. Runs when the backend's client config is built
+    # (mount / introspect), NOT per request. Two forms (#81):
+    #   - list[str] -> argv, run WITHOUT a shell (safe; no injection surface)
+    #   - str       -> run via the shell (needed for $()/pipes), so it carries
+    #                  FULL shell privilege — same trust as a stdio `command`.
+    # Either way the config file is local-admin-owned, so this is not a new trust
+    # boundary; the list form just removes the shell footgun for simple helpers.
+    headers_helper: str | list[str] | None = None
     # stdio
     command: str | None = None
     args: list[str] = Field(default_factory=list)
@@ -194,6 +198,19 @@ class Backend(BaseModel, extra="forbid"):
                 f"backend {self.name!r}: set both auth_header and auth_value, or neither"
             )
         return self
+
+    @field_validator("name")
+    @classmethod
+    def _check_name(cls, v: str) -> str:
+        # #81: the name lands in a route mount (/<name>/mcp) and a defaults-file
+        # path (<name>.json), so restrict it to the same MCP-safe identifier set
+        # used for tool/param names — blocks '/', '..', and other traversal.
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", v):
+            raise ConfigError(
+                f"invalid backend name {v!r}: use only letters, digits, '_' or "
+                f"'-' (max 64 chars)"
+            )
+        return v
 
 
 class GatewayConfig(BaseModel, extra="forbid"):
@@ -274,16 +291,22 @@ def _run_headers_helper(b: Backend) -> dict[str, str]:
     """
     import subprocess
 
+    helper = b.headers_helper
+    # A str runs via the shell (needed for $()/pipes) and carries full shell
+    # privilege; a list is argv run WITHOUT a shell (no injection surface). Both
+    # are local-admin-owned config — same trust as a stdio `command` (#81).
+    is_shell = isinstance(helper, str)
     try:
         out = subprocess.run(
-            b.headers_helper,
-            shell=True,
+            helper,
+            shell=is_shell,
             capture_output=True,
             text=True,
             timeout=30,
             check=True,
         ).stdout
-    except subprocess.SubprocessError as exc:
+    except (subprocess.SubprocessError, OSError) as exc:
+        # OSError covers a missing executable in the list (no-shell) form.
         raise ConfigError(f"backend {b.name!r}: headers_helper failed: {exc}") from None
     try:
         data = json.loads(out)

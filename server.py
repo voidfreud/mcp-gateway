@@ -149,6 +149,11 @@ class BodyLimitMiddleware:
     Rejects on a declared Content-Length over the cap, and — for chunked or
     length-less bodies — buffers under the cap and rejects once it's exceeded,
     replaying the buffered body to the wrapped app when it fits.
+
+    Note (#81): the whole body is buffered in memory before dispatch even when it
+    fits, and on a mid-stream reject we return 413 without draining the rest of
+    the in-flight body. Both are fine here — loopback only, 64 KB cap — but would
+    need revisiting for a larger cap or a non-loopback bind.
     """
 
     def __init__(self, app, *, max_bytes: int, path_prefix: str = "/admin/api"):

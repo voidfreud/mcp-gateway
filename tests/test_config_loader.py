@@ -537,6 +537,61 @@ def test_headers_helper_failures_are_loud():
         cl.backend_entry(_http_backend(headers_helper="echo '[1,2]'"))
 
 
+def test_headers_helper_list_form_runs_without_shell():
+    # #81: a list is argv run without a shell — the safe form. echo prints the
+    # JSON verbatim, so no shell features are needed to produce headers.
+    e = cl.backend_entry(_http_backend(headers_helper=["echo", '{"X-H": "list-form"}']))
+    assert e["headers"] == {"X-H": "list-form"}
+
+
+def test_headers_helper_list_form_no_shell_interpretation():
+    # The list form must NOT expand shell syntax — the token stays literal.
+    e = cl.backend_entry(_http_backend(headers_helper=["echo", '{"X-H": "$(whoami)"}']))
+    assert e["headers"] == {"X-H": "$(whoami)"}
+
+
+def test_headers_helper_list_form_missing_binary_is_loud():
+    # OSError (FileNotFoundError) from a missing executable must surface as a
+    # clean ConfigError, not an uncaught crash (#81).
+    with pytest.raises(cl.ConfigError, match="failed"):
+        cl.backend_entry(_http_backend(headers_helper=["/no/such/binary-xyz"]))
+
+
+def test_headers_helper_list_roundtrips_toml():
+    cfg = cl.GatewayConfig.model_validate(
+        {
+            "backends": [
+                {
+                    "name": "b",
+                    "transport": "http",
+                    "url": "https://h/mcp",
+                    "headers_helper": ["emit-headers", "--json"],
+                }
+            ]
+        }
+    )
+    reparsed = cl.GatewayConfig.model_validate(tomllib.loads(cl.dump_toml(cfg)))
+    assert reparsed.backends[0].headers_helper == ["emit-headers", "--json"]
+
+
+# --- #81 backend-name validation ------------------------------------------
+
+
+@pytest.mark.parametrize("good", ["b", "gateway-github", "a_b-1", "x" * 64])
+def test_backend_name_accepts_safe_identifiers(good):
+    cl.Backend.model_validate({"name": good, "transport": "stdio", "command": "/bin/x"})
+
+
+@pytest.mark.parametrize(
+    "bad", ["../evil", "a/b", "has space", "dot.name", "", "x" * 65, "admin!"]
+)
+def test_backend_name_rejects_unsafe(bad):
+    with pytest.raises(cl.ConfigError, match="invalid backend name"):
+        cl.Backend.model_validate(
+            {"name": bad, "transport": "stdio", "command": "/bin/x"}
+        )
+
+
 def test_auth_fields_roundtrip_toml(monkeypatch):
     cfg = cl.GatewayConfig.model_validate(
         {
