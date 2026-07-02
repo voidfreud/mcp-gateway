@@ -35,6 +35,7 @@ from starlette.routing import Mount, Route
 from fastmcp import Client
 from fastmcp.server import create_proxy
 from fastmcp.server.middleware import Middleware, MiddlewareContext
+from mcp.server.lowlevel.server import NotificationOptions
 
 import admin
 import config_loader
@@ -259,6 +260,22 @@ def _reconcile(index: dict[str, str], known_tools, log) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _suppress_list_changed(proxy) -> None:
+    """Stop this proxy advertising ``listChanged`` for tools/resources/prompts.
+
+    FastMCP advertises ``listChanged=true``, but the gateway hot-reloads
+    transforms WITHOUT pushing a ``notifications/*/list_changed`` — so promising
+    the capability is worse than not (a client would wait for a push that never
+    comes; Claude re-lists on its next tool use / reconnect anyway). #90.
+
+    Reaches into FastMCP's ``_mcp_server.notification_options`` (private, like
+    hot_reload's ``_transforms``); the test tripwires a FastMCP rename.
+    """
+    proxy._mcp_server.notification_options = NotificationOptions(
+        prompts_changed=False, resources_changed=False, tools_changed=False
+    )
+
+
 async def _health(_request: Request) -> PlainTextResponse:
     # Body starts with "ok" so existing liveness checks still pass; the version
     # tail lets you confirm which build answered (#57).
@@ -298,6 +315,7 @@ async def _mount_backend(
         else:
             proxy = create_proxy(config_loader.to_proxy_config_one(b), name=name)
 
+        _suppress_list_changed(proxy)  # #90
         proxy.add_middleware(CallLogMiddleware(log, b.name))
         transforms, index = config_loader.build_transforms(
             cfg, b, all_tools, captured_meta
