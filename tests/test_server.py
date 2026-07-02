@@ -12,6 +12,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 import anyio
+import pytest
 import structlog
 
 from starlette.applications import Starlette
@@ -197,18 +198,6 @@ def _admin_app(tmp_path: Path) -> Starlette:
     # structlog logger: the app logs with kwargs (e.g. log.info("x", backend=...)),
     # which a stdlib logger rejects.
     admin.register(app, str(path), structlog.get_logger("test"), {}, {})
-    return app
-
-
-def _run_app(tmp_path: Path, registry: dict) -> Starlette:
-    """Admin app with a caller-supplied registry, for run_tool route tests."""
-    cfg = cl.GatewayConfig.model_validate(
-        {"backends": [{"name": "b", "transport": "stdio", "command": "/bin/x"}]}
-    )
-    path = tmp_path / "config.toml"
-    cl.save(cfg, str(path))
-    app = Starlette()
-    admin.register(app, str(path), structlog.get_logger("test"), registry, {})
     return app
 
 
@@ -529,3 +518,70 @@ def test_display_name_route_sets_and_clears(tmp_path):
     r2 = client.post("/admin/api/backend/b/display-name", json={"value": "   "})
     assert r2.status_code == 200
     assert cl.load(_cfg_path(tmp_path)).backends[0].display_name is None
+
+
+# ---------------------------------------------------------------------------
+# #96 — bad config recovers from a backup instead of crash-looping
+# ---------------------------------------------------------------------------
+
+
+def _good_cfg():
+    return cl.GatewayConfig.model_validate(
+        {"backends": [{"name": "b", "transport": "stdio", "command": "/bin/x"}]}
+    )
+
+
+def test_load_config_valid_passthrough(tmp_path, monkeypatch):
+    p = tmp_path / "config.toml"
+    cl.save(_good_cfg(), str(p))
+    monkeypatch.setattr(server, "CONFIG_PATH", str(p))
+    cfg = server._load_config_or_recover(structlog.get_logger("test"))
+    assert cfg.backends[0].name == "b"
+
+
+def test_recover_from_backup_on_bad_config(tmp_path, monkeypatch):
+    backups = tmp_path / "backups"
+    backups.mkdir()
+    cl.save(_good_cfg(), str(backups / "config-20260101-000000.toml"))
+    bad = tmp_path / "config.toml"
+    bad.write_text("this is = not valid toml [[[")
+    monkeypatch.setattr(server, "CONFIG_PATH", str(bad))
+    monkeypatch.setattr(admin, "BACKUP_DIR", backups)
+    cfg = server._load_config_or_recover(structlog.get_logger("test"))
+    assert cfg.backends[0].name == "b"  # recovered from the backup
+
+
+def test_recover_raises_when_no_valid_backup(tmp_path, monkeypatch):
+    backups = tmp_path / "backups"
+    backups.mkdir()
+    (backups / "config-20260101-000000.toml").write_text("also = broken [[[")
+    bad = tmp_path / "config.toml"
+    bad.write_text("not = valid [[[")
+    monkeypatch.setattr(server, "CONFIG_PATH", str(bad))
+    monkeypatch.setattr(admin, "BACKUP_DIR", backups)
+    with pytest.raises(Exception):  # noqa: B017 — main() catches this -> clean exit
+        server._load_config_or_recover(structlog.get_logger("test"))
+
+
+# ---------------------------------------------------------------------------
+# #85 — a hung backend probe times out instead of blocking boot/import
+# ---------------------------------------------------------------------------
+
+
+def test_capture_defaults_times_out(monkeypatch):
+    monkeypatch.setattr(admin, "CAPTURE_TIMEOUT", 0.05)
+
+    class HangingClient:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            await anyio.sleep(10)  # never resolves within the timeout
+
+        async def __aexit__(self, *a):
+            return False
+
+    monkeypatch.setattr(admin, "Client", HangingClient)
+    b = cl.Backend(name="b", transport="stdio", command="/bin/x")
+    with pytest.raises(TimeoutError):
+        anyio.run(admin.capture_defaults, b)
