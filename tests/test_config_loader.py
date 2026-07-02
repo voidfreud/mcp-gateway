@@ -123,6 +123,24 @@ def test_roundtrip_handles_tricky_description():
     )
 
 
+def test_self_check_main_runs_clean():
+    # #80: the documented `uv run config_loader.py <cfg>` self-check must not
+    # crash (it used to call build_transforms with a missing arg).
+    import pathlib
+    import subprocess
+    import sys
+
+    repo = pathlib.Path(__file__).resolve().parent.parent
+    r = subprocess.run(
+        [sys.executable, "config_loader.py", "config.default.toml"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+    assert r.returncode == 0, r.stderr
+    assert "backend(s)" in r.stdout
+
+
 # --- env expansion ---------------------------------------------------------
 
 

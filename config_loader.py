@@ -590,11 +590,13 @@ if __name__ == "__main__":
     # Quick self-check: `uv run config_loader.py [config.toml]`
     path = sys.argv[1] if len(sys.argv) > 1 else "config.toml"
     cfg = load(path)
-    transforms, index = build_transforms(cfg)
-    print(f"loaded {len(cfg.backends)} backend(s); {len(index)} tool override(s)")
-    for key, backend in index.items():
+    # build_transforms is per-backend now (#29); accumulate every backend's index.
+    all_index: dict[str, str] = {}
+    for _b in cfg.backends:
+        _transforms, index = build_transforms(cfg, _b)
+        all_index.update(index)
+    print(f"loaded {len(cfg.backends)} backend(s); {len(all_index)} tool override(s)")
+    for key, backend in all_index.items():
         print(f"  transform key: {key:40s} <- backend {backend}")
     print("proxy config:")
-    import json
-
     print(json.dumps(to_proxy_config(cfg), indent=2))
