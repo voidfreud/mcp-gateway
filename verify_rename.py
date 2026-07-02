@@ -76,24 +76,23 @@ async def main() -> int:
             async with Client(url) as c:
                 exposed = {t.name for t in await c.list_tools()}
                 instr = c.initialize_result.instructions or ""
+            reachable, err = True, ""
         except Exception as exc:  # noqa: BLE001
-            check(False, f"{name}: endpoint {url} reachable ({exc})")
-            continue
-        check(True, f"{name}: endpoint {url} reachable")
+            reachable, err = False, str(exc)
 
-        # A backend switched off at the BACKEND level (#38) must broadcast
-        # nothing: zero tools (and, since #72, no instructions) — while its
-        # endpoint stays mounted/reachable by design.
+        # A backend switched off at the BACKEND level (#38) is NOT mounted (#78):
+        # its endpoint is absent (404 / connection refused), not reachable-nil.
         if not b.get("enabled", True):
             check(
-                not exposed,
-                f"{name}: disabled backend broadcasts no tools ({len(exposed)})",
-            )
-            check(
-                not instr,
-                f"{name}: disabled backend broadcasts no instructions",
+                not reachable,
+                f"{name}: disabled backend endpoint is absent (unreachable)",
             )
             continue
+
+        if not reachable:
+            check(False, f"{name}: endpoint {url} reachable ({err})")
+            continue
+        check(True, f"{name}: endpoint {url} reachable")
 
         # Every ENABLED tool is exposed under its effective name, which is BARE
         # (no '<backend>_' prefix) — each backend is its own endpoint now (#29).

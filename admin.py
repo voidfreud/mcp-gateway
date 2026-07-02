@@ -799,9 +799,26 @@ def register(
         hot_reload(registry, holders, cfg, name, log)
         return JSONResponse({"ok": True, "reloaded": "in-process"})
 
+    async def _apply_enabled(b: Backend, value: bool) -> None:
+        """Bring one backend's live mount in line with its enabled flag (#78):
+        enable -> mount it if not already mounted; disable -> unmount it (so a
+        disabled backend runs no subprocess and its endpoint 404s)."""
+        if value:
+            if b.name not in registry:  # not mounted -> mount it live (#7 path)
+                add = hooks.get("add")
+                if add is not None:
+                    await add(b)
+            else:  # already mounted (defensive) -> just refresh its transforms
+                hot_reload(registry, holders, _load(), b.name, log)
+        else:
+            remove = hooks.get("remove")
+            if remove is not None:
+                remove(b.name)
+
     async def enable_backend(request: Request):
-        """Toggle a backend's broadcast switch (#38). Hot-reload — every tool's
-        enabled state flips in-process; the endpoint stays mounted, no restart."""
+        """Enable/disable a backend (#38). Enable MOUNTS it live; disable UNMOUNTS
+        it (#78) — no subprocess and a 404 endpoint while disabled — until it's
+        re-enabled. No daemon restart either way."""
         name = request.path_params["name"]
         payload = await request.json()
         cfg = _load()
@@ -810,15 +827,16 @@ def register(
             return JSONResponse(
                 {"ok": False, "error": "unknown backend"}, status_code=400
             )
-        b.enabled = bool(payload.get("value", True))
+        value = bool(payload.get("value", True))
+        b.enabled = value
         backup_config(config_path)
         cl.save(cfg, config_path)
-        hot_reload(registry, holders, cfg, name, log)
+        await _apply_enabled(b, value)
         return JSONResponse({"ok": True, "reloaded": "in-process"})
 
     async def enable_all(request: Request):
-        """Master switch (#40): set every backend's enabled, then hot-reload each.
-        No topology change, so it's in-process like a per-backend toggle."""
+        """Master switch (#40): enable/disable every backend, mounting or
+        unmounting each to match (#78)."""
         payload = await request.json()
         value = bool(payload.get("value", True))
         cfg = _load()
@@ -827,7 +845,7 @@ def register(
         backup_config(config_path)
         cl.save(cfg, config_path)
         for b in cfg.backends:
-            hot_reload(registry, holders, cfg, b.name, log)
+            await _apply_enabled(b, value)
         return JSONResponse({"ok": True, "reloaded": "in-process"})
 
     async def set_display_name(request: Request):
