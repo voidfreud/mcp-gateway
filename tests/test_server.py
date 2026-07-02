@@ -638,3 +638,20 @@ def test_ready_reports_degraded_when_backend_unmounted(tmp_path):
         assert body["ready"] is False
         assert "b" in body["enabled"] and "b" in body["missing"]
         assert body["mounted"] == []
+
+
+# ---------------------------------------------------------------------------
+# #90 — don't advertise listChanged (we never push the notification)
+# ---------------------------------------------------------------------------
+
+
+def test_suppress_list_changed_clears_capability():
+    from fastmcp.server import create_proxy
+
+    b = cl.Backend(name="b", transport="stdio", command="/bin/x")
+    proxy = create_proxy(cl.to_proxy_config_one(b), name="mcp-gateway-b")
+    server._suppress_list_changed(proxy)
+    caps = proxy._mcp_server.create_initialization_options().capabilities
+    assert caps.tools.listChanged is False
+    assert caps.resources.listChanged is False
+    assert caps.prompts.listChanged is False
