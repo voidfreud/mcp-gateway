@@ -429,7 +429,12 @@ def build_transforms(
             tc_kwargs["description"] = tool.description
         if arguments:
             tc_kwargs["arguments"] = arguments
-        if tool.always_load or b.always_load:
+        # A disabled backend has no eager tools: gate the pin on b.enabled so
+        # "disabled wins over pin" holds at the per-tool level too (#116) — else a
+        # disabled backend's overridden tool would emit {enabled: False, meta:
+        # alwaysLoad} (off, yet flagged eager). Mirrors the b.enabled gate on the
+        # per-backend pin below.
+        if b.enabled and (tool.always_load or b.always_load):
             tc_kwargs["meta"] = pin_meta(key)
         transforms[key] = ToolTransformConfig(**tc_kwargs)
 
