@@ -121,6 +121,7 @@ async def main() -> int:
     # renamed in the admin (which is the product's whole point).
     if deepwiki is not None and not deepwiki.get("enabled", True):
         deepwiki = None  # backend switched off (#38) -> nothing to call
+    ask = None  # bound before the conditional so the check below is unambiguous
     if deepwiki is not None:
         ask = next(
             (

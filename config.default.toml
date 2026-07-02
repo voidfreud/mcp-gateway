@@ -9,7 +9,9 @@ log_file = "~/.local/state/mcp-gateway/gateway.log"
 [[backends]]
 name = "gitnexus"
 transport = "stdio"
-command = "/Users/alexanderbass/.local/bin/gitnexus"
+# Resolved from PATH so the seed is portable; ensure the tool is installed (or
+# use an absolute path). A backend that can't be found is skipped, not fatal.
+command = "gitnexus"
 args = [
     "mcp",
 ]

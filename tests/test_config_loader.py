@@ -193,32 +193,6 @@ def test_expand_env_secrets_not_leaked_to_environ(monkeypatch, tmp_path):
     assert "LEAK_TOK" not in os.environ
 
 
-# --- name prefixing (exposed_name) -----------------------------------------
-
-
-def _cfg(n_backends):
-    return cl.GatewayConfig.model_validate(
-        {
-            "backends": [
-                {"name": f"b{i}", "transport": "http", "url": "https://h/mcp"}
-                for i in range(n_backends)
-            ]
-        }
-    )
-
-
-def test_exposed_name_single_backend_is_bare():
-    cfg = _cfg(1)
-    assert cl.exposed_name(cfg, cfg.backends[0], "tool") == "tool"
-
-
-def test_exposed_name_multi_backend_is_also_bare():
-    # Per-backend endpoints: each backend is its own MCP server, so tools are
-    # always exposed under their bare name (the old <backend>_ prefix is gone).
-    cfg = _cfg(2)
-    assert cl.exposed_name(cfg, cfg.backends[0], "tool") == "tool"
-
-
 # --- eager / always_load meta ----------------------------------------------
 
 

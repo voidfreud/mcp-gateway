@@ -261,15 +261,6 @@ def captured_instructions(cfg: GatewayConfig) -> dict[str, str | None]:
     return out
 
 
-def apply_backend_instructions(proxy, cfg: GatewayConfig, b: Backend) -> str | None:
-    """(Re)set one backend proxy's live server-level ``instructions`` from its
-    effective blurb (override else captured original). Each backend endpoint
-    carries only its own, so each keeps Claude Code's full per-server budget."""
-    instr = cl.backend_instructions(b, captured_instructions(cfg))
-    proxy.instructions = instr
-    return instr
-
-
 def effective_tools(cfg: GatewayConfig) -> list[dict]:
     """Every ENABLED tool's effective broadcast (name, description) across all
     backends, computed from defaults + overrides. Used to detect collisions —
@@ -282,7 +273,7 @@ def effective_tools(cfg: GatewayConfig) -> list[dict]:
             ov = _find_tool_override(b, orig)
             if ov is not None and not ov.enabled:
                 continue  # disabled -> not broadcast -> can't collide
-            name = ov.name if (ov and ov.name) else cl.exposed_name(cfg, b, orig)
+            name = ov.name if (ov and ov.name) else orig
             desc = ov.description if (ov and ov.description) else dt.get("description")
             out.append(
                 {"backend": b.name, "original": orig, "name": name, "description": desc}
@@ -295,12 +286,11 @@ def check_no_collision(
 ) -> None:
     """Reject if *new* would make the edited tool share a broadcast NAME with any
     other enabled tool, or a deliberately-set DESCRIPTION identical to another's.
-    Passthrough never collides (prefixed names are unique), so this only fires on
-    a real rename/description clash."""
+    Passthrough never collides (bare original names are unique within a backend),
+    so this only fires on a real rename/description clash."""
     if not new.enabled:
         return  # not broadcast
-    b = next(x for x in cfg.backends if x.name == backend)
-    eff_name = new.name or cl.exposed_name(cfg, b, original)
+    eff_name = new.name or original
     for other in effective_tools(cfg):
         # Each backend is its own endpoint/MCP server now, so broadcast names
         # only need to be unique WITHIN a backend — a clash across backends can't
@@ -354,7 +344,7 @@ def build_state(cfg: GatewayConfig) -> dict:
                 {
                     "original": dt["original"],
                     # default broadcast name == the exposed (possibly prefixed) name
-                    "default_name": cl.exposed_name(cfg, b, dt["original"]),
+                    "default_name": dt["original"],
                     "default_title": dt.get("title"),
                     "default_description": dt.get("description"),
                     "name": ov.name if ov else None,
@@ -488,7 +478,7 @@ def apply_tool_override(cfg: GatewayConfig, backend: str, payload: dict) -> None
     dtool = next(
         (t for t in defaults.get("tools", []) if t["original"] == original), {}
     )
-    default_name = cl.exposed_name(cfg, b, original)
+    default_name = original
     dparams = {p["original"]: p for p in dtool.get("params", [])}
 
     name = _override_vs_default(ov.get("name"), default_name)
@@ -588,7 +578,10 @@ def hot_reload(
         proxy._transforms.remove(old)
     proxy.add_transform(new_transform)
     holders[backend] = [new_transform]
-    apply_backend_instructions(proxy, cfg, b)
+    # Re-set this backend's live server-level instructions (override else captured
+    # original) — each endpoint carries only its own, keeping the full per-server
+    # budget.
+    proxy.instructions = cl.backend_instructions(b, captured_instructions(cfg))
     # Live immediately (next tools/list reflects it). FastMCP has no
     # tools/list_changed helper, so a connected Claude session refreshes on its
     # next list / reconnect / new session.

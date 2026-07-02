@@ -4,12 +4,24 @@ version = "0.1.0"
 description = "Local MCP proxy that rewrites every broadcast text a backend MCP shows Claude Code"
 readme = "README.md"
 requires-python = ">=3.12"
+authors = [{ name = "voidfreud" }]
+keywords = ["mcp", "proxy", "fastmcp", "claude-code", "gateway"]
+# Private tool — the classifier blocks an accidental PyPI upload. No license is
+# declared (this repo is private, not distributed).
+classifiers = [
+    "Private :: Do Not Upload",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries",
+]
 dependencies = [
     "fastmcp>=3.4.2",
     "pydantic>=2.13.4",
     "structlog>=26.1.0",
     "tomli-w>=1.2.0",
 ]
+
+[project.urls]
+Repository = "https://github.com/voidfreud/mcp-gateway"
 
 [dependency-groups]
 dev = [
