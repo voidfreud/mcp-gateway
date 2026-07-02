@@ -30,8 +30,8 @@
         <!-- Absolute config path so it resolves regardless of cwd. -->
         <key>MCP_GATEWAY_CONFIG</key>
         <string>/Users/alexanderbass/Developer/mine/mcp-gateway/config.toml</string>
-        <key>FASTMCP_LOG_LEVEL</key>
-        <string>WARNING</string>
+        <!-- FastMCP's log level is quieted in-process (server._configure_logging),
+             so no FASTMCP_LOG_LEVEL env is needed here (#83, one suffices). -->
         <!-- Add backend secrets here when a backend needs them, e.g.:
              <key>EXA_TOKEN</key><string>...</string>
              (referenced from config.toml as auth_value = "Bearer ${EXA_TOKEN}") -->

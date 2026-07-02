@@ -51,6 +51,11 @@ uv run server.py              # serves /admin, /health, and one /<backend>/mcp e
 
 At login (the intended mode) — a launchd LaunchAgent:
 
+> **Machine-specific paths:** `com.void.mcp-gateway.plist` and
+> `deploy/newsyslog-mcp-gateway.conf` hardcode this machine's absolute paths
+> (home dir, repo location, venv). launchd needs absolute paths, so on another
+> machine/account edit those files to match before installing.
+
 ```bash
 cp com.void.mcp-gateway.plist ~/Library/LaunchAgents/
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.void.mcp-gateway.plist

@@ -7,11 +7,10 @@ into the two things ``server.py`` needs:
 2. A ``ToolTransform`` that rewrites every broadcast text (tool name/title/
    description + each parameter name/description, hide params, disable tools).
 
-Key behaviour learned from the installed FastMCP (3.4.2): a proxy over a
-*single* backend exposes tools under their bare name (``ask_question``), but a
-proxy over *two or more* backends prefixes them with the server name
-(``deepwiki_ask_question``). Tool transforms are keyed by that exposed name, so
-:func:`exposed_name` computes the right key from the backend count.
+Each backend is proxied ALONE on its own endpoint (``/<backend>/mcp``) and
+registered as its own MCP server in Claude Code, so tools keep their BARE
+original name — the old ``<backend>_`` prefix is gone (ADR-0002). Tool
+transforms are keyed by that bare original name.
 """
 
 from __future__ import annotations
@@ -266,21 +265,6 @@ def load(path: str | Path) -> GatewayConfig:
     with p.open("rb") as fh:
         raw = tomllib.load(fh)
     return GatewayConfig.model_validate(raw)
-
-
-def exposed_name(cfg: GatewayConfig, backend: Backend, original: str) -> str:
-    """The name a backend tool is exposed under on its own endpoint.
-
-    Each backend is proxied alone on its own path (``/<backend>/mcp``) and
-    registered as its own MCP server in Claude Code, so tools keep their BARE
-    original name. The old ``<backend>_`` prefix only existed to disambiguate
-    tools inside one shared multi-backend proxy; with per-backend endpoints the
-    endpoint/server registration provides the namespace, so the prefix is gone.
-
-    (``cfg``/``backend`` are kept in the signature so the admin's call sites stay
-    stable while the prefix rule is centralised here.)
-    """
-    return original
 
 
 def _run_headers_helper(b: Backend) -> dict[str, str]:
