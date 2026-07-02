@@ -267,6 +267,7 @@ async def _mount_backend(
     b: config_loader.Backend,
     cfg: config_loader.GatewayConfig,
     all_tools: dict[str, list[str]],
+    captured_meta: dict[str, dict[str, dict]],
     captured_instr: dict[str, str | None],
     registry: dict,
     holders: dict,
@@ -294,7 +295,9 @@ async def _mount_backend(
             proxy = create_proxy(config_loader.to_proxy_config_one(b), name=name)
 
         proxy.add_middleware(CallLogMiddleware(log, b.name))
-        transforms, index = config_loader.build_transforms(cfg, b, all_tools)
+        transforms, index = config_loader.build_transforms(
+            cfg, b, all_tools, captured_meta
+        )
         await _reconcile(proxy, index, log)  # SOURCE names, before renames apply
         proxy.add_transform(transforms)
         # Per-endpoint instructions: only this backend's blurb -> its own 2KB.
@@ -331,6 +334,7 @@ def _build_app(
     cfg: config_loader.GatewayConfig,
     log,
     all_tools: dict,
+    captured_meta: dict,
     captured_instr: dict,
     config_path: str = CONFIG_PATH,
 ) -> Starlette:
@@ -360,11 +364,26 @@ def _build_app(
         stop = anyio.Event()  # set on shutdown -> every runner unwinds itself
 
         async def runner(
-            b, cfg_, all_tools_, captured_, *, task_status=anyio.TASK_STATUS_IGNORED
+            b,
+            cfg_,
+            all_tools_,
+            meta_,
+            captured_,
+            *,
+            task_status=anyio.TASK_STATUS_IGNORED,
         ):
             async with AsyncExitStack() as stack:
                 ok = await _mount_backend(
-                    app, stack, b, cfg_, all_tools_, captured_, registry, holders, log
+                    app,
+                    stack,
+                    b,
+                    cfg_,
+                    all_tools_,
+                    meta_,
+                    captured_,
+                    registry,
+                    holders,
+                    log,
                 )
                 task_status.started(ok)
                 if ok:
@@ -376,7 +395,7 @@ def _build_app(
             # the sum, and a slow/hung backend delays only its own endpoint
             # (each runner appends its Mount when ready, same path as hot-add).
             for b in cfg.backends:
-                tg.start_soon(runner, b, cfg, all_tools, captured_instr)
+                tg.start_soon(runner, b, cfg, all_tools, captured_meta, captured_instr)
 
             async def hot_add(b: config_loader.Backend) -> bool:
                 """Mount a just-imported backend live (#7). Config is already
@@ -387,6 +406,7 @@ def _build_app(
                     b,
                     cfg2,
                     admin.all_tools_from_defaults(cfg2),
+                    admin.all_meta_from_defaults(cfg2),
                     admin.captured_instructions(cfg2),
                 )
 
@@ -427,9 +447,10 @@ async def _run(cfg: config_loader.GatewayConfig, log) -> None:
     # instructions can be built from the captured baseline.
     await admin.ensure_defaults(cfg, log)
     all_tools = admin.all_tools_from_defaults(cfg)
+    captured_meta = admin.all_meta_from_defaults(cfg)
     captured_instr = admin.captured_instructions(cfg)
 
-    parent = _build_app(cfg, log, all_tools, captured_instr)
+    parent = _build_app(cfg, log, all_tools, captured_meta, captured_instr)
 
     config = uvicorn.Config(
         parent,

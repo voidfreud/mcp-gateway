@@ -376,6 +376,7 @@ def build_transforms(
     cfg: GatewayConfig,
     backend: Backend,
     all_tools: dict[str, list[str]] | None = None,
+    captured_meta: dict[str, dict[str, dict]] | None = None,
 ) -> tuple[ToolTransform, dict[str, str]]:
     """Build the ``ToolTransform`` for ONE *backend*'s endpoint, plus a
     ``{tool_name: backend}`` index for the startup reconcile.
@@ -388,10 +389,24 @@ def build_transforms(
     *all_tools* maps ``backend name -> [original tool names]`` (from captured
     defaults). It is needed only to apply a **per-backend** ``always_load`` to
     tools that have no other override; per-tool ``always_load`` works without it.
+
+    *captured_meta* maps ``backend name -> {original tool name -> its captured
+    _meta}``. Used so a pin (``always_load``) MERGES the alwaysLoad flag into the
+    backend's original ``_meta`` instead of replacing it (#91); omit it and a pin
+    just sets the flag alone (the pre-fix behaviour).
     """
     transforms: dict[str, ToolTransformConfig] = {}
     index: dict[str, str] = {}
     b = backend
+    bmeta = (captured_meta or {}).get(b.name, {})
+
+    def pin_meta(original: str) -> dict:
+        # #91: pinning must MERGE the alwaysLoad flag into the backend's captured
+        # _meta, not replace it (FastMCP's ToolTransformConfig.meta REPLACES the
+        # tool's meta). A bare dict here would silently drop reserved keys such as
+        # io.modelcontextprotocol/related-task. Our flag wins on any key clash.
+        return {**(bmeta.get(original) or {}), **ALWAYS_LOAD_META}
+
     for tool in b.tools:
         key = tool.original
         index[key] = b.name
@@ -415,7 +430,7 @@ def build_transforms(
         if arguments:
             tc_kwargs["arguments"] = arguments
         if tool.always_load or b.always_load:
-            tc_kwargs["meta"] = dict(ALWAYS_LOAD_META)
+            tc_kwargs["meta"] = pin_meta(key)
         transforms[key] = ToolTransformConfig(**tc_kwargs)
 
     # Backend disabled (#38): force EVERY live tool off, including ones with no
@@ -433,7 +448,7 @@ def build_transforms(
         for original in all_tools[b.name]:
             if original not in transforms:
                 transforms[original] = ToolTransformConfig(
-                    enabled=True, meta=dict(ALWAYS_LOAD_META)
+                    enabled=True, meta=pin_meta(original)
                 )
                 index[original] = b.name
     return ToolTransform(transforms), index

@@ -138,6 +138,22 @@ def test_fastmcp_proxy_exposes_transforms_list():
     assert len(proxy._transforms) == before + 1
 
 
+# --- #91 all_meta_from_defaults --------------------------------------------
+
+
+def test_all_meta_from_defaults_extracts_tool_meta(defaults_dir):
+    _write_defaults(
+        defaults_dir, "b", "t", meta={"io.modelcontextprotocol/related-task": "x"}
+    )
+    m = admin.all_meta_from_defaults(_single_cfg())
+    assert m == {"b": {"t": {"io.modelcontextprotocol/related-task": "x"}}}
+
+
+def test_all_meta_from_defaults_omits_tools_without_meta(defaults_dir):
+    _write_defaults(defaults_dir, "b", "t")  # no meta captured
+    assert admin.all_meta_from_defaults(_single_cfg()) == {}
+
+
 # --- apply_tool_override (needs a defaults file) ---------------------------
 
 

@@ -221,6 +221,57 @@ def test_per_tool_always_load_sets_meta():
     assert tr._transforms["t"].meta == cl.ALWAYS_LOAD_META
 
 
+# --- #91: pinning MERGES captured _meta, never clobbers it ------------------
+
+
+def _pinned_cfg(per_backend=False):
+    tool = {"original": "t"} if per_backend else {"original": "t", "always_load": True}
+    b = {"name": "b", "transport": "stdio", "command": "/bin/x", "tools": [tool]}
+    if per_backend:
+        b["always_load"] = True
+    return cl.GatewayConfig.model_validate({"backends": [b]})
+
+
+def test_pin_merges_captured_meta_and_keeps_reserved_key():
+    cfg = _pinned_cfg()
+    captured = {
+        "b": {
+            "t": {
+                "io.modelcontextprotocol/related-task": "task-1",  # spec-reserved
+                "com.example/trace": "abc",
+            }
+        }
+    }
+    tr, _ = cl.build_transforms(cfg, cfg.backends[0], {"b": ["t"]}, captured)
+    meta = tr._transforms["t"].meta
+    assert meta["anthropic/alwaysLoad"] is True
+    assert meta["io.modelcontextprotocol/related-task"] == "task-1"  # NOT dropped
+    assert meta["com.example/trace"] == "abc"
+
+
+def test_pin_per_backend_unoverridden_also_merges_meta():
+    cfg = _pinned_cfg(per_backend=True)
+    captured = {"b": {"t": {"io.modelcontextprotocol/related-task": "task-9"}}}
+    tr, _ = cl.build_transforms(cfg, cfg.backends[0], {"b": ["t"]}, captured)
+    meta = tr._transforms["t"].meta
+    assert meta["anthropic/alwaysLoad"] is True
+    assert meta["io.modelcontextprotocol/related-task"] == "task-9"
+
+
+def test_pin_without_captured_meta_is_flag_only():
+    # no captured meta -> pin sets just the flag (pre-fix behaviour preserved)
+    cfg = _pinned_cfg()
+    tr, _ = cl.build_transforms(cfg, cfg.backends[0], {"b": ["t"]})
+    assert tr._transforms["t"].meta == cl.ALWAYS_LOAD_META
+
+
+def test_pin_flag_wins_on_key_clash():
+    cfg = _pinned_cfg()
+    captured = {"b": {"t": {"anthropic/alwaysLoad": False}}}
+    tr, _ = cl.build_transforms(cfg, cfg.backends[0], {"b": ["t"]}, captured)
+    assert tr._transforms["t"].meta["anthropic/alwaysLoad"] is True
+
+
 def test_no_always_load_means_no_meta():
     cfg = cl.GatewayConfig.model_validate(
         {
