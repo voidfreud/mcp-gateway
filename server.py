@@ -29,7 +29,7 @@ import uvicorn
 from starlette.applications import Starlette
 from starlette.middleware import Middleware as StarletteMiddleware
 from starlette.requests import Request
-from starlette.responses import PlainTextResponse
+from starlette.responses import JSONResponse, PlainTextResponse
 from starlette.routing import Mount, Route
 
 from fastmcp import Client, FastMCP
@@ -435,9 +435,29 @@ def _build_app(
                 tg.cancel_scope.deadline = anyio.current_time() + SHUTDOWN_GRACE
 
     # Admin + health are static (no backend connection needed); the per-backend
+    async def _ready(_request: Request) -> JSONResponse:
+        # Readiness (#94), distinct from /health liveness: a configured + ENABLED
+        # backend that hasn't mounted yet (or failed to) -> 503, so a monitor can
+        # tell "up" from "up but degraded". `registry` is populated by the runners
+        # as each backend connects (disabled backends aren't expected to mount).
+        want = [b.name for b in cfg.backends if b.enabled]
+        missing = [n for n in want if n not in registry]
+        return JSONResponse(
+            {
+                "ready": not missing,
+                "mounted": sorted(registry),
+                "enabled": want,
+                "missing": missing,
+            },
+            status_code=200 if not missing else 503,
+        )
+
     # MCP mounts are added during the lifespan (they need connected clients).
     parent = Starlette(
-        routes=[Route("/health", _health, methods=["GET"])],
+        routes=[
+            Route("/health", _health, methods=["GET"]),
+            Route("/ready", _ready, methods=["GET"]),
+        ],
         lifespan=lifespan,
         middleware=[
             StarletteMiddleware(BodyLimitMiddleware, max_bytes=ADMIN_BODY_LIMIT)

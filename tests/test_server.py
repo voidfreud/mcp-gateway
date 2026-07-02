@@ -604,3 +604,22 @@ def test_gateway_version_is_cached():
     v2 = admin.gateway_version()
     assert v1 == v2
     assert admin.gateway_version.cache_info().hits >= 1
+
+
+# ---------------------------------------------------------------------------
+# #94 — /ready reflects backend mount status (distinct from /health liveness)
+# ---------------------------------------------------------------------------
+
+
+def test_ready_reports_degraded_when_backend_unmounted(tmp_path):
+    # The stdio /bin/x backend can't complete an MCP handshake, so it never
+    # mounts -> /ready is degraded (503) and names it missing, while /health
+    # (liveness) still answers ok.
+    with TestClient(_live_app(tmp_path)) as client:
+        assert client.get("/health").status_code == 200
+        r = client.get("/ready")
+        assert r.status_code == 503
+        body = r.json()
+        assert body["ready"] is False
+        assert "b" in body["enabled"] and "b" in body["missing"]
+        assert body["mounted"] == []

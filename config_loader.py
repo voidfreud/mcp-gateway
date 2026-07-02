@@ -152,8 +152,12 @@ class Backend(BaseModel, extra="forbid"):
     # (browser consent on first connect, cached tokens after).
     auth: Literal["oauth"] | None = None
     # A helper that prints a JSON object of headers to stdout (#6) — for tokens
-    # resolved at connect time. Runs when the backend's client config is built
-    # (mount / introspect), NOT per request. Two forms (#81):
+    # resolved at connect time. It runs ONCE when the backend's client config is
+    # built (mount / introspect), NOT per request and NOT on a timer, so its
+    # output is fixed for the daemon's lifetime (#82). Suitable for a token valid
+    # across the daemon's uptime (e.g. `gh auth token`); a truly short-lived token
+    # that must rotate mid-session is NOT refreshed until the next restart. Two
+    # forms (#81):
     #   - list[str] -> argv, run WITHOUT a shell (safe; no injection surface)
     #   - str       -> run via the shell (needed for $()/pipes), so it carries
     #                  FULL shell privilege — same trust as a stdio `command`.
