@@ -227,6 +227,22 @@ def all_tools_from_defaults(cfg: GatewayConfig) -> dict[str, list[str]]:
     return out
 
 
+def all_meta_from_defaults(cfg: GatewayConfig) -> dict[str, dict[str, dict]]:
+    """``backend name -> {original tool name -> its captured _meta}`` from
+    defaults. Lets build_transforms MERGE a pin's alwaysLoad flag into the
+    backend's original ``_meta`` instead of replacing it, so reserved keys like
+    ``io.modelcontextprotocol/related-task`` survive a pin (#91)."""
+    out: dict[str, dict[str, dict]] = {}
+    for b in cfg.backends:
+        d = load_defaults(b.name)
+        if not d:
+            continue
+        metas = {t["original"]: t["meta"] for t in d.get("tools", []) if t.get("meta")}
+        if metas:
+            out[b.name] = metas
+    return out
+
+
 def captured_instructions(cfg: GatewayConfig) -> dict[str, str | None]:
     """``backend name -> its captured original server instructions (or None)``.
     Feeds :func:`config_loader.backend_instructions` so each backend endpoint can
@@ -556,7 +572,9 @@ def hot_reload(
     if b is None or proxy is None:
         log.warning("hot_reload_skipped", backend=backend)
         return
-    new_transform, _index = cl.build_transforms(cfg, b, all_tools_from_defaults(cfg))
+    new_transform, _index = cl.build_transforms(
+        cfg, b, all_tools_from_defaults(cfg), all_meta_from_defaults(cfg)
+    )
     holder = holders.get(backend) or []
     old = holder[0] if holder else None
     if old is not None and old in proxy._transforms:

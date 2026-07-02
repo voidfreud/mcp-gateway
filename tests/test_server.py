@@ -304,7 +304,7 @@ def _live_app(tmp_path):
     path = tmp_path / "config.toml"
     cl.save(cfg, str(path))
     return server._build_app(
-        cfg, structlog.get_logger("test"), {}, {}, config_path=str(path)
+        cfg, structlog.get_logger("test"), {}, {}, {}, config_path=str(path)
     )
 
 
@@ -370,7 +370,7 @@ def test_slow_backend_does_not_block_boot_or_others(tmp_path, monkeypatch):
     monkeypatch.setattr(server, "SHUTDOWN_GRACE", 0.1)  # don't wait on the hung one
     started, mounted = [], []
 
-    async def fake_mount(app, stack, b, cfg, all_tools, captured, reg, hold, log):
+    async def fake_mount(app, stack, b, cfg, all_tools, meta, captured, reg, hold, log):
         started.append(b.name)
         if b.name == "slow":
             await anyio.sleep(3600)  # hung connect; cancelled by SHUTDOWN_GRACE
@@ -389,7 +389,7 @@ def test_slow_backend_does_not_block_boot_or_others(tmp_path, monkeypatch):
     path = tmp_path / "config.toml"
     cl.save(cfg, str(path))
     app = server._build_app(
-        cfg, structlog.get_logger("test"), {}, {}, config_path=str(path)
+        cfg, structlog.get_logger("test"), {}, {}, {}, config_path=str(path)
     )
     with TestClient(app) as client:
         assert client.get("/health").status_code == 200  # ready despite the hang
