@@ -118,6 +118,26 @@ def test_set_instructions_cap_counts_utf8_bytes_not_chars(defaults_dir):
         admin.set_instructions(_single_cfg(), "b", at_cap + "\U0001f928")
 
 
+# --- #81 FastMCP private-attr tripwire -------------------------------------
+
+
+def test_fastmcp_proxy_exposes_transforms_list():
+    # admin.hot_reload mutates proxy._transforms directly (a private FastMCP
+    # attr). If a FastMCP upgrade renames/removes it, fail loudly HERE instead of
+    # silently breaking live hot-reload (#81).
+    from fastmcp.server import create_proxy
+
+    b = cl.Backend(name="b", transport="stdio", command="/bin/x")
+    proxy = create_proxy(cl.to_proxy_config_one(b), name="mcp-gateway-b")
+    assert isinstance(getattr(proxy, "_transforms", None), list)
+    # add_transform must append to that same list — the exact mechanism hot_reload
+    # relies on (holder swap = remove old, add new).
+    before = len(proxy._transforms)
+    transforms, _ = cl.build_transforms(_single_cfg(), b, {})
+    proxy.add_transform(transforms)
+    assert len(proxy._transforms) == before + 1
+
+
 # --- apply_tool_override (needs a defaults file) ---------------------------
 
 

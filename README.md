@@ -164,8 +164,10 @@ auth_value  = "Bearer ${EXA_TOKEN}"      # ${ENV} resolved at startup
 # headers = { "X-Client-Id" = "${MY_ID}" }   # extra static headers (${ENV} ok)
 # auth = "oauth"                             # OAuth-protected MCP (FastMCP runs
 #                                            # the browser flow on first connect)
-# headers_helper = "my-sso print-headers"    # command printing a JSON object of
-#                                            # headers; runs at mount/introspect
+# headers_helper = ["my-sso", "print-headers"]  # list = no-shell (safe); a
+#                                            # string form runs via the shell
+#                                            # (for $()/pipes) with full shell
+#                                            # privilege. Runs at mount/introspect.
 stateless = true
 
   [[backends.tools]]
