@@ -465,14 +465,64 @@ async def _run(cfg: config_loader.GatewayConfig, log) -> None:
         # its loggers propagate to our root rotating handler instead of launchd's
         # err.log (issue #50).
         log_config=None,
-        timeout_graceful_shutdown=2,
+        # #88: uvicorn must wait LONGER than the gateway's own runner-unwind
+        # deadline (SHUTDOWN_GRACE) or it force-cancels the lifespan mid-unwind
+        # and can briefly orphan a backend's stdio child. +2s covers the unwind
+        # that happens after a hung runner is cancelled at the deadline.
+        timeout_graceful_shutdown=int(SHUTDOWN_GRACE) + 2,
     )
     await uvicorn.Server(config).serve()
 
 
+def _load_config_or_recover(log) -> config_loader.GatewayConfig:
+    """Load the config; on ANY failure recover from the most recent VALID backup.
+
+    A malformed/invalid ``config.toml`` would otherwise crash-loop the daemon
+    under launchd (KeepAlive, no throttle) and flood err.log with a traceback
+    every ~10s (#96). Instead we fall back to the newest good snapshot in
+    ``admin.BACKUP_DIR`` so the daemon keeps running on the last known-good
+    config while the operator fixes the file. Re-raises only if NO backup loads —
+    ``main`` then logs one clean line and exits (still a clean one-liner per
+    respawn, not a traceback flood). First-run seeding is preserved because
+    ``load`` calls ``ensure_config`` before parsing.
+    """
+    try:
+        return config_loader.load(CONFIG_PATH)
+    except Exception as exc:  # noqa: BLE001 — any bad config triggers recovery
+        log.error("config_load_failed", path=CONFIG_PATH, error=str(exc))
+        for backup in sorted(admin.BACKUP_DIR.glob("config-*.toml"), reverse=True):
+            try:
+                cfg = config_loader.load(str(backup))
+            except Exception:  # noqa: BLE001 — skip a bad backup, try an older one
+                continue
+            log.warning(
+                "config_recovered_from_backup",
+                backup=str(backup),
+                hint="config.toml is invalid — running on the last good backup; "
+                "fix it and restart",
+            )
+            return cfg
+        raise
+
+
 def main() -> None:
-    cfg = config_loader.load(CONFIG_PATH)
-    log = _configure_logging(cfg.log_file)
+    # Configure logging BEFORE loading config, so a load failure is a clean
+    # structured line in gateway.log rather than a raw traceback in launchd's
+    # err.log (#96). Start on the default log path; re-point if the loaded cfg
+    # names a different one (the prior handler is closed — #87).
+    default_log = config_loader.GatewayConfig.model_fields["log_file"].default
+    log = _configure_logging(default_log)
+    try:
+        cfg = _load_config_or_recover(log)
+    except Exception as exc:  # noqa: BLE001
+        log.error(
+            "config_unrecoverable",
+            error=str(exc),
+            hint="no valid backup found — fix config.toml, then restart",
+        )
+        raise SystemExit(1) from None
+    if cfg.log_file != default_log:
+        log = _configure_logging(cfg.log_file)
     anyio.run(_run, cfg, log)
 
 

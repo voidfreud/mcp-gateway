@@ -38,6 +38,11 @@ BACKUP_DIR = STATE_DIR / "backups"
 HERE = Path(__file__).resolve().parent
 LAUNCHD_LABEL = "com.void.mcp-gateway"
 
+# Upper bound on a single backend introspection probe (connect + list_tools).
+# A hung/slow backend must not block daemon startup or an admin import (#85).
+# Generous enough for a cold stdio backend (e.g. gitnexus' ~13s re-index).
+CAPTURE_TIMEOUT = 30.0
+
 
 def gateway_version() -> str:
     """The gateway's own version, from a single source (package metadata, else
@@ -96,9 +101,11 @@ async def capture_defaults(b: Backend) -> dict:
     otherwise drops: ``instructions`` (the always-loaded server blurb), plus
     ``serverInfo`` and ``capabilities`` (surfaced read-only in the admin UI).
     """
-    async with Client(_client_config(b)) as c:
-        tools = await c.list_tools()
-        init = c.initialize_result  # populated after the context entered
+    # Bound the probe so a hung backend can't block startup or an import (#85).
+    async with asyncio.timeout(CAPTURE_TIMEOUT):
+        async with Client(_client_config(b)) as c:
+            tools = await c.list_tools()
+            init = c.initialize_result  # populated after the context entered
     out_tools = []
     for t in tools:
         schema = t.inputSchema or {}
