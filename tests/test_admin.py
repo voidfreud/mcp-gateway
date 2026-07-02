@@ -715,3 +715,21 @@ def test_build_state_includes_endpoint(defaults_dir):
     _write_defaults(defaults_dir, "b", "t")
     cfg = _single_cfg()
     assert admin.build_state(cfg)["backends"][0]["endpoint"] == "/b/mcp"
+
+
+# --- #79 effective_tools scoping (per-backend collision check) --------------
+
+
+def test_effective_tools_scopes_to_one_backend(defaults_dir):
+    _write_defaults(defaults_dir, "b1", "t1")
+    _write_defaults(defaults_dir, "b2", "t2")
+    cfg = cl.GatewayConfig.model_validate(
+        {
+            "backends": [
+                {"name": "b1", "transport": "stdio", "command": "/bin/x"},
+                {"name": "b2", "transport": "stdio", "command": "/bin/x"},
+            ]
+        }
+    )
+    assert {t["backend"] for t in admin.effective_tools(cfg, "b1")} == {"b1"}
+    assert {t["backend"] for t in admin.effective_tools(cfg)} == {"b1", "b2"}

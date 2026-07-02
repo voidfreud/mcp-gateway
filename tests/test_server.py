@@ -585,3 +585,22 @@ def test_capture_defaults_times_out(monkeypatch):
     b = cl.Backend(name="b", transport="stdio", command="/bin/x")
     with pytest.raises(TimeoutError):
         anyio.run(admin.capture_defaults, b)
+
+
+# ---------------------------------------------------------------------------
+# #79 — perf: skip empty reconcile + cache gateway_version
+# ---------------------------------------------------------------------------
+
+
+def test_reconcile_skips_when_no_overrides():
+    # Empty index -> no round-trip; proxy is never touched (None would crash if
+    # it tried to connect). Returns cleanly.
+    anyio.run(server._reconcile, None, {}, structlog.get_logger("test"))
+
+
+def test_gateway_version_is_cached():
+    admin.gateway_version.cache_clear()
+    v1 = admin.gateway_version()
+    v2 = admin.gateway_version()
+    assert v1 == v2
+    assert admin.gateway_version.cache_info().hits >= 1

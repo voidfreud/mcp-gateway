@@ -237,6 +237,8 @@ async def _reconcile(proxy: FastMCP, index: dict[str, str], log) -> None:
     daemon from starting. A mismatch almost always means a typo in a tool's
     ``original`` in config.toml.
     """
+    if not index:
+        return  # no overrides to reconcile — skip the boot-time round-trip (#79)
     try:
         async with Client(proxy) as client:
             live = {t.name for t in await client.list_tools()}
