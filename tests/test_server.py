@@ -188,6 +188,37 @@ def _admin_app(tmp_path: Path) -> Starlette:
     return app
 
 
+def _run_app(tmp_path: Path, registry: dict) -> Starlette:
+    """Admin app with a caller-supplied registry, for run_tool route tests."""
+    cfg = cl.GatewayConfig.model_validate(
+        {"backends": [{"name": "b", "transport": "stdio", "command": "/bin/x"}]}
+    )
+    path = tmp_path / "config.toml"
+    cl.save(cfg, str(path))
+    app = Starlette()
+    admin.register(app, str(path), structlog.get_logger("test"), registry, {})
+    return app
+
+
+def test_run_tool_rejects_non_string_tool(tmp_path):
+    # #81: a non-string tool must 400 at the guard, not reach the proxy / 502.
+    # A placeholder registry entry makes the backend "mounted" so the tool guard
+    # (which runs after the mount check) is what fires.
+    app = _run_app(tmp_path, {"b": object()})
+    r = TestClient(app).post(
+        "/admin/api/run", json={"backend": "b", "tool": 123, "args": {}}
+    )
+    assert r.status_code == 400
+    assert "tool" in r.json()["error"]
+
+
+def test_run_tool_unmounted_backend_is_400(tmp_path):
+    r = TestClient(_run_app(tmp_path, {})).post(
+        "/admin/api/run", json={"backend": "b", "tool": "t", "args": {}}
+    )
+    assert r.status_code == 400
+
+
 def test_restart_route_dev_reports_no_restart(tmp_path, monkeypatch):
     monkeypatch.setattr(admin, "under_launchd", lambda: False)
     r = TestClient(_admin_app(tmp_path)).post("/admin/api/restart")

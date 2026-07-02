@@ -387,14 +387,40 @@ def build_state(cfg: GatewayConfig) -> dict:
 # ---------------------------------------------------------------------------
 
 
+def _validate_text(v: str, what: str = "text") -> None:
+    """Reject text that can't be serialized to the config file.
+
+    A lone UTF-16 surrogate (e.g. ``\\ud83d`` with no pair) arrives via the JSON
+    API — ``json.loads`` accepts it — but ``config_loader.save`` raises
+    ``UnicodeEncodeError`` when it writes the file as UTF-8, which would surface
+    as a 500 + traceback. Reject it at the mutation boundary with a clean 400
+    (issue #95), consistent with the #48/#49 "bad admin input -> 400" hardening.
+    """
+    try:
+        v.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise cl.ConfigError(
+            f"invalid {what}: contains characters that can't be encoded "
+            f"(unpaired surrogate at position {exc.start})"
+        ) from exc
+
+
 def _clean(v):
     if isinstance(v, str):
         v = v.strip()
+        if v:
+            _validate_text(v)
         return v or None
     return v
 
 
 _NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+# Claude Code truncates each MCP server's `instructions` at ~2KB (issue #29). The
+# admin UI shows a 2048-byte counter; enforce the same cap server-side so an
+# over-cap blurb is rejected (400) rather than silently truncated by Claude Code —
+# a byte-boundary truncation could split a multibyte char (issue #93).
+INSTRUCTIONS_MAX_BYTES = 2048
 
 
 def _validate_name(name: str | None, what: str) -> None:
@@ -506,7 +532,15 @@ def set_instructions(cfg: GatewayConfig, backend: str, value) -> None:
     if b is None:
         raise cl.ConfigError(f"unknown backend {backend!r}")
     default = (load_defaults(backend) or {}).get("instructions")
-    b.instructions = _override_vs_default(value, default)
+    override = _override_vs_default(value, default)
+    if override is not None:
+        n = len(override.encode("utf-8"))
+        if n > INSTRUCTIONS_MAX_BYTES:
+            raise cl.ConfigError(
+                f"instructions are {n} bytes; the cap is {INSTRUCTIONS_MAX_BYTES} "
+                f"(Claude Code truncates beyond ~2KB) — shorten them"
+            )
+    b.instructions = override
 
 
 def hot_reload(
@@ -775,8 +809,10 @@ def register(
             return JSONResponse(
                 {"ok": False, "error": "unknown backend"}, status_code=400
             )
-        val = (payload.get("value") or "").strip()
-        b.display_name = val or None
+        try:
+            b.display_name = _clean(payload.get("value"))  # validates encodability
+        except cl.ConfigError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
         backup_config(config_path)
         cl.save(cfg, config_path)
         return JSONResponse({"ok": True})
@@ -874,8 +910,11 @@ def register(
                 {"ok": False, "error": "backend not mounted"}, status_code=400
             )
         tool = payload.get("tool")
-        if not tool:
-            return JSONResponse({"ok": False, "error": "missing tool"}, status_code=400)
+        if not isinstance(tool, str) or not tool:
+            return JSONResponse(
+                {"ok": False, "error": "missing or invalid tool (must be a string)"},
+                status_code=400,
+            )
         args = payload.get("args") or {}
         if not isinstance(args, dict):
             return JSONResponse(
