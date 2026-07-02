@@ -14,6 +14,7 @@ so those write config and restart the daemon.
 from __future__ import annotations
 
 import asyncio
+import functools
 import importlib.metadata
 import json
 import os
@@ -44,10 +45,14 @@ LAUNCHD_LABEL = "com.void.mcp-gateway"
 CAPTURE_TIMEOUT = 30.0
 
 
+@functools.cache
 def gateway_version() -> str:
     """The gateway's own version, from a single source (package metadata, else
     the ``version = "..."`` line in pyproject.toml). Surfaced in the admin UI and
-    ``/health`` so the running build is visible after a restart/upgrade (#57)."""
+    ``/health`` so the running build is visible after a restart/upgrade (#57).
+
+    Cached: the version is constant for a process, so we don't re-read pyproject
+    on every /health and /admin/api/state request (#79)."""
     try:
         return importlib.metadata.version("mcp-gateway")
     except importlib.metadata.PackageNotFoundError:
@@ -261,12 +266,16 @@ def captured_instructions(cfg: GatewayConfig) -> dict[str, str | None]:
     return out
 
 
-def effective_tools(cfg: GatewayConfig) -> list[dict]:
-    """Every ENABLED tool's effective broadcast (name, description) across all
-    backends, computed from defaults + overrides. Used to detect collisions —
-    Claude can't tell two tools apart if they share a broadcast name."""
+def effective_tools(cfg: GatewayConfig, backend: str | None = None) -> list[dict]:
+    """Every ENABLED tool's effective broadcast (name, description), computed from
+    defaults + overrides. Used to detect collisions — Claude can't tell two tools
+    apart if they share a broadcast name. Pass *backend* to scope to ONE backend
+    (collisions are per-endpoint now, so a save only needs that backend's tools) —
+    avoids reading every backend's defaults on each save (#79)."""
     out: list[dict] = []
     for b in cfg.backends:
+        if backend is not None and b.name != backend:
+            continue
         defaults = load_defaults(b.name) or {}
         for dt in defaults.get("tools", []):
             orig = dt["original"]
@@ -291,7 +300,7 @@ def check_no_collision(
     if not new.enabled:
         return  # not broadcast
     eff_name = new.name or original
-    for other in effective_tools(cfg):
+    for other in effective_tools(cfg, backend):  # #79: only this backend's tools
         # Each backend is its own endpoint/MCP server now, so broadcast names
         # only need to be unique WITHIN a backend — a clash across backends can't
         # confuse Claude (different server namespaces).
@@ -569,8 +578,14 @@ def hot_reload(
     if b is None or proxy is None:
         log.warning("hot_reload_skipped", backend=backend)
         return
+    # #79: read THIS backend's defaults once (not every backend's) and build the
+    # single-entry maps that build_transforms / backend_instructions consume — a
+    # hot-reload only concerns one backend, so enable_all drops from O(N^2) to O(N).
+    d = load_defaults(backend) or {}
+    tools = [t["original"] for t in d.get("tools", [])]
+    metas = {t["original"]: t["meta"] for t in d.get("tools", []) if t.get("meta")}
     new_transform, _index = cl.build_transforms(
-        cfg, b, all_tools_from_defaults(cfg), all_meta_from_defaults(cfg)
+        cfg, b, {backend: tools}, {backend: metas} if metas else {}
     )
     holder = holders.get(backend) or []
     old = holder[0] if holder else None
@@ -581,7 +596,7 @@ def hot_reload(
     # Re-set this backend's live server-level instructions (override else captured
     # original) — each endpoint carries only its own, keeping the full per-server
     # budget.
-    proxy.instructions = cl.backend_instructions(b, captured_instructions(cfg))
+    proxy.instructions = cl.backend_instructions(b, {backend: d.get("instructions")})
     # Live immediately (next tools/list reflects it). FastMCP has no
     # tools/list_changed helper, so a connected Claude session refreshes on its
     # next list / reconnect / new session.
