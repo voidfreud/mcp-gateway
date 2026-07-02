@@ -77,6 +77,10 @@ def _configure_logging(log_file: str) -> structlog.BoundLogger:
 
     # Root owns the single file handler; every logger propagates into it.
     root = logging.getLogger()
+    # Close any handler from a prior call before replacing it, or repeated setup
+    # (tests, a future in-process reload) leaks the open file descriptor (#87).
+    for h in root.handlers:
+        h.close()
     root.handlers = [handler]
     root.setLevel(logging.WARNING)
     # Quiet FastMCP's benign INFO chatter (e.g. "reusing existing session").

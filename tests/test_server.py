@@ -142,6 +142,18 @@ def test_library_warnings_route_into_gateway_log(tmp_path):
     assert "simulated library warning" in log_path.read_text(encoding="utf-8")
 
 
+def test_configure_logging_closes_prior_handler(tmp_path):
+    """#87: a second setup must close the previous handler (no FD leak) and not
+    accumulate handlers on the root logger."""
+    server._configure_logging(str(tmp_path / "a.log"))
+    prior = logging.getLogger().handlers[0]
+    server._configure_logging(str(tmp_path / "b.log"))
+    root = logging.getLogger()
+    assert len(root.handlers) == 1  # replaced, not accumulated
+    assert root.handlers[0] is not prior
+    assert prior.stream is None or prior.stream.closed  # prior FD released
+
+
 # ---------------------------------------------------------------------------
 # #57 — gateway version surfaced (single source) in /health and the admin state
 # ---------------------------------------------------------------------------

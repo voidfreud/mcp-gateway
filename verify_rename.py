@@ -35,12 +35,33 @@ def check(ok: bool, label: str) -> None:
 
 
 def _get_json(url: str) -> dict:
-    with urllib.request.urlopen(url, timeout=10) as r:  # noqa: S310 (loopback only)
+    # Scheme guard (#86): urlopen would otherwise honour file:// and other
+    # handlers; this verifier only ever talks HTTP(S) to the gateway.
+    if not url.startswith(("http://", "https://")):
+        raise ValueError(f"refusing non-http(s) url: {url!r}")
+    with urllib.request.urlopen(url, timeout=10) as r:  # noqa: S310 (http(s) only)
         return json.loads(r.read())
 
 
+def _summary() -> int:
+    failed = [label for ok, label in checks if not ok]
+    print(f"\n{'=' * 60}")
+    if failed:
+        print(f"FAILED {len(failed)}/{len(checks)}:")
+        for label in failed:
+            print(f"  - {label}")
+        return 1
+    print(f"ALL {len(checks)} CHECKS PASSED")
+    return 0
+
+
 async def main() -> int:
-    state = _get_json(f"{BASE}/admin/api/state")
+    # A down daemon must report a clean FAIL, not an unhandled traceback (#86).
+    try:
+        state = _get_json(f"{BASE}/admin/api/state")
+    except Exception as exc:  # noqa: BLE001
+        check(False, f"gateway reachable at {BASE} ({exc})")
+        return _summary()
     backends = state["backends"]
     print(f"gateway has {len(backends)} endpoint(s): {[b['name'] for b in backends]}\n")
     check(len(backends) > 0, "at least one backend endpoint")
@@ -125,15 +146,7 @@ async def main() -> int:
         if ok:
             print(f"\n  answer (first 200 chars): {text.strip()[:200]}...")
 
-    failed = [label for ok, label in checks if not ok]
-    print(f"\n{'=' * 60}")
-    if failed:
-        print(f"FAILED {len(failed)}/{len(checks)}:")
-        for label in failed:
-            print(f"  - {label}")
-        return 1
-    print(f"ALL {len(checks)} CHECKS PASSED")
-    return 0
+    return _summary()
 
 
 if __name__ == "__main__":
