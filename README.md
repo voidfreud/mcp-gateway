@@ -172,7 +172,9 @@ auth_value  = "Bearer ${EXA_TOKEN}"      # ${ENV} resolved at startup
 # headers_helper = ["my-sso", "print-headers"]  # list = no-shell (safe); a
 #                                            # string form runs via the shell
 #                                            # (for $()/pipes) with full shell
-#                                            # privilege. Runs at mount/introspect.
+#                                            # privilege. Runs ONCE at mount/
+#                                            # introspect — good for uptime-valid
+#                                            # tokens, not mid-session rotation.
 stateless = true
 
   [[backends.tools]]

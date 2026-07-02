@@ -25,7 +25,9 @@ auth_value = "Bearer ${EXA_TOKEN}" # ${ENV} resolved at startup
 #                                    # the flow (browser consent on first
 #                                    # connect, cached tokens after)
 # headers_helper prints a JSON object of headers (tokens resolved at connect
-# time); runs at mount/introspect, not per call. Two forms:
+# time); runs ONCE at mount/introspect, not per call and not on a timer — so it
+# fits a token valid for the daemon's uptime (e.g. `gh auth token`), NOT one that
+# must rotate mid-session (that's not refreshed until restart). Two forms:
 #   list -> argv, run WITHOUT a shell (safe; no injection surface):
 # headers_helper = ["my-sso-tool", "print-headers"]
 #   str  -> run via the shell (for $()/pipes); FULL shell privilege, same trust
