@@ -75,6 +75,49 @@ def test_validate_length_cap_64():
         admin._validate_name("a" * 65, "tool name")
 
 
+# --- #95 invalid-unicode guard --------------------------------------------
+
+
+def test_clean_and_validate_reject_lone_surrogate():
+    # A lone surrogate reaches the server via the JSON API (json.loads accepts
+    # \ud83d) but crashes the UTF-8 write in config_loader.save. Reject at the
+    # boundary with ConfigError (-> 400) instead of a 500.
+    with pytest.raises(cl.ConfigError):
+        admin._validate_text("bad \ud83d here", "description")
+    with pytest.raises(cl.ConfigError):
+        admin._clean("x\ud83dy")
+    with pytest.raises(cl.ConfigError):
+        admin._override_vs_default("\ud83d", None)
+
+
+def test_clean_accepts_valid_emoji():
+    # the exact 4-byte char that #80 mangled must pass through untouched
+    assert admin._clean("Available tools\U0001f928") == "Available tools\U0001f928"
+
+
+# --- #93 instructions byte cap --------------------------------------------
+
+
+def test_set_instructions_rejects_over_cap(defaults_dir):
+    cfg = _single_cfg()
+    with pytest.raises(cl.ConfigError):
+        admin.set_instructions(cfg, "b", "a" * (admin.INSTRUCTIONS_MAX_BYTES + 1))
+
+
+def test_set_instructions_accepts_at_cap(defaults_dir):
+    cfg = _single_cfg()
+    admin.set_instructions(cfg, "b", "a" * admin.INSTRUCTIONS_MAX_BYTES)
+    assert cfg.backends[0].instructions == "a" * admin.INSTRUCTIONS_MAX_BYTES
+
+
+def test_set_instructions_cap_counts_utf8_bytes_not_chars(defaults_dir):
+    # 512 * 4-byte char = 2048 bytes exactly -> at cap; one more char -> over
+    at_cap = "\U0001f928" * (admin.INSTRUCTIONS_MAX_BYTES // 4)
+    admin.set_instructions(_single_cfg(), "b", at_cap)  # must not raise
+    with pytest.raises(cl.ConfigError):
+        admin.set_instructions(_single_cfg(), "b", at_cap + "\U0001f928")
+
+
 # --- apply_tool_override (needs a defaults file) ---------------------------
 
 
