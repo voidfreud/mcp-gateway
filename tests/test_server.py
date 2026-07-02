@@ -655,3 +655,61 @@ def test_suppress_list_changed_clears_capability():
     assert caps.tools.listChanged is False
     assert caps.resources.listChanged is False
     assert caps.prompts.listChanged is False
+
+
+# ---------------------------------------------------------------------------
+# #78 — disabled backends are never mounted (endpoint 404s); unmount cleans up
+# ---------------------------------------------------------------------------
+
+
+def test_boot_skips_disabled_backends(tmp_path, monkeypatch):
+    monkeypatch.setattr(admin, "DEFAULTS_DIR", tmp_path / "defaults")
+    mounted = []
+
+    async def fake_mount(app, stack, b, cfg, all_tools, meta, captured, reg, hold, log):
+        mounted.append(b.name)
+        reg[b.name] = object()
+        return True
+
+    monkeypatch.setattr(server, "_mount_backend", fake_mount)
+    cfg = cl.GatewayConfig.model_validate(
+        {
+            "backends": [
+                {"name": "on", "transport": "stdio", "command": "/bin/x"},
+                {
+                    "name": "off",
+                    "transport": "stdio",
+                    "command": "/bin/x",
+                    "enabled": False,
+                },
+            ]
+        }
+    )
+    path = tmp_path / "config.toml"
+    cl.save(cfg, str(path))
+    app = server._build_app(
+        cfg, structlog.get_logger("test"), {}, {}, {}, config_path=str(path)
+    )
+    with TestClient(app) as client:
+        for _ in range(100):
+            if "on" in mounted:
+                break
+            time.sleep(0.02)
+        assert "on" in mounted
+        assert "off" not in mounted  # #78: disabled backend never mounted
+        r = client.get("/ready").json()
+        assert r["enabled"] == ["on"]  # "off" isn't even expected to be mounted
+
+
+def test_unmount_drops_route_and_registry():
+    from starlette.applications import Starlette
+    from starlette.routing import Mount, Route
+
+    inner = Starlette()
+    app = Starlette(routes=[Route("/health", lambda r: None), Mount("/b", app=inner)])
+    registry, holders = {"b": object()}, {"b": [object()]}
+    server._unmount(app, "b", registry, holders)
+    assert "b" not in registry and "b" not in holders
+    paths = [getattr(r, "path", None) for r in app.router.routes]
+    assert "/b" not in paths  # backend mount removed
+    assert "/health" in paths  # other routes untouched

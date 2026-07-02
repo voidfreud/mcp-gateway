@@ -260,6 +260,17 @@ def _reconcile(index: dict[str, str], known_tools, log) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _unmount(app: Starlette, name: str, registry: dict, holders: dict) -> None:
+    """Remove a backend's live mount — its Mount route plus registry + holder
+    entries (#78). Runs from the backend's OWN runner as it unwinds (so a later
+    re-enable / hot-add can cleanly re-append the route)."""
+    registry.pop(name, None)
+    holders.pop(name, None)
+    app.router.routes[:] = [
+        r for r in app.router.routes if getattr(r, "path", None) != f"/{name}"
+    ]
+
+
 def _suppress_list_changed(proxy) -> None:
     """Stop this proxy advertising ``listChanged`` for tools/resources/prompts.
 
@@ -385,7 +396,12 @@ def _build_app(
 
     @asynccontextmanager
     async def lifespan(app: Starlette):
-        stop = anyio.Event()  # set on shutdown -> every runner unwinds itself
+        # One teardown event per backend (#78): setting one unmounts JUST that
+        # backend — its runner unwinds its OWN AsyncExitStack (the anyio LIFO rule
+        # from #7, killing a warm client / stdio child), then _unmount drops its
+        # route. On shutdown we set them all. A disabled backend is never mounted
+        # (boot skips it), so its endpoint is simply absent (404) until re-enabled.
+        stops: dict[str, anyio.Event] = {}
 
         async def runner(
             b,
@@ -396,22 +412,28 @@ def _build_app(
             *,
             task_status=anyio.TASK_STATUS_IGNORED,
         ):
-            async with AsyncExitStack() as stack:
-                ok = await _mount_backend(
-                    app,
-                    stack,
-                    b,
-                    cfg_,
-                    all_tools_,
-                    meta_,
-                    captured_,
-                    registry,
-                    holders,
-                    log,
-                )
-                task_status.started(ok)
-                if ok:
-                    await stop.wait()
+            ev = anyio.Event()
+            stops[b.name] = ev
+            try:
+                async with AsyncExitStack() as stack:
+                    ok = await _mount_backend(
+                        app,
+                        stack,
+                        b,
+                        cfg_,
+                        all_tools_,
+                        meta_,
+                        captured_,
+                        registry,
+                        holders,
+                        log,
+                    )
+                    task_status.started(ok)
+                    if ok:
+                        await ev.wait()
+            finally:
+                stops.pop(b.name, None)
+                _unmount(app, b.name, registry, holders)
 
         async with anyio.create_task_group() as tg:
             # #61: start every backend's runner CONCURRENTLY and don't block
@@ -419,7 +441,10 @@ def _build_app(
             # the sum, and a slow/hung backend delays only its own endpoint
             # (each runner appends its Mount when ready, same path as hot-add).
             for b in cfg.backends:
-                tg.start_soon(runner, b, cfg, all_tools, captured_meta, captured_instr)
+                if b.enabled:  # #78: disabled backends aren't mounted (404)
+                    tg.start_soon(
+                        runner, b, cfg, all_tools, captured_meta, captured_instr
+                    )
 
             async def hot_add(b: config_loader.Backend) -> bool:
                 """Mount a just-imported backend live (#7). Config is already
@@ -434,7 +459,15 @@ def _build_app(
                     admin.captured_instructions(cfg2),
                 )
 
+            def hot_remove(name: str) -> None:
+                """Unmount a backend live (#78): set its teardown event; the runner
+                unwinds its own stack and _unmount drops the route + registry."""
+                ev = stops.get(name)
+                if ev is not None:
+                    ev.set()
+
             hooks["add"] = hot_add
+            hooks["remove"] = hot_remove
             log.info(
                 "gateway_starting",
                 backends=[b.name for b in cfg.backends],
@@ -447,8 +480,10 @@ def _build_app(
                 yield
             finally:
                 hooks.pop("add", None)
-                stop.set()  # graceful: runners exit their stacks, tg drains
-                # A runner stuck mid-connect never reaches stop.wait(); without a
+                hooks.pop("remove", None)
+                for ev in list(stops.values()):
+                    ev.set()  # graceful: every runner exits its stack, tg drains
+                # A runner stuck mid-connect never reaches its event wait; without a
                 # deadline it would hang shutdown forever. Grace, then cancel.
                 tg.cancel_scope.deadline = anyio.current_time() + SHUTDOWN_GRACE
 
@@ -456,9 +491,11 @@ def _build_app(
     async def _ready(_request: Request) -> JSONResponse:
         # Readiness (#94), distinct from /health liveness: a configured + ENABLED
         # backend that hasn't mounted yet (or failed to) -> 503, so a monitor can
-        # tell "up" from "up but degraded". `registry` is populated by the runners
-        # as each backend connects (disabled backends aren't expected to mount).
-        want = [b.name for b in cfg.backends if b.enabled]
+        # tell "up" from "up but degraded". Read the LIVE config (not the boot cfg)
+        # so a backend disabled at runtime (#78) isn't falsely reported missing;
+        # `registry` is populated by the runners as each backend connects.
+        live = config_loader.load(config_path)
+        want = [b.name for b in live.backends if b.enabled]
         missing = [n for n in want if n not in registry]
         return JSONResponse(
             {
