@@ -7,7 +7,7 @@ The gateway rewrites broadcast text and forwards calls untouched. Every lever, i
 | Lever | Config | Write path | Takes effect |
 |---|---|---|---|
 | Server instructions override | `Backend.instructions` | `PUT /admin/api/instructions` `{backend, value}` | hot-reload |
-| Tool name / title / description | `ToolOverride.name/title/description` | `PUT /admin/api/override` `{backend, tool_original, override:{…}}` | hot-reload |
+| Tool name / title / description | `ToolOverride.name/title/description` | `PUT /admin/api/override` `{backend, tool_original, override:{…}}` — merge semantics: an ABSENT key preserves the stored override field (#139); send a field's default value to reset it | hot-reload |
 | Tool on/off | `ToolOverride.enabled` | same `override` payload | hot-reload |
 | Pin tool upfront | `ToolOverride.always_load` | same `override` payload | hot-reload (meta only) |
 | Pin whole backend | `Backend.always_load` | `POST /admin/api/backend/{name}/pin` `{value}` | hot-reload |

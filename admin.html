@@ -543,13 +543,16 @@ function toolCard(b, t) {
 }
 
 function paramRow(p) {
-  const name = p.name || p.default_name;
+  // #128: param names are read-only and there is no per-param hide affordance.
+  // Existing name/hide overrides ride along untouched via data attributes so a
+  // description edit can't drop a legacy rename or un-hide a hidden footgun.
   const desc = p.description || p.default_description || '';
   const req = p.required ? '<span class="req" title="required by the backend">*</span>' : '';
-  return `<div class="param" data-original="${esc(p.original)}">
-    <div class="p-top"><span class="orig" title="real MCP parameter name (provider-facing, not editable)">${esc(p.original)}${req}</span>
-      <label class="chk"><input type="checkbox" class="p-hide" ${p.hide?'checked':''}> hide</label></div>
-    <div style="margin-top:8px;"><label>Broadcast name</label><input type="text" class="p-name" value="${esc(name)}" data-default="${esc(p.default_name)}"></div>
+  const renamed = p.name && p.name !== p.default_name
+    ? ` <span class="si" title="legacy broadcast rename (read-only)">→ ${esc(p.name)}</span>` : '';
+  const hidden = p.hide ? ' <span class="si" title="hidden from broadcast (stored override)">hidden</span>' : '';
+  return `<div class="param" data-original="${esc(p.original)}" data-name="${esc(p.name||'')}" data-hide="${p.hide?'1':''}">
+    <div class="p-top"><span class="orig" title="parameter name (not editable)">${esc(p.original)}${req}</span>${renamed}${hidden}</div>
     <div style="margin-top:8px;"><label>Description</label><textarea class="p-desc grow" data-default="${esc(p.default_description||'')}">${esc(desc)}</textarea></div>
     </div>`;
 }
@@ -595,9 +598,9 @@ function wireCard(backend, original, card) {
 function gather(card) {
   const params = [...card.querySelectorAll('.param')].map(pe => ({
     original: pe.dataset.original,
-    name: $('.p-name', pe).value,
+    name: pe.dataset.name,           // #128: read-only pass-through
     description: $('.p-desc', pe).value,
-    hide: $('.p-hide', pe).checked,
+    hide: pe.dataset.hide === '1',   // #128: pass-through, no UI affordance
   }));
   return {
     name: $('.f-name', card).value,
@@ -734,7 +737,7 @@ const pending = {};  // key -> {backend, original, card} for edits not yet persi
 const NAME_RE = /^[A-Za-z0-9_-]{1,64}$/;
 function namesValid(card) {
   let ok = true;
-  [...card.querySelectorAll('.f-name, .p-name')].forEach(inp => {
+  [...card.querySelectorAll('.f-name')].forEach(inp => {
     const bad = inp.value.trim() !== '' && !NAME_RE.test(inp.value.trim());
     inp.classList.toggle('bad', bad);
     if (bad) ok = false;
@@ -967,7 +970,16 @@ function afterRestart(r, verb) {
 }
 
 // import modal
-function openImport() { $('#importBg').classList.add('show'); $('#im_err').textContent = ''; }
+function openImport() {
+  // #124: always present a clean form — a previous import's values must not leak.
+  for (const id of ['im_name','im_url','im_ah','im_av','im_headers','im_hh','im_cmd','im_args'])
+    $('#'+id).value = '';
+  $('#im_oauth').checked = false;
+  $('#im_transport').value = 'http';
+  importTransportChange();
+  $('#im_err').textContent = '';
+  $('#importBg').classList.add('show');
+}
 function closeImport() { $('#importBg').classList.remove('show'); }
 function importTransportChange() {
   // http / streamable-http / sse all use the URL+auth fields; only stdio differs.
