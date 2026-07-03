@@ -126,8 +126,10 @@
   input:focus, textarea:focus { outline: none; border-color: var(--ac); }
   input.ov, textarea.ov { border-color: rgba(74,147,255,.35); }
   input.bad { border-color: var(--rd); outline: 1px solid var(--rd); }
-  textarea { resize: vertical; min-height: 90px; overflow-y: hidden; font-size: 12.5px; color: var(--tm); }
-  .f-instr { font-family: var(--mono); font-size: 12.5px; min-height: 200px; }
+  textarea { resize: vertical; min-height: 90px; overflow-y: hidden;
+             font-size: 13px; line-height: 1.55; color: #a8b3c4; }
+  .f-instr { font-family: var(--mono); font-size: 12.5px; line-height: 1.6;
+             min-height: 200px; color: #a8b3c4; }
   .cap-wrap { position: relative; }
   .cap-count { position: absolute; right: 9px; top: -18px; pointer-events: none;
                font: 10px var(--mono); color: var(--gn); }
@@ -146,9 +148,17 @@
                     padding: 1px 6px; border-radius: 3px; }
   .tc-h .spacer { flex: 1; }
   .tc-h .chev { font-size: 10px; color: var(--tm); }
-  .pin-btn { font: 11px system-ui; border: 1px solid var(--b2); color: var(--tm);
-             border-radius: 5px; padding: 3px 9px; background: transparent; }
-  .pin-btn.pinned { background: rgba(231,165,58,.08); border-color: rgba(231,165,58,.3); color: var(--am); }
+  .pin-btn { font: 11px system-ui; border: 1px solid var(--b2);
+             border-radius: 5px; padding: 3px 8px; background: transparent;
+             filter: grayscale(1); opacity: .45; }
+  .pin-btn:hover:not(:disabled) { opacity: .8; }
+  .pin-btn.pinned { background: rgba(231,165,58,.08); border-color: rgba(231,165,58,.3);
+                    filter: none; opacity: 1; }
+  .pin-btn:disabled { opacity: .18; cursor: not-allowed; border-color: var(--b); }
+  .tgl-col { display: flex; flex-direction: column; align-items: center; gap: 3px; }
+  .b-pin-ind { border: none; background: none; padding: 0; font-size: 11px; line-height: 1;
+               cursor: pointer; opacity: .9; }
+  .pin-mini { font-size: 10px; }
   .t-body { padding: 14px; display: none; border-top: 1px solid var(--b); }
   .tool.open .t-body { display: block; }
   .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
@@ -360,21 +370,28 @@ function renderList() {
     d.className = 'b-item' + (b.name === SELECTED ? ' sel-bg' : '') + (b.enabled ? '' : ' off');
     d.onclick = () => { SELECTED = b.name; renderList(); renderDetail(b.name); };
     const overridden = overriddenCount(b);
+    const pins = b.enabled
+      ? b.tools.filter(t => t.enabled && (t.always_load || b.always_load)).length : 0;
     const label = esc(b.display_name || b.name);  // display-only name (#42)
     d.innerHTML = `<div class="b-row">
-        <input type="checkbox" class="tgl tgl-red" ${b.enabled ? 'checked' : ''}
-               title="${b.enabled ? 'broadcasting — click to disable' : 'disabled — click to enable'}">
+        <span class="tgl-col">
+          <input type="checkbox" class="tgl tgl-red" ${b.enabled ? 'checked' : ''}
+                 title="${b.enabled ? 'broadcasting — click to disable' : 'disabled — click to enable'}">
+          ${b.always_load ? '<button class="b-pin-ind" title="whole server pinned — click to unpin">📌</button>' : ''}
+        </span>
         <div class="nm" title="${esc(b.name)}">${label}</div>
         <span class="chip">${chipT(b.transport)}</span>
       </div>
       <div class="b-sub">
-        <span class="cnt">${b.tools.filter(t => t.enabled).length}/${b.tools.length} tools</span>
+        <span class="cnt">${b.tools.filter(t => t.enabled).length}/${b.tools.length} tools${pins ? `, ${pins}<span class="pin-mini">📌</span>` : ''}</span>
         ${!b.introspected ? '<span class="warn">not introspected</span>'
           : overridden ? `<span class="ovr">${overridden} overridden</span>` : ''}
       </div>`;
     const tgl = $('.tgl', d);
     tgl.addEventListener('click', e => e.stopPropagation());
     tgl.addEventListener('change', e => { e.stopPropagation(); enableBackend(b.name, tgl.checked); });
+    const bp = $('.b-pin-ind', d);
+    if (bp) bp.addEventListener('click', e => { e.stopPropagation(); pinBackend(b.name, false); });
     el.appendChild(d);
   });
 }
@@ -403,7 +420,7 @@ function renderDetail(name) {
         <input type="checkbox" class="tgl" id="b-bcast" ${b.enabled ? 'checked' : ''}> Broadcasting</label>
       <span class="div"></span>
       <label class="lbl" title="pin ALL this backend's tools to load upfront (eager)">
-        <input type="checkbox" class="tgl" id="b-pin" ${b.always_load ? 'checked' : ''}> Pin all tools</label>
+        <input type="checkbox" class="tgl" id="b-pin" ${b.always_load ? 'checked' : ''}> 📌 all tools</label>
       <span class="div"></span>
       <label class="lbl" title="cosmetic label for the sidebar + header; does not change routing" style="cursor:default">
         Display name <input type="text" class="f-display mono" value="${esc(b.display_name || '')}"
@@ -427,7 +444,12 @@ function renderDetail(name) {
   wireGrow(m);
   const tw = $('#tools', m);
   if (!b.introspected) { tw.innerHTML = '<div class="empty">Backend not introspected yet — click Re-inspect.</div>'; return; }
-  b.tools.forEach(t => tw.appendChild(toolCard(b, t)));
+  // Order: pinned first, switched-off last; among equals, overridden above.
+  const grpOf = t => !t.enabled ? 2 : (t.always_load || b.always_load ? 0 : 1);
+  const ovrOf = t => (t.name || t.title || t.description
+    || t.params.some(p => p.name || p.description || p.hide)) ? 0 : 1;
+  [...b.tools].sort((a, z) => grpOf(a) - grpOf(z) || ovrOf(a) - ovrOf(z))
+    .forEach(t => tw.appendChild(toolCard(b, t)));
   wireGrow(m);
 }
 
@@ -563,7 +585,7 @@ function renderGateway() {
         <span class="e-nm">${esc(b.display_name || b.name)}</span><span class="chip">${chipT(b.transport)}</span></div>
       <span class="e-url">${esc(base + (b.endpoint || ''))}</span>
       <div class="e-counts"><span>${b.tools.length} tools</span>
-        <span><span class="ac">${ovr} over</span> · <span class="am">${pins} pinned</span></span></div>
+        <span><span class="ac">${ovr} over</span> · <span class="am">${pins}📌</span></span></div>
       <div class="e-blabel${near ? ' near' : ''}">instructions ${instr} / 2048 B</div>
       <div class="e-bar"><div style="width:${pct}%"></div></div>
     </div>`;
@@ -612,7 +634,7 @@ function renderGateway() {
         <div class="s-sub ac">${ovrTot} overridden</div></div>
       <div class="stat"><div class="s-lbl">Upfront per session</div>
         <div class="s-val am">${kb(upfront)}<span class="unit">KB</span></div>
-        <div class="s-sub">instructions + names + ${pinTot} pinned</div></div>
+        <div class="s-sub">instructions + names + ${pinTot}📌</div></div>
       <div class="stat"><div class="s-lbl">Full catalog</div>
         <div class="s-val">${kb(catalog)}<span class="unit">KB</span></div>
         <div class="s-sub">${kb(deferTot)} KB deferred on demand</div></div>
@@ -667,7 +689,8 @@ function toolCard(b, t) {
       ${isOvr ? '<span class="ov-badge">overridden</span>' : ''}
       <span class="spacer"></span>
       <button class="pin-btn${pinned ? ' pinned' : ''}" onclick="event.stopPropagation()"
-        title="load this tool upfront — exempt from tool-search deferral (anthropic/alwaysLoad)">${pinned ? 'Pinned' : 'Pin'}</button>
+        ${t.enabled ? '' : 'disabled'}
+        title="${t.enabled ? 'pin: load this tool upfront — exempt from tool-search deferral (anthropic/alwaysLoad)' : 'a switched-off tool can\'t be pinned'}">📌</button>
       <input type="checkbox" class="tgl f-enabled" ${t.enabled ? 'checked' : ''}
         onclick="event.stopPropagation()" title="broadcast this tool">
       <input type="checkbox" class="f-always" ${t.always_load ? 'checked' : ''} style="display:none">
@@ -693,13 +716,24 @@ function toolCard(b, t) {
       </div>
       <div class="runbox" style="display:none"></div>
     </div>`;
-  // Pin pill drives the hidden .f-always checkbox so gather()/save wiring is unchanged.
-  const pinBtn = $('.pin-btn', card), always = $('.f-always', card);
+  // Pin pill drives the hidden .f-always checkbox so gather()/save wiring is
+  // unchanged. Pin/enable changes save immediately and re-render so the list
+  // re-sorts (pinned → top, off → bottom) and the sidebar 📌 count updates.
+  const pinBtn = $('.pin-btn', card), always = $('.f-always', card),
+        enabledTgl = $('.f-enabled', card);
+  const saveAndResort = async () => {
+    await doSave(b.name, t.original, card);
+    renderList(); renderDetail(SELECTED);
+  };
   pinBtn.addEventListener('click', () => {
+    if (pinBtn.disabled) return;
     always.checked = !always.checked;
     pinBtn.classList.toggle('pinned', always.checked);
-    pinBtn.textContent = always.checked ? 'Pinned' : 'Pin';
-    scheduleSave(b.name, t.original, card);
+    saveAndResort();
+  });
+  enabledTgl.addEventListener('change', () => {
+    if (!enabledTgl.checked && always.checked) always.checked = false;  // off can't stay pinned
+    saveAndResort();
   });
   wireCard(b.name, t.original, card);
   wireCaps(card);
@@ -740,7 +774,10 @@ function schemaSection(t) {
 function wireCard(backend, original, card) {
   card.querySelectorAll('input, textarea').forEach(inp => {
     if (inp.type === 'checkbox') {
-      inp.addEventListener('change', () => scheduleSave(backend, original, card));
+      // f-enabled/f-always save immediately in toolCard (with a re-sort);
+      // wiring them here too would double-save.
+      if (!inp.classList.contains('f-enabled') && !inp.classList.contains('f-always'))
+        inp.addEventListener('change', () => scheduleSave(backend, original, card));
       return;
     }
     inp.addEventListener('input', () => scheduleSave(backend, original, card));
