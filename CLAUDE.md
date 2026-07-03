@@ -93,6 +93,12 @@ backend endpoint (bare names, instructions <=2KB) + a real passthrough call.
   `PUT /admin/api/instructions` ({backend, value}). Old defaults files
   (pre-capture) auto-re-introspect on startup.
 - One resident subprocess per stdio backend — calls do NOT re-spawn it.
+- **Accepted spec gaps (#92):** the proxy does not forward the `completions`
+  capability (FastMCP's server side has no completion handler to register —
+  verified in fastmcp 3.4.2 source; a backend's argument-autocompletion is
+  dropped), and FastMCP's proxy auto-paginates the backend's tools/list into
+  one page with no `nextCursor`. Both are framework behavior, low impact for
+  Claude Code (it uses neither), documented here instead of worked around.
 - Hot-reload swaps a backend's transform by mutating its proxy's `_transforms`
   (a list); tools/list applies transforms live per request, so the swap is
   instant. `admin.hot_reload(registry, holders, cfg, backend, log)` targets that
@@ -120,7 +126,7 @@ backend endpoint (bare names, instructions <=2KB) + a real passthrough call.
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **mcp-gateway** (524 symbols, 1319 relationships, 46 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **mcp-gateway** (553 symbols, 1418 relationships, 48 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > Index stale? Run `node .gitnexus/run.cjs analyze` from the project root — it auto-selects an available runner. No `.gitnexus/run.cjs` yet? `npx gitnexus analyze` (npm 11 crash → `npm i -g gitnexus`; #1939).
 

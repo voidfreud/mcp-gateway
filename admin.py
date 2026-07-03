@@ -21,14 +21,15 @@ import os
 import re
 import subprocess
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
+from fastmcp import Client
 from starlette.background import BackgroundTask
 from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse
 from starlette.routing import Route
-
-from fastmcp import Client
 
 import config_loader as cl
 from config_loader import Backend, GatewayConfig, ParamOverride, ToolOverride
@@ -576,7 +577,9 @@ EXPORT_KIND = "mcp-gateway-settings"
 EXPORT_VERSION = 1
 
 
-def export_settings(cfg: GatewayConfig, full: bool = False) -> dict:
+def export_settings(  # noqa: PLR0912 — one branch per serialized override field
+    cfg: GatewayConfig, full: bool = False
+) -> dict:
     """The COMPLETE stored settings as one JSON-safe bundle: per-backend
     instructions override, display name, pin, and every tool/param override —
     exactly what config.toml stores beyond topology, so an import round-trips
@@ -622,7 +625,7 @@ def export_settings(cfg: GatewayConfig, full: bool = False) -> dict:
     return {"kind": EXPORT_KIND, "version": EXPORT_VERSION, "backends": backends}
 
 
-def import_settings(
+def import_settings(  # noqa: PLR0912 — one validation branch per bundle field
     cfg: GatewayConfig, bundle: dict, mode: str = "merge"
 ) -> tuple[list[str], list[str]]:
     """Apply an exported bundle onto *cfg*. Returns (affected_backends, errors).
@@ -756,6 +759,7 @@ def under_launchd() -> bool:
     try:
         r = subprocess.run(
             ["launchctl", "print", f"gui/{uid}/{LAUNCHD_LABEL}"],
+            check=False,  # returncode is inspected below
             capture_output=True,
             text=True,
             timeout=5,
@@ -782,6 +786,7 @@ def restart_daemon(log) -> None:
     try:
         r = subprocess.run(
             ["launchctl", "kickstart", "-k", target],
+            check=False,  # failure is logged, not raised (best-effort restart)
             capture_output=True,
             text=True,
             timeout=10,
@@ -820,46 +825,52 @@ def _needs_json(handler):
     return guarded
 
 
-def register(
-    app,
-    config_path: str,
-    log,
-    registry: dict,
-    holders: dict,
-    hooks: dict | None = None,
-) -> None:
-    """Attach the admin UI + API routes to the parent Starlette *app*.
+def _err(msg: str, status: int = 400) -> JSONResponse:
+    return JSONResponse({"ok": False, "error": msg}, status_code=status)
 
-    ``registry`` (backend name -> live proxy) and ``holders`` (backend name ->
-    [current transform]) are populated during the server lifespan and shared by
-    reference, so hot-reload targets the right backend's live proxy. ``hooks``
-    is likewise filled by the lifespan: ``hooks["add"]`` mounts a just-imported
-    backend live (#7) so an import needs no daemon restart.
-    """
-    hooks = hooks if hooks is not None else {}
 
-    def _load() -> GatewayConfig:
-        return cl.load(config_path)
+@dataclass
+class _AdminCtx:
+    """Shared plumbing for the admin route groups (#89): config access, the
+    read-modify-write lock, the live-proxy registry/holders, and the lifespan
+    hooks. Route-group factories take this instead of a 13-handler closure."""
 
+    config_path: str
+    log: Any
+    registry: dict
+    holders: dict
+    hooks: dict
     # Guards every config read-modify-write (#52). Uvicorn runs a single worker,
     # so load->mutate->save WAS implicitly atomic as long as no handler awaited
     # between load and save — a fragile invariant (add_backend already awaits a
     # network probe mid-section). The explicit lock makes it safe to add an
     # `await` inside a critical section without silently losing concurrent edits.
-    config_lock = asyncio.Lock()
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
-    def _locked(handler):
-        """Serialize a whole mutating handler under ``config_lock``. Fine for the
+    def load(self) -> GatewayConfig:
+        return cl.load(self.config_path)
+
+    def commit(self, cfg: GatewayConfig, *backends: str) -> None:
+        """The shared tail of every mutating handler: backup, atomic save, then
+        hot-reload each named backend that is currently mounted (hot_reload
+        itself skips unmounted ones with a warning)."""
+        backup_config(self.config_path)
+        cl.save(cfg, self.config_path)
+        for name in backends:
+            hot_reload(self.registry, self.holders, cfg, name, self.log)
+
+    def locked(self, handler):
+        """Serialize a whole mutating handler under ``lock``. Fine for the
         in-process handlers (they only parse JSON + touch local files);
         add_backend manages the lock itself so its network probe stays outside."""
 
         async def inner(request: Request):
-            async with config_lock:
+            async with self.lock:
                 return await handler(request)
 
         return inner
 
-    def _restart_response(extra: dict) -> JSONResponse:
+    def restart_response(self, extra: dict) -> JSONResponse:
         """Response for a topology change that needs a full restart. Only
         schedules (and claims) the restart when we're actually launchd-managed;
         in dev/foreground it says so honestly instead of a stuck "restarting"
@@ -868,9 +879,13 @@ def register(
         if under_launchd():
             return JSONResponse(
                 {"ok": True, "reloaded": "restarting", **extra},
-                background=BackgroundTask(restart_daemon, log),
+                background=BackgroundTask(restart_daemon, self.log),
             )
         return JSONResponse({"ok": True, "reloaded": "dev-no-restart", **extra})
+
+
+def _general_routes(ctx: _AdminCtx) -> list[Route]:
+    """Page, state, export, mini-inspector, restart, reintrospect."""
 
     async def admin_page(_request: Request):
         # no-cache so a plain browser reload always revalidates (ETag → 304 when
@@ -879,33 +894,43 @@ def register(
         return FileResponse(HERE / "admin.html", headers={"Cache-Control": "no-cache"})
 
     async def get_state(_request: Request):
-        return JSONResponse(build_state(_load()))
+        return JSONResponse(build_state(ctx.load()))
+
+    async def get_export(request: Request):
+        """One-call settings bundle (#136): every stored override + instruction,
+        JSON, zero loss on re-import. ?full=true adds captured defaults."""
+        full = request.query_params.get("full") in ("true", "1")
+        return JSONResponse(export_settings(ctx.load(), full=full))
+
+    return [
+        Route("/admin", admin_page, methods=["GET"]),
+        Route("/admin/api/state", get_state, methods=["GET"]),
+        Route("/admin/api/export", get_export, methods=["GET"]),
+    ]
+
+
+def _settings_routes(ctx: _AdminCtx) -> list[Route]:
+    """Text overrides: tool override, reset, instructions, settings import."""
 
     async def put_override(request: Request):
         payload = await request.json()
-        cfg = _load()
+        cfg = ctx.load()
         try:
             apply_tool_override(cfg, payload["backend"], payload)
         except (cl.ConfigError, KeyError) as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
-        backup_config(config_path)
-        cl.save(cfg, config_path)
-        hot_reload(registry, holders, cfg, payload["backend"], log)
+            return _err(str(exc))
+        ctx.commit(cfg, payload["backend"])
         return JSONResponse({"ok": True, "reloaded": "in-process"})
 
     async def reset_tool(request: Request):
         """Clear all overrides for one tool (revert to the backend default)."""
         payload = await request.json()
-        cfg = _load()
+        cfg = ctx.load()
         b = next((x for x in cfg.backends if x.name == payload["backend"]), None)
         if b is None:
-            return JSONResponse(
-                {"ok": False, "error": "unknown backend"}, status_code=400
-            )
+            return _err("unknown backend")
         b.tools = [t for t in b.tools if t.original != payload["tool_original"]]
-        backup_config(config_path)
-        cl.save(cfg, config_path)
-        hot_reload(registry, holders, cfg, payload["backend"], log)
+        ctx.commit(cfg, payload["backend"])
         return JSONResponse({"ok": True})
 
     async def put_instructions(request: Request):
@@ -913,23 +938,14 @@ def register(
         Hot-reloads that backend's endpoint — it only changes the blurb Claude
         reads at initialize, no connection rebuild."""
         payload = await request.json()
-        cfg = _load()
+        cfg = ctx.load()
         backend = payload.get("backend")
         try:
             set_instructions(cfg, backend, payload.get("value"))
         except (cl.ConfigError, KeyError) as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
-        backup_config(config_path)
-        cl.save(cfg, config_path)
-        if backend is not None:
-            hot_reload(registry, holders, cfg, backend, log)
+            return _err(str(exc))
+        ctx.commit(cfg, backend)  # set_instructions validated the name
         return JSONResponse({"ok": True})
-
-    async def get_export(request: Request):
-        """One-call settings bundle (#136): every stored override + instruction,
-        JSON, zero loss on re-import. ?full=true adds captured defaults."""
-        full = request.query_params.get("full") in ("true", "1")
-        return JSONResponse(export_settings(_load(), full=full))
 
     async def post_import(request: Request):
         """Atomic settings import (#136): validate the whole bundle against a
@@ -937,34 +953,52 @@ def register(
         payload = await request.json()
         bundle = payload.get("settings") or payload
         mode = payload.get("mode", "merge")
-        cfg = _load()
+        cfg = ctx.load()
         affected, errors = import_settings(cfg, bundle, mode)
         if errors:
             return JSONResponse(
                 {"ok": False, "errors": errors, "applied": False}, status_code=400
             )
-        backup_config(config_path)
-        cl.save(cfg, config_path)
-        for name in affected:
-            if name in registry:  # disabled backends: stored, effective on enable
-                hot_reload(registry, holders, cfg, name, log)
+        # disabled backends: stored, effective on enable (commit skips unmounted)
+        ctx.commit(cfg, *affected)
         return JSONResponse({"ok": True, "backends": affected, "mode": mode})
+
+    return [
+        Route(
+            "/admin/api/override",
+            _needs_json(ctx.locked(put_override)),
+            methods=["PUT"],
+        ),
+        Route(
+            "/admin/api/reset", _needs_json(ctx.locked(reset_tool)), methods=["POST"]
+        ),
+        Route(
+            "/admin/api/instructions",
+            _needs_json(ctx.locked(put_instructions)),
+            methods=["PUT"],
+        ),
+        Route(
+            "/admin/api/import",
+            _needs_json(ctx.locked(post_import)),
+            methods=["POST"],
+        ),
+    ]
+
+
+def _backend_routes(ctx: _AdminCtx) -> list[Route]:  # noqa: PLR0915 — statement count is the nested handlers; the group is cohesive
+    """Per-backend flags and topology: pin, enable, display name, add, remove."""
 
     async def pin_backend(request: Request):
         """Toggle per-backend always_load (pin all its tools upfront). Hot-reload —
         it only adds `_meta`, no connection change."""
         name = request.path_params["name"]
         payload = await request.json()
-        cfg = _load()
+        cfg = ctx.load()
         b = next((x for x in cfg.backends if x.name == name), None)
         if b is None:
-            return JSONResponse(
-                {"ok": False, "error": "unknown backend"}, status_code=400
-            )
+            return _err("unknown backend")
         b.always_load = bool(payload.get("value", False))
-        backup_config(config_path)
-        cl.save(cfg, config_path)
-        hot_reload(registry, holders, cfg, name, log)
+        ctx.commit(cfg, name)
         return JSONResponse({"ok": True, "reloaded": "in-process"})
 
     async def _apply_enabled(b: Backend, value: bool) -> None:
@@ -972,14 +1006,14 @@ def register(
         enable -> mount it if not already mounted; disable -> unmount it (so a
         disabled backend runs no subprocess and its endpoint 404s)."""
         if value:
-            if b.name not in registry:  # not mounted -> mount it live (#7 path)
-                add = hooks.get("add")
+            if b.name not in ctx.registry:  # not mounted -> mount it live (#7)
+                add = ctx.hooks.get("add")
                 if add is not None:
                     await add(b)
             else:  # already mounted (defensive) -> just refresh its transforms
-                hot_reload(registry, holders, _load(), b.name, log)
+                hot_reload(ctx.registry, ctx.holders, ctx.load(), b.name, ctx.log)
         else:
-            remove = hooks.get("remove")
+            remove = ctx.hooks.get("remove")
             if remove is not None:
                 remove(b.name)
 
@@ -989,16 +1023,13 @@ def register(
         re-enabled. No daemon restart either way."""
         name = request.path_params["name"]
         payload = await request.json()
-        cfg = _load()
+        cfg = ctx.load()
         b = next((x for x in cfg.backends if x.name == name), None)
         if b is None:
-            return JSONResponse(
-                {"ok": False, "error": "unknown backend"}, status_code=400
-            )
+            return _err("unknown backend")
         value = bool(payload.get("value", True))
         b.enabled = value
-        backup_config(config_path)
-        cl.save(cfg, config_path)
+        ctx.commit(cfg)
         await _apply_enabled(b, value)
         return JSONResponse({"ok": True, "reloaded": "in-process"})
 
@@ -1007,11 +1038,10 @@ def register(
         unmounting each to match (#78)."""
         payload = await request.json()
         value = bool(payload.get("value", True))
-        cfg = _load()
+        cfg = ctx.load()
         for b in cfg.backends:
             b.enabled = value
-        backup_config(config_path)
-        cl.save(cfg, config_path)
+        ctx.commit(cfg)
         for b in cfg.backends:
             await _apply_enabled(b, value)
         return JSONResponse({"ok": True, "reloaded": "in-process"})
@@ -1022,24 +1052,21 @@ def register(
         so there's no hot-reload; empty clears it (falls back to ``name``)."""
         name = request.path_params["name"]
         payload = await request.json()
-        cfg = _load()
+        cfg = ctx.load()
         b = next((x for x in cfg.backends if x.name == name), None)
         if b is None:
-            return JSONResponse(
-                {"ok": False, "error": "unknown backend"}, status_code=400
-            )
+            return _err("unknown backend")
         try:
             b.display_name = _clean(payload.get("value"))  # validates encodability
         except cl.ConfigError as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
-        backup_config(config_path)
-        cl.save(cfg, config_path)
+            return _err(str(exc))
+        ctx.commit(cfg)
         return JSONResponse({"ok": True})
 
-    async def add_backend(request: Request):
+    async def add_backend(request: Request):  # noqa: PLR0911 — one early return per validation/probe/mount outcome
         """Import a new backend MCP. Validates + introspects, then restarts."""
         payload = await request.json()
-        if any(b.name == payload.get("name") for b in _load().backends):
+        if any(b.name == payload.get("name") for b in ctx.load().backends):
             return JSONResponse(
                 {"ok": False, "error": "backend name already exists"}, status_code=400
             )
@@ -1068,62 +1095,88 @@ def register(
                 {"ok": False, "error": f"could not connect to backend: {exc}"},
                 status_code=400,
             )
-        async with config_lock:
-            cfg = _load()  # re-load + re-check: the probe await is a real gap
+        async with ctx.lock:
+            cfg = ctx.load()  # re-load + re-check: the probe await is a real gap
             if any(x.name == b.name for x in cfg.backends):
                 return JSONResponse(
                     {"ok": False, "error": "backend name already exists"},
                     status_code=400,
                 )
             cfg.backends.append(b)
-            backup_config(config_path)
-            cl.save(cfg, config_path)
+            ctx.commit(cfg)
         # Hot-add (#7): mount the new backend into the RUNNING daemon — no
         # restart, no /health polling race. Config is already saved either way,
         # so a failed mount still lands the backend on the next real restart.
-        hot_add = hooks.get("add")
+        hot_add = ctx.hooks.get("add")
         if hot_add is not None:
             if await hot_add(b):
-                log.info("backend_hot_added", backend=b.name)
+                ctx.log.info("backend_hot_added", backend=b.name)
                 return JSONResponse(
                     {"ok": True, "reloaded": "hot-add", "backend": b.name}
                 )
             return JSONResponse(
                 {"ok": True, "reloaded": "mount-failed", "backend": b.name}
             )
-        return _restart_response({"backend": b.name})
+        return ctx.restart_response({"backend": b.name})
 
     async def remove_backend(request: Request):
         name = request.path_params["name"]
-        cfg = _load()
+        cfg = ctx.load()
         before = len(cfg.backends)
         cfg.backends = [b for b in cfg.backends if b.name != name]
         if len(cfg.backends) == before:
-            return JSONResponse(
-                {"ok": False, "error": "unknown backend"}, status_code=400
-            )
-        backup_config(config_path)
-        cl.save(cfg, config_path)
+            return _err("unknown backend")
+        ctx.commit(cfg)
         # prune the captured defaults so removed backends don't accumulate
         # orphaned files (#54); best-effort — the file may never have existed
         (DEFAULTS_DIR / f"{name}.json").unlink(missing_ok=True)
-        return _restart_response({})
+        return ctx.restart_response({})
+
+    return [
+        Route(
+            "/admin/api/backend/{name}/pin",
+            _needs_json(ctx.locked(pin_backend)),
+            methods=["POST"],
+        ),
+        Route(
+            "/admin/api/backend/{name}/enabled",
+            _needs_json(ctx.locked(enable_backend)),
+            methods=["POST"],
+        ),
+        Route(
+            "/admin/api/enabled", _needs_json(ctx.locked(enable_all)), methods=["POST"]
+        ),
+        Route(
+            "/admin/api/backend/{name}/display-name",
+            _needs_json(ctx.locked(set_display_name)),
+            methods=["POST"],
+        ),
+        # add_backend takes ctx.lock itself (probe stays outside the lock)
+        Route("/admin/api/backend", _needs_json(add_backend), methods=["POST"]),
+        Route(
+            "/admin/api/backend/{name}", ctx.locked(remove_backend), methods=["DELETE"]
+        ),
+    ]
+
+
+def _ops_routes(ctx: _AdminCtx) -> list[Route]:
+    """Operational endpoints: mini-inspector, manual restart, re-introspect."""
 
     async def restart_gateway(_request: Request):
         """Manual on-demand restart of the daemon (#56). Same launchd-gated
         semantics as a topology change: restarts when managed, honest no-op in
         dev/foreground."""
-        return _restart_response({})
+        return ctx.restart_response({})
 
-    async def run_tool(request: Request):
+    async def run_tool(request: Request):  # noqa: PLR0911 — one early return per input-validation failure
         """Mini-Inspector (#3): execute one tool through the LIVE proxy — the
         same path Claude uses, so renames/transforms apply and reverse-map —
         and return structured + unstructured content + error state. Read-only
-        w.r.t. config, so no config_lock; call_tool_mcp doesn't raise on a
+        w.r.t. config, so no lock; call_tool_mcp doesn't raise on a
         tool-level error (isError comes back in the payload)."""
         payload = await request.json()
         backend = payload.get("backend")
-        proxy = registry.get(backend)
+        proxy = ctx.registry.get(backend)
         if proxy is None:
             return JSONResponse(
                 {"ok": False, "error": "backend not mounted"}, status_code=400
@@ -1163,58 +1216,45 @@ def register(
 
     async def reintrospect(request: Request):
         name = request.path_params["name"]
-        cfg = _load()
-        await ensure_defaults(cfg, log, force=name)
+        cfg = ctx.load()
+        await ensure_defaults(cfg, ctx.log, force=name)
         return JSONResponse({"ok": True})
 
+    return [
+        Route("/admin/api/run", _needs_json(run_tool), methods=["POST"]),
+        Route("/admin/api/restart", restart_gateway, methods=["POST"]),
+        Route("/admin/api/introspect/{name}", reintrospect, methods=["POST"]),
+    ]
+
+
+def register(  # noqa: PLR0913 — public API; callers pass the lifespan plumbing
+    app,
+    config_path: str,
+    log,
+    registry: dict,
+    holders: dict,
+    hooks: dict | None = None,
+) -> None:
+    """Attach the admin UI + API routes to the parent Starlette *app*.
+
+    ``registry`` (backend name -> live proxy) and ``holders`` (backend name ->
+    [current transform]) are populated during the server lifespan and shared by
+    reference, so hot-reload targets the right backend's live proxy. ``hooks``
+    is likewise filled by the lifespan: ``hooks["add"]`` mounts a just-imported
+    backend live (#7) so an import needs no daemon restart.
+    """
+    ctx = _AdminCtx(
+        config_path=config_path,
+        log=log,
+        registry=registry,
+        holders=holders,
+        hooks=hooks if hooks is not None else {},
+    )
     app.router.routes.extend(
         [
-            Route("/admin", admin_page, methods=["GET"]),
-            Route("/admin/api/state", get_state, methods=["GET"]),
-            Route(
-                "/admin/api/override",
-                _needs_json(_locked(put_override)),
-                methods=["PUT"],
-            ),
-            Route(
-                "/admin/api/reset", _needs_json(_locked(reset_tool)), methods=["POST"]
-            ),
-            Route("/admin/api/export", get_export, methods=["GET"]),
-            Route(
-                "/admin/api/import",
-                _needs_json(_locked(post_import)),
-                methods=["POST"],
-            ),
-            Route(
-                "/admin/api/instructions",
-                _needs_json(_locked(put_instructions)),
-                methods=["PUT"],
-            ),
-            Route(
-                "/admin/api/backend/{name}/pin",
-                _needs_json(_locked(pin_backend)),
-                methods=["POST"],
-            ),
-            Route(
-                "/admin/api/backend/{name}/enabled",
-                _needs_json(_locked(enable_backend)),
-                methods=["POST"],
-            ),
-            Route(
-                "/admin/api/enabled", _needs_json(_locked(enable_all)), methods=["POST"]
-            ),
-            Route(
-                "/admin/api/backend/{name}/display-name",
-                _needs_json(_locked(set_display_name)),
-                methods=["POST"],
-            ),
-            # add_backend takes config_lock itself (probe stays outside the lock)
-            Route("/admin/api/backend", _needs_json(add_backend), methods=["POST"]),
-            Route(
-                "/admin/api/backend/{name}", _locked(remove_backend), methods=["DELETE"]
-            ),
-            Route("/admin/api/run", _needs_json(run_tool), methods=["POST"]),
-            Route("/admin/api/restart", restart_gateway, methods=["POST"]),
-            Route("/admin/api/introspect/{name}", reintrospect, methods=["POST"]),
+            *_general_routes(ctx),
+            *_settings_routes(ctx),
+            *_backend_routes(ctx),
+            *_ops_routes(ctx),
         ]
     )

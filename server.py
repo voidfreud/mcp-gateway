@@ -26,16 +26,15 @@ from pathlib import Path
 import anyio
 import structlog
 import uvicorn
+from fastmcp import Client
+from fastmcp.server import create_proxy
+from fastmcp.server.middleware import Middleware, MiddlewareContext
+from mcp.server.lowlevel.server import NotificationOptions
 from starlette.applications import Starlette
 from starlette.middleware import Middleware as StarletteMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse
 from starlette.routing import Mount, Route
-
-from fastmcp import Client
-from fastmcp.server import create_proxy
-from fastmcp.server.middleware import Middleware, MiddlewareContext
-from mcp.server.lowlevel.server import NotificationOptions
 
 import admin
 import config_loader
@@ -293,7 +292,7 @@ async def _health(_request: Request) -> PlainTextResponse:
     return PlainTextResponse(f"ok mcp-gateway {admin.gateway_version()}")
 
 
-async def _mount_backend(
+async def _mount_backend(  # noqa: PLR0913 — the mount needs the full lifespan plumbing; a param object would just rename the coupling
     app: Starlette,
     stack: AsyncExitStack,
     b: config_loader.Backend,
@@ -365,7 +364,7 @@ async def _mount_backend(
 # ---------------------------------------------------------------------------
 
 
-def _build_app(
+def _build_app(  # noqa: PLR0913 — composition root; takes what it wires
     cfg: config_loader.GatewayConfig,
     log,
     all_tools: dict,
@@ -403,7 +402,7 @@ def _build_app(
         # (boot skips it), so its endpoint is simply absent (404) until re-enabled.
         stops: dict[str, anyio.Event] = {}
 
-        async def runner(
+        async def runner(  # noqa: PLR0913 — mirrors _mount_backend's signature
             b,
             cfg_,
             all_tools_,

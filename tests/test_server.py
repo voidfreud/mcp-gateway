@@ -14,7 +14,6 @@ from pathlib import Path
 import anyio
 import pytest
 import structlog
-
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.responses import JSONResponse
@@ -24,7 +23,6 @@ from starlette.testclient import TestClient
 import admin
 import config_loader as cl
 import server
-
 
 # ---------------------------------------------------------------------------
 # #48 — malformed/missing JSON body → 400 (not 500 + traceback)
@@ -371,7 +369,9 @@ def test_slow_backend_does_not_block_boot_or_others(tmp_path, monkeypatch):
     monkeypatch.setattr(server, "SHUTDOWN_GRACE", 0.1)  # don't wait on the hung one
     started, mounted = [], []
 
-    async def fake_mount(app, stack, b, cfg, all_tools, meta, captured, reg, hold, log):
+    async def fake_mount(
+        app, stack, b, cfg, all_tools, meta, captured, _reg, _hold, log
+    ):
         started.append(b.name)
         if b.name == "slow":
             await anyio.sleep(3600)  # hung connect; cancelled by SHUTDOWN_GRACE
@@ -666,7 +666,9 @@ def test_boot_skips_disabled_backends(tmp_path, monkeypatch):
     monkeypatch.setattr(admin, "DEFAULTS_DIR", tmp_path / "defaults")
     mounted = []
 
-    async def fake_mount(app, stack, b, cfg, all_tools, meta, captured, reg, hold, log):
+    async def fake_mount(
+        app, stack, b, cfg, all_tools, meta, captured, reg, _hold, log
+    ):
         mounted.append(b.name)
         reg[b.name] = object()
         return True

@@ -18,16 +18,16 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 import sys
 import tomllib
 from pathlib import Path
 from typing import Literal
 
 import tomli_w
-from pydantic import BaseModel, Field, field_validator, model_validator
-
 from fastmcp.server.transforms import ToolTransform
 from fastmcp.tools.tool_transform import ArgTransformConfig, ToolTransformConfig
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
@@ -70,8 +70,8 @@ def load_secrets() -> dict[str, str]:
     if cached is not None and cached[0] == mtime:
         return cached[1]
     secrets: dict[str, str] = {}
-    for line in path.read_text().splitlines():
-        line = line.strip()
+    for raw_line in path.read_text().splitlines():
+        line = raw_line.strip()
         if not line or line.startswith("#"):
             continue
         if line.startswith("export "):
@@ -197,20 +197,18 @@ class Backend(BaseModel, extra="forbid"):
     tools: list[ToolOverride] = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def _check_transport(self) -> "Backend":
+    def _check_transport(self) -> Backend:
         if self.transport != "stdio":  # http / streamable-http / sse — url-based
             if not self.url:
                 raise ConfigError(
                     f"backend {self.name!r}: {self.transport} transport needs a url"
                 )
-        else:  # stdio
-            if not self.command:
-                raise ConfigError(
-                    f"backend {self.name!r}: stdio transport needs a command"
-                )
+        elif not self.command:
+            raise ConfigError(f"backend {self.name!r}: stdio transport needs a command")
         if (self.auth_header is None) != (self.auth_value is None):
             raise ConfigError(
-                f"backend {self.name!r}: set both auth_header and auth_value, or neither"
+                f"backend {self.name!r}: set both auth_header and auth_value, "
+                f"or neither"
             )
         return self
 
@@ -237,7 +235,7 @@ class GatewayConfig(BaseModel, extra="forbid"):
     backends: list[Backend] = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def _check_backends(self) -> "GatewayConfig":
+    def _check_backends(self) -> GatewayConfig:
         if not self.backends:
             raise ConfigError("config has no [[backends]]")
         names = [b.name for b in self.backends]
@@ -289,8 +287,6 @@ def _run_headers_helper(b: Backend) -> dict[str, str]:
     Raises ConfigError on a non-zero exit, timeout, or non-object output — a
     misconfigured helper must fail loudly, not silently connect unauthenticated.
     """
-    import subprocess
-
     helper = b.headers_helper
     # A str runs via the shell (needed for $()/pipes) and carries full shell
     # privilege; a list is argv run WITHOUT a shell (no injection surface). Both
@@ -372,7 +368,7 @@ def to_proxy_config(cfg: GatewayConfig) -> dict:
 ALWAYS_LOAD_META = {"anthropic/alwaysLoad": True}
 
 
-def build_transforms(
+def build_transforms(  # noqa: PLR0912 — one branch per override field; splitting would scatter the transform assembly
     cfg: GatewayConfig,
     backend: Backend,
     all_tools: dict[str, list[str]] | None = None,
@@ -485,12 +481,12 @@ def backend_instructions(
     return eff.strip() if (eff and eff.strip()) else None
 
 
-def to_raw(cfg: GatewayConfig) -> dict:
+def to_raw(cfg: GatewayConfig) -> dict:  # noqa: PLR0915 — field-by-field TOML serialization; nested helpers already factored
     """Convert a GatewayConfig back to the plain dict shape of config.toml,
     omitting None/empty fields so the written file stays minimal and clean.
     """
 
-    def _backend(b: Backend) -> dict:
+    def _backend(b: Backend) -> dict:  # noqa: PLR0912 — one branch per optional config field
         d: dict = {"name": b.name, "transport": b.transport}
         if b.display_name:
             d["display_name"] = b.display_name
