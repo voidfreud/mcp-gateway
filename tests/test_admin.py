@@ -322,6 +322,78 @@ def test_apply_explicit_default_still_resets(defaults_dir):
     assert cfg.backends[0].tools == []  # back to minimal config
 
 
+def test_export_import_round_trips_zero_loss(defaults_dir):
+    # #136: export → import onto a clean cfg → identical stored settings.
+    _write_defaults(defaults_dir, "b", "t", desc="orig", params=[{"original": "p"}])
+    cfg = _single_cfg()
+    cfg.backends[0].instructions = "custom instructions"
+    cfg.backends[0].always_load = True
+    admin.apply_tool_override(
+        cfg,
+        "b",
+        {
+            "tool_original": "t",
+            "override": {
+                "name": "renamed",
+                "description": "better",
+                "always_load": True,
+                "params": [{"original": "p", "description": "pd", "hide": False}],
+            },
+        },
+    )
+    bundle = admin.export_settings(cfg)
+    clean = _single_cfg()
+    affected, errors = admin.import_settings(clean, bundle, mode="replace")
+    assert errors == [] and affected == ["b"]
+    assert admin.export_settings(clean) == bundle
+
+
+def test_import_is_reported_per_item_and_rejects_unknowns(defaults_dir):
+    _write_defaults(defaults_dir, "b", "t")
+    cfg = _single_cfg()
+    bundle = {
+        "kind": admin.EXPORT_KIND,
+        "version": 1,
+        "backends": {
+            "ghost": {"instructions": "x"},
+            "b": {"tools": {"nope": {"name": "y"}, "t": {"name": "ok_name"}}},
+        },
+    }
+    affected, errors = admin.import_settings(cfg, bundle)
+    assert len(errors) == 2
+    assert any("ghost" in e for e in errors)
+    assert any("b/nope" in e for e in errors)
+    # caller contract: errors non-empty -> cfg is discarded, so partial
+    # application inside the throwaway cfg is fine ("t" did apply here).
+
+
+def test_import_merge_vs_replace(defaults_dir):
+    _write_defaults(defaults_dir, "b", "t", desc="orig")
+    cfg = _single_cfg()
+    admin.apply_tool_override(
+        cfg, "b", {"tool_original": "t", "override": {"enabled": False, "params": []}}
+    )
+    bundle = {"backends": {"b": {"tools": {"t": {"description": "new"}}}}}
+    merged = cfg.model_copy(deep=True)
+    admin.import_settings(merged, bundle, mode="merge")
+    ov = merged.backends[0].tools[0]
+    assert ov.enabled is False and ov.description == "new"  # disable survives
+    replaced = cfg.model_copy(deep=True)
+    admin.import_settings(replaced, bundle, mode="replace")
+    ov = replaced.backends[0].tools[0]
+    assert ov.enabled is True and ov.description == "new"  # exactly the bundle
+
+
+def test_import_ignores_backend_topology(defaults_dir):
+    # enabled/transport/auth never come from a bundle — settings only.
+    _write_defaults(defaults_dir, "b", "t")
+    cfg = _single_cfg()
+    bundle = {"backends": {"b": {"enabled": False, "tools": {"t": {"name": "n"}}}}}
+    affected, errors = admin.import_settings(cfg, bundle)
+    assert errors == [] and cfg.backends[0].enabled is True
+    assert cfg.backends[0].tools[0].name == "n"
+
+
 def test_apply_rejects_invalid_name(defaults_dir):
     _write_defaults(defaults_dir, "b", "t")
     cfg = _single_cfg()

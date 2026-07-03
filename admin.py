@@ -569,6 +569,119 @@ def apply_tool_override(cfg: GatewayConfig, backend: str, payload: dict) -> None
 
 
 # ---------------------------------------------------------------------------
+# Settings export / import (#136)
+# ---------------------------------------------------------------------------
+
+EXPORT_KIND = "mcp-gateway-settings"
+EXPORT_VERSION = 1
+
+
+def export_settings(cfg: GatewayConfig, full: bool = False) -> dict:
+    """The COMPLETE stored settings as one JSON-safe bundle: per-backend
+    instructions override, display name, pin, and every tool/param override —
+    exactly what config.toml stores beyond topology, so an import round-trips
+    with zero loss. ``full`` adds each backend's captured defaults for context
+    (read-only; import ignores them)."""
+    backends: dict = {}
+    for b in cfg.backends:
+        entry: dict = {}
+        if b.display_name:
+            entry["display_name"] = b.display_name
+        if b.always_load:
+            entry["always_load"] = True
+        if b.instructions is not None:
+            entry["instructions"] = b.instructions
+        tools: dict = {}
+        for t in b.tools:
+            td: dict = {}
+            for key in ("name", "title", "description"):
+                if getattr(t, key):
+                    td[key] = getattr(t, key)
+            if not t.enabled:
+                td["enabled"] = False
+            if t.always_load:
+                td["always_load"] = True
+            if t.params:
+                td["params"] = [
+                    {
+                        "original": p.original,
+                        **({"name": p.name} if p.name else {}),
+                        **({"description": p.description} if p.description else {}),
+                        **({"hide": True} if p.hide else {}),
+                    }
+                    for p in t.params
+                ]
+            if td:
+                tools[t.original] = td
+        if tools:
+            entry["tools"] = tools
+        if entry or full:
+            backends[b.name] = entry
+        if full:
+            entry["defaults"] = load_defaults(b.name)
+    return {"kind": EXPORT_KIND, "version": EXPORT_VERSION, "backends": backends}
+
+
+def import_settings(
+    cfg: GatewayConfig, bundle: dict, mode: str = "merge"
+) -> tuple[list[str], list[str]]:
+    """Apply an exported bundle onto *cfg*. Returns (affected_backends, errors).
+
+    All-or-nothing contract is the CALLER's: mutate a throwaway cfg, and only
+    persist it when errors is empty. Validation is the same path as single
+    saves (apply_tool_override / set_instructions — collisions, charset, caps),
+    with each failure reported per item.
+
+    ``mode="replace"``: a backend named in the bundle is first reset to
+    defaults (its stored overrides cleared), then the bundle applies — the
+    result is exactly the bundle. ``mode="merge"``: the bundle applies on top;
+    keys absent from a tool entry preserve stored values (#139 semantics).
+
+    Backend topology (``enabled``, transport, auth) is deliberately NOT
+    imported — this is a settings bundle, not a config replacement. Overrides
+    for a currently-disabled backend import fine (stored, effective on enable).
+    """
+    if bundle.get("kind") not in (None, EXPORT_KIND):
+        return [], [f"not a settings bundle (kind={bundle.get('kind')!r})"]
+    if mode not in ("merge", "replace"):
+        return [], [f"unknown mode {mode!r} (use merge or replace)"]
+    errors: list[str] = []
+    affected: list[str] = []
+    for name, entry in (bundle.get("backends") or {}).items():
+        b = next((x for x in cfg.backends if x.name == name), None)
+        if b is None:
+            errors.append(f"{name}: backend not configured on this gateway")
+            continue
+        affected.append(name)
+        if mode == "replace":
+            b.tools = []
+            b.instructions = None
+            b.display_name = None
+            b.always_load = False
+        if "display_name" in entry:
+            b.display_name = entry["display_name"] or None
+        if "always_load" in entry:
+            b.always_load = bool(entry["always_load"])
+        if "instructions" in entry:
+            try:
+                set_instructions(cfg, name, entry["instructions"])
+            except cl.ConfigError as exc:
+                errors.append(f"{name}: instructions: {exc}")
+        known = {t["original"] for t in (load_defaults(name) or {}).get("tools", [])}
+        for original, td in (entry.get("tools") or {}).items():
+            if known and original not in known:
+                errors.append(f"{name}/{original}: tool unknown to this backend")
+                continue
+            try:
+                apply_tool_override(
+                    cfg, name, {"tool_original": original, "override": dict(td)}
+                )
+            except (cl.ConfigError, KeyError) as exc:
+                errors.append(f"{name}/{original}: {exc}")
+    return affected, errors
+
+
+# ---------------------------------------------------------------------------
 # Hot reload (text) and restart (backend topology)
 # ---------------------------------------------------------------------------
 
@@ -812,6 +925,31 @@ def register(
             hot_reload(registry, holders, cfg, backend, log)
         return JSONResponse({"ok": True})
 
+    async def get_export(request: Request):
+        """One-call settings bundle (#136): every stored override + instruction,
+        JSON, zero loss on re-import. ?full=true adds captured defaults."""
+        full = request.query_params.get("full") in ("true", "1")
+        return JSONResponse(export_settings(_load(), full=full))
+
+    async def post_import(request: Request):
+        """Atomic settings import (#136): validate the whole bundle against a
+        fresh cfg; persist and hot-reload only if EVERY item passes."""
+        payload = await request.json()
+        bundle = payload.get("settings") or payload
+        mode = payload.get("mode", "merge")
+        cfg = _load()
+        affected, errors = import_settings(cfg, bundle, mode)
+        if errors:
+            return JSONResponse(
+                {"ok": False, "errors": errors, "applied": False}, status_code=400
+            )
+        backup_config(config_path)
+        cl.save(cfg, config_path)
+        for name in affected:
+            if name in registry:  # disabled backends: stored, effective on enable
+                hot_reload(registry, holders, cfg, name, log)
+        return JSONResponse({"ok": True, "backends": affected, "mode": mode})
+
     async def pin_backend(request: Request):
         """Toggle per-backend always_load (pin all its tools upfront). Hot-reload —
         it only adds `_meta`, no connection change."""
@@ -1040,6 +1178,12 @@ def register(
             ),
             Route(
                 "/admin/api/reset", _needs_json(_locked(reset_tool)), methods=["POST"]
+            ),
+            Route("/admin/api/export", get_export, methods=["GET"]),
+            Route(
+                "/admin/api/import",
+                _needs_json(_locked(post_import)),
+                methods=["POST"],
             ),
             Route(
                 "/admin/api/instructions",

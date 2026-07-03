@@ -1,7 +1,13 @@
 # 1. No GitHub Actions CI
 
-Status: Accepted (2026-06-28) — issue
+Status: Accepted (2026-06-28), amended by
+[ADR-0003](0003-check-only-ci.md) (2026-07-03) — issue
 [#24](https://github.com/voidfreud/mcp-gateway/issues/24)
+
+> **Amendment (ADR-0003):** the "no CI" decision below is narrowed to the
+> LIVE gate (`just verify`) only. The pure-logic gate (`just check`) runs in
+> GitHub Actions on every PR since #98 — it needs no backends and no launchd,
+> so the original reasoning never applied to it.
 
 ## Context
 
