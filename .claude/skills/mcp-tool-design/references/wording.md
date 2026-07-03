@@ -26,7 +26,10 @@ The only per-tool text a cold agent sees before searching — the name alone mus
 - `verb_noun`, action first: `search_web`, `fetch_url`, `resolve_library_id`. Nouns-only and vague verbs (`process`, `get_data`) route nothing.
 - Use the words a task would use — a name is also a search key. `search_slack_messages` surfaces for more queries than `query_slack`.
 - Distinct from siblings at a glance: two near-identical names are a top selection-error source. `[A-Za-z0-9_-]`, ≤64 chars, no version suffixes.
-- Renaming is cheap for us (the gateway rebroadcasts) but treat a settled name as an interface — saved workflows and habits reference it.
+- **Grade the full callable, not the bare name.** The cold agent's deferred list shows `mcp__<server>__<tool>` — judge that whole line. A server-echo prefix inside the tool name (`mcp__gateway-Tavily__tavily_search`) is redundant bytes; strip it.
+- **Name-only test.** Cover all descriptions and read only the deferred list: for each tool, are the action AND the domain guessable from that one line alone? `query-docs` fails (docs of what?); `ask_repo_questions` passes. Server instructions rescuing an unguessable name is a defect of the name, not a pass.
+- **Carry the distinguisher into the name** when siblings share an intent — the boundary must survive name-only visibility. `tavily_search` vs `search_web` read as twins; `search_web_filtered` vs `search_web` do not.
+- Renaming is cheap for us (the gateway rebroadcasts) but treat a settled name as an interface — saved workflows and habits reference it. This clause protects names with actual usage and habits only; a never-used tool has no interface to preserve, so rename it freely.
 
 ## Tool descriptions
 
