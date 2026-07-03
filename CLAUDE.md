@@ -31,7 +31,11 @@ backend endpoint (bare names, instructions <=2KB) + a real passthrough call.
   the runtime live under `~/.local/state/mcp-gateway/`.
 - `.claude/skills/mcp-tool-design/` — the rubric for writing/grading the backend
   tool-text overrides that are this project's core work. Reach for it when editing
-  any tool name / description / parameter for a backend.
+  any tool name / description / parameter for a backend. **Keep it in sync:** any
+  app change that alters how overrides are authored, applied, or verified (schema,
+  transform mechanics, admin flow, capture/defaults) must update this skill in the
+  same change — the skill may live detached from this repo, so it can't rely on the
+  code to stay correct.
 - `corpus/` — the research the skill was distilled from (MCP spec, Anthropic /
   AWS / Google guidance, articles, third-party reference skills). Read-only source
   material; excluded from the GitNexus index via `.gitnexusignore`.
@@ -102,6 +106,13 @@ backend endpoint (bare names, instructions <=2KB) + a real passthrough call.
   Broadcast names are validated `[A-Za-z0-9_-]`.
 - `config_loader.save` is atomic + fsync (durable across crash); the UI debounces
   ~550ms and flushes on blur/page-close (`keepalive`) so no edit is lost.
+- **Override text edits need a client reconnect to show up.** A name/description/
+  param edit hot-reloads on the server instantly, but an already-running Claude
+  Code session keeps the old broadcast until you restart the session or manually
+  reconnect the MCP server (`/mcp`). Distinct from topology/registration changes
+  (which also need the launchd restart). Reconnect before verifying an override,
+  or you grade stale text. (Also documented in the mcp-tool-design skill, which
+  may live detached from this repo.)
 
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence

@@ -126,3 +126,5 @@ Read each tool as the model sees it (name + description + schema only) and flag:
 - [ ] `action`-dispatch god-tool; auth/signature exposed as params; PII unmasked or units inconsistent in responses
 
 Then verify behavior with a real LLM in the loop (selection, arg construction, error recovery) — schema-clean is not the same as usable. Iteration and eval guidance: [references/reference.md](references/reference.md).
+
+> **Seeing your edits (reconnect caveat).** Editing a name/description/parameter changes the server text instantly, but a client that is already connected keeps the *old* broadcast until its session restarts or the MCP server is manually reconnected. In Claude Code that means a session restart or a `/mcp` reconnect. Reconnect first, or you will grade stale text and think an edit didn't land.
