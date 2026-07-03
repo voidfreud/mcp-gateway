@@ -29,13 +29,16 @@ backend endpoint (bare names, instructions <=2KB) + a real passthrough call.
 - `config.default.toml` — committed runnable seed (both backends passthrough).
   `config.example.toml` — full annotated schema reference. Defaults/backups for
   the runtime live under `~/.local/state/mcp-gateway/`.
-- `.claude/skills/mcp-tool-design/` — the rubric for writing/grading the backend
-  tool-text overrides that are this project's core work. Reach for it when editing
-  any tool name / description / parameter for a backend. **Keep it in sync:** any
-  app change that alters how overrides are authored, applied, or verified (schema,
-  transform mechanics, admin flow, capture/defaults) must update this skill in the
-  same change — the skill may live detached from this repo, so it can't rely on the
-  code to stay correct.
+- `.claude/skills/mcp-tool-design/` — the tuning pipeline for the backend
+  broadcast text that is this project's core work: research each tool (cached in
+  the skill's `research/`) → grade as a cold agent → differentiate overlapping
+  tools across backends → draft → apply → verify live. Reach for it when editing
+  any instructions / tool name / description / parameter for a backend.
+  **Keep it in sync:** any app change that alters how overrides are authored,
+  applied, or verified (schema, transform mechanics, admin flow, capture/defaults)
+  must update the skill's `references/levers.md` in the same change — its
+  `scripts/surface.py` also imports `config_loader`/`admin`, so lever-schema
+  changes can break it.
 - `corpus/` — the research the skill was distilled from (MCP spec, Anthropic /
   AWS / Google guidance, articles, third-party reference skills). Read-only source
   material; excluded from the GitNexus index via `.gitnexusignore`.
@@ -111,8 +114,8 @@ backend endpoint (bare names, instructions <=2KB) + a real passthrough call.
   Code session keeps the old broadcast until you restart the session or manually
   reconnect the MCP server (`/mcp`). Distinct from topology/registration changes
   (which also need the launchd restart). Reconnect before verifying an override,
-  or you grade stale text. (Also documented in the mcp-tool-design skill, which
-  may live detached from this repo.)
+  or you grade stale text. (Also step 2 of the verify loop in the mcp-tool-design
+  skill's `references/levers.md`.)
 
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence

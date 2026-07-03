@@ -29,6 +29,11 @@ dev = [
     "pytest>=9.1.1",
 ]
 
+[tool.ruff]
+# corpus/ is read-only third-party source material (never reformat upstream
+# code); our own code — including .claude/ skill scripts — stays in scope.
+extend-exclude = ["corpus"]
+
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
