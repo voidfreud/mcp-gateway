@@ -1,5 +1,7 @@
 # mcp-gateway
 
+[![check](https://github.com/voidfreud/mcp-gateway/actions/workflows/check.yml/badge.svg)](https://github.com/voidfreud/mcp-gateway/actions/workflows/check.yml)
+
 A thin local MCP proxy that sits between Claude Code and one or more backend MCP
 servers and **rewrites every piece of text a backend broadcasts** — tool name,
 title, description, and every parameter name + description — while forwarding the
@@ -28,7 +30,11 @@ server reads to the model like a well-designed one, without forking it. It's
 tedious hand-work, but it turns otherwise-useless MCPs into ones that work. The
 [`mcp-tool-design`](.claude/skills/mcp-tool-design/SKILL.md) skill in this repo
 is the rubric we grade those overrides against; [`corpus/`](corpus/) holds the
-research it was distilled from.
+research it was distilled from. As of 2026-07-03 every connected backend's
+surface has been tuned through that pipeline
+([#121](https://github.com/voidfreud/mcp-gateway/issues/121)), and a fresh-agent
+cold-eval (routing intents from the turn-0 surface alone) scores the field
+clean.
 
 ## What it does
 
@@ -117,9 +123,12 @@ across all projects; reversible with `claude mcp remove gateway-<backend>`.
 A built-in web admin is served by the same daemon at **`http://127.0.0.1:9100/admin`**
 (loopback only). It shows every backend in a left pane, an **Import MCP** button,
 and per-tool editing of **everything Claude Code sees** — broadcast name, title,
-description, each parameter's name + description, hide a param, disable a tool.
-The backend's *real, provider-facing* names (the original tool + parameter names
-the gateway forwards to) are shown **read-only** — those can't change.
+description, each parameter's description, disable a tool. Parameter *names* are
+shown read-only and carry no per-param hide button in the UI
+([#128](https://github.com/voidfreud/mcp-gateway/issues/128); the `hide`/rename
+levers still exist in config and pass through untouched). The backend's *real,
+provider-facing* names (the original tool + parameter names the gateway forwards
+to) are likewise **read-only** — those can't change.
 
 Every editable field is **prefilled with its effective value** (your override if
 set, else the backend default), so it's never blank — clear it and it falls back
@@ -155,6 +164,19 @@ hot-reload in-process and are read fresh on each connect.
 **Durability.** Saves write `config.toml` atomically with `fsync` (survives an
 unexpected crash/power-loss, never a partial file), debounced ~550 ms to avoid
 overload, and flushed on field-blur and on page-close — so no edit is lost.
+
+**Settings export / import
+([#136](https://github.com/voidfreud/mcp-gateway/issues/136)).** The complete
+stored settings — per-backend instructions, every tool/param override, pins,
+display names — round-trip as one JSON bundle: `GET /admin/api/export`
+(`?full=true` adds captured defaults) and `POST /admin/api/import`
+(`{"mode": "merge"|"replace", "settings": …}` — validated like single saves,
+per-item errors, all-or-nothing, hot-reloads affected backends; backend
+topology is never imported). The ⚙ Gateway panel's **Save/Load all fields**
+buttons are the browser-side equivalent. Scripted `PUT /admin/api/override`
+uses **merge semantics** ([#139](https://github.com/voidfreud/mcp-gateway/issues/139)):
+a key absent from the payload preserves the stored override instead of
+resetting it — a partial scripted write can't clobber a UI toggle.
 
 Edits **auto-save** (no buttons) and apply with no reload latency:
 
@@ -253,6 +275,11 @@ tool name. On startup the gateway lists each backend's live tools and logs an
   `uv run verify_rename.py http://127.0.0.1:9100` checks every backend endpoint
   (bare tool names exposed, instructions within the 2KB budget) and makes a real
   passthrough call.
+- **CI:** GitHub Actions runs the pure-logic gate (`just check`: ruff + format
+  + pytest/Hypothesis + import smoke) on every PR and push to main
+  ([ADR-0003](docs/decisions/0003-check-only-ci.md)). The live gate
+  (`just verify`) stays local by design — it needs the running daemon and real
+  backends ([ADR-0001](docs/decisions/0001-no-github-ci.md), as amended).
 
 ### A benign log line
 
