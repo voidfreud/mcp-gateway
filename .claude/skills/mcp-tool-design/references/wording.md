@@ -30,6 +30,7 @@ The only per-tool text a cold agent sees before searching — the name alone mus
 - **Name-only test.** Cover all descriptions and read only the deferred list: for each tool, are the action AND the domain guessable from that one line alone? `query-docs` fails (docs of what?); `ask_repo_questions` passes. Server instructions rescuing an unguessable name is a defect of the name, not a pass.
 - **Carry the distinguisher into the name** when siblings share an intent — the boundary must survive name-only visibility. `tavily_search` vs `search_web` read as twins; `search_web_filtered` vs `search_web` do not.
 - Renaming is cheap for us (the gateway rebroadcasts) but treat a settled name as an interface — saved workflows and habits reference it. This clause protects names with actual usage and habits only; a never-used tool has no interface to preserve, so rename it freely.
+- **`title` is not a tuning lever.** Claude Code's model-facing surface (deferred list, ToolSearch results, loaded schemas) carries name + description only — no title anywhere (verified empirically 2026-07-03; the docs never mention displaying it either). It's display metadata for human UIs at best. Never spend tuning effort on it; if a backend ships one, leave it.
 
 ## Tool descriptions
 

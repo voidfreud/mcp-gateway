@@ -1,0 +1,19 @@
+name: check
+
+# ADR-0003: check-only CI. Runs the pure-logic gate (`just check`) on PRs and
+# main — zero backends, zero launchd, no secrets. The live gate (`just verify`)
+# stays local by design (ADR-0001, as amended).
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - uses: extractions/setup-just@v2
+      - run: uv sync
+      - run: just check
