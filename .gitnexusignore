@@ -1,0 +1,3 @@
+# Reference corpus — research/source material, not app code.
+# Keep it out of the code-intelligence index so queries/impact stay app-only.
+corpus/
