@@ -27,7 +27,8 @@ names, `instructions`, parameter docs, and eager-load pinning — until a sloppy
 server reads to the model like a well-designed one, without forking it. It's
 tedious hand-work, but it turns otherwise-useless MCPs into ones that work. The
 [`mcp-tool-design`](.claude/skills/mcp-tool-design/SKILL.md) skill in this repo
-is the rubric we grade those overrides against.
+is the rubric we grade those overrides against; [`corpus/`](corpus/) holds the
+research it was distilled from.
 
 ## What it does
 

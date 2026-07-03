@@ -29,6 +29,12 @@ backend endpoint (bare names, instructions <=2KB) + a real passthrough call.
 - `config.default.toml` — committed runnable seed (both backends passthrough).
   `config.example.toml` — full annotated schema reference. Defaults/backups for
   the runtime live under `~/.local/state/mcp-gateway/`.
+- `.claude/skills/mcp-tool-design/` — the rubric for writing/grading the backend
+  tool-text overrides that are this project's core work. Reach for it when editing
+  any tool name / description / parameter for a backend.
+- `corpus/` — the research the skill was distilled from (MCP spec, Anthropic /
+  AWS / Google guidance, articles, third-party reference skills). Read-only source
+  material; excluded from the GitNexus index via `.gitnexusignore`.
 
 ## Conventions
 - `config.toml` holds only `${ENV}` refs + public endpoints; secret VALUES come
