@@ -267,6 +267,61 @@ def test_apply_disable_is_an_override(defaults_dir):
     assert cfg.backends[0].tools[0].enabled is False
 
 
+def test_apply_partial_put_preserves_absent_fields(defaults_dir):
+    # #139: the incident shape — UI disables a tool, a scripted PUT for the same
+    # tool carries only {description}; enabled must survive, not reset to True.
+    _write_defaults(defaults_dir, "b", "t", desc="orig desc")
+    cfg = _single_cfg()
+    admin.apply_tool_override(
+        cfg, "b", {"tool_original": "t", "override": {"enabled": False, "params": []}}
+    )
+    admin.apply_tool_override(
+        cfg, "b", {"tool_original": "t", "override": {"description": "new"}}
+    )
+    ov = cfg.backends[0].tools[0]
+    assert ov.enabled is False and ov.description == "new"
+
+
+def test_apply_partial_put_preserves_params_and_pin(defaults_dir):
+    # #139 merge semantics: absent params/always_load keys keep the stored values.
+    _write_defaults(
+        defaults_dir, "b", "t", params=[{"original": "p", "description": "d"}]
+    )
+    cfg = _single_cfg()
+    admin.apply_tool_override(
+        cfg,
+        "b",
+        {
+            "tool_original": "t",
+            "override": {
+                "always_load": True,
+                "params": [{"original": "p", "description": "better"}],
+            },
+        },
+    )
+    admin.apply_tool_override(
+        cfg, "b", {"tool_original": "t", "override": {"name": "renamed"}}
+    )
+    ov = cfg.backends[0].tools[0]
+    assert ov.name == "renamed"
+    assert ov.always_load is True
+    assert [p.description for p in ov.params] == ["better"]
+
+
+def test_apply_explicit_default_still_resets(defaults_dir):
+    # Merge is for ABSENT keys only: sending the default value explicitly
+    # still clears the stored override field.
+    _write_defaults(defaults_dir, "b", "t", desc="orig desc")
+    cfg = _single_cfg()
+    admin.apply_tool_override(
+        cfg, "b", {"tool_original": "t", "override": {"description": "new"}}
+    )
+    admin.apply_tool_override(
+        cfg, "b", {"tool_original": "t", "override": {"description": "orig desc"}}
+    )
+    assert cfg.backends[0].tools == []  # back to minimal config
+
+
 def test_apply_rejects_invalid_name(defaults_dir):
     _write_defaults(defaults_dir, "b", "t")
     cfg = _single_cfg()

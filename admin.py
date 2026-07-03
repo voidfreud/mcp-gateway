@@ -471,16 +471,26 @@ def _override_vs_default(value, default) -> str | None:
 
 
 def apply_tool_override(cfg: GatewayConfig, backend: str, payload: dict) -> None:
-    """Replace one tool's override from a UI payload, diffing against defaults.
+    """Upsert one tool's override from a UI payload, diffing against defaults.
 
     Every editable field arrives prefilled with its effective value; we only
     store a value that actually differs from the backend's default.
+
+    Merge semantics (#139): a key ABSENT from the payload preserves the stored
+    override's value instead of resetting it to the default — so a scripted
+    partial PUT (e.g. description only) can't silently resurrect a tool the UI
+    disabled. The UI always sends every field, so it is unaffected; to reset a
+    field explicitly, send its default value.
     """
     b = next((x for x in cfg.backends if x.name == backend), None)
     if b is None:
         raise cl.ConfigError(f"unknown backend {backend!r}")
     original = payload["tool_original"]
     ov = payload.get("override", {})
+    prev = next((t for t in b.tools if t.original == original), None)
+
+    def _field(key, computed, kept):
+        return computed() if key in ov else kept
 
     # Defaults for this tool (original broadcast captured at introspection).
     defaults = load_defaults(backend) or {}
@@ -490,9 +500,21 @@ def apply_tool_override(cfg: GatewayConfig, backend: str, payload: dict) -> None
     default_name = original
     dparams = {p["original"]: p for p in dtool.get("params", [])}
 
-    name = _override_vs_default(ov.get("name"), default_name)
-    title = _override_vs_default(ov.get("title"), dtool.get("title"))
-    description = _override_vs_default(ov.get("description"), dtool.get("description"))
+    name = _field(
+        "name",
+        lambda: _override_vs_default(ov.get("name"), default_name),
+        prev.name if prev else None,
+    )
+    title = _field(
+        "title",
+        lambda: _override_vs_default(ov.get("title"), dtool.get("title")),
+        prev.title if prev else None,
+    )
+    description = _field(
+        "description",
+        lambda: _override_vs_default(ov.get("description"), dtool.get("description")),
+        prev.description if prev else None,
+    )
     _validate_name(name, "tool name")
 
     params = []
@@ -517,8 +539,16 @@ def apply_tool_override(cfg: GatewayConfig, backend: str, payload: dict) -> None
                 ParamOverride(original=po, name=pname, description=pdesc, hide=hide)
             )
 
-    enabled = bool(ov.get("enabled", True))
-    always_load = bool(ov.get("always_load", False))
+    if "params" not in ov and prev is not None:
+        params = prev.params
+    enabled = _field(
+        "enabled", lambda: bool(ov["enabled"]), prev.enabled if prev else True
+    )
+    always_load = _field(
+        "always_load",
+        lambda: bool(ov["always_load"]),
+        prev.always_load if prev else False,
+    )
     new = ToolOverride(
         original=original,
         name=name,
