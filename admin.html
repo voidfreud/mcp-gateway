@@ -5,122 +5,252 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>mcp-gateway · admin</title>
 <style>
+  /* Design tokens — #122 redesign (design_handoff_admin_redesign) */
   :root {
-    --bg: #0f1115; --panel: #161a21; --panel2: #1c222b; --line: #2a313c;
-    --fg: #e6e9ef; --mut: #8b95a5; --accent: #5aa9ff; --ok: #54d18c;
-    --warn: #e0a14a; --ro: #232a34;
+    --bg:  #07090d;   /* page background */
+    --s0:  #0b0e14;   /* deepest surface (param rows, inputs) */
+    --s1:  #0f1318;   /* sidebar, cards, header */
+    --s2:  #141b24;   /* input backgrounds */
+    --s3:  #1b2432;   /* deferred bar fill */
+    --b:   rgba(255,255,255,.07);
+    --b2:  rgba(255,255,255,.13);
+    --t:   #c3cbd9;   /* primary text */
+    --tm:  #546070;   /* muted text */
+    --td:  #36455a;   /* dim text / placeholders */
+    --ac:  #4a93ff;   /* accent blue (overrides, selection) */
+    --gn:  #48cc88;   /* green (connected, broadcast on) */
+    --am:  #e7a53a;   /* amber (pinned, budget warning) */
+    --rd:  #ff6767;   /* red (offline, danger, disabled) */
+    --mono: ui-monospace,'Cascadia Code',Menlo,monospace;
   }
   * { box-sizing: border-box; }
-  body { margin: 0; font: 14px/1.45 -apple-system, system-ui, sans-serif;
-         background: var(--bg); color: var(--fg); height: 100vh; display: flex; flex-direction: column; }
-  header { display: flex; align-items: center; gap: 12px; padding: 12px 18px;
-           border-bottom: 1px solid var(--line); background: var(--panel); }
-  header h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: .2px; }
-  header .sub { color: var(--mut); font-size: 12px; }
+  @keyframes glow { 0%,100%{opacity:1} 50%{opacity:.45} }
+  body { margin: 0; font: 13px/1.45 system-ui, -apple-system, sans-serif;
+         background: var(--bg); color: var(--t); height: 100vh; display: flex; flex-direction: column; }
+
+  /* Header bar — 46px */
+  header { display: flex; align-items: center; gap: 8px; height: 46px; padding: 0 16px;
+           border-bottom: 1px solid var(--b); background: var(--s1); flex-shrink: 0; }
+  header .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--gn);
+                box-shadow: 0 0 8px rgba(72,204,136,.5); animation: glow 3s infinite; }
+  header h1 { font: 600 13px system-ui; letter-spacing: -0.01em; color: var(--t); margin: 0; }
+  header .sub { font: 12px system-ui; color: var(--td); }
   header .spacer { flex: 1; }
-  button { font: inherit; cursor: pointer; border: 1px solid var(--line);
-           background: var(--panel2); color: var(--fg); border-radius: 7px; padding: 6px 12px; }
-  button:hover { border-color: var(--accent); }
-  button.primary { background: var(--accent); border-color: var(--accent); color: #06203f; font-weight: 600; }
-  button.ghost { background: transparent; }
-  button.danger:hover { border-color: #e06a6a; color: #ff9b9b; }
-  .wrap { flex: 1; display: flex; min-height: 0; }
-  /* left pane */
-  aside { width: 260px; border-right: 1px solid var(--line); background: var(--panel);
-          overflow-y: auto; flex-shrink: 0; }
-  .b-item { padding: 11px 16px; border-bottom: 1px solid var(--line); cursor: pointer; }
-  .b-item:hover { background: var(--panel2); }
-  .b-item.sel { background: var(--panel2); box-shadow: inset 3px 0 0 var(--accent); }
-  .b-item .nm { font-weight: 600; }
-  .b-item .meta { color: var(--mut); font-size: 12px; margin-top: 2px; display: flex; gap: 8px; }
-  /* sidebar row: name + per-row controls (enable toggle #38, delete ✕ #39) */
-  .b-item .b-row { display: flex; align-items: center; gap: 8px; }
-  .b-item .b-row .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .b-item .row-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
-  .b-item .row-actions .tgl { cursor: pointer; margin: 0; }
-  .b-item .row-actions .x { border: none; background: none; color: var(--mut); padding: 0 3px;
-                            font-size: 14px; line-height: 1; opacity: 0; transition: opacity .12s; }
-  .b-item:hover .row-actions .x, .b-item.sel .row-actions .x { opacity: 1; }
-  .b-item .row-actions .x:hover { color: #ff9b9b; }
-  .b-item.off { opacity: .5; }                 /* disabled backend dimmed (#38) */
-  .badge { font-size: 10.5px; text-transform: uppercase; letter-spacing: .4px;
-           padding: 1px 6px; border-radius: 4px; border: 1px solid var(--line); color: var(--mut); }
-  /* detail */
-  main { flex: 1; overflow-y: auto; padding: 18px 22px; }
-  .empty { color: var(--mut); margin-top: 40px; text-align: center; }
-  .b-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 4px; }
-  .b-head h2 { margin: 0; font-size: 17px; }
-  .b-head code { color: var(--mut); font-size: 12px; }
-  .b-actions { margin: 10px 0 18px; display: flex; gap: 8px; }
-  .tool { border: 1px solid var(--line); border-radius: 10px; margin-bottom: 14px; background: var(--panel); }
-  .tool.disabled { opacity: .55; }
-  .t-head { display: flex; align-items: center; gap: 10px; padding: 11px 14px; border-bottom: 1px solid var(--line); }
-  .t-head .orig { font-family: ui-monospace, Menlo, monospace; color: var(--mut); font-size: 12px; }
-  .t-head .arrow { color: var(--mut); }
-  .t-head .newname { font-family: ui-monospace, Menlo, monospace; color: var(--accent); font-weight: 600; }
-  .t-head .spacer { flex: 1; }
-  .t-body { padding: 12px 14px; display: none; }
-  .tool.open .t-body { display: block; }
-  .t-head { cursor: pointer; }
-  label { display: block; font-size: 11.5px; text-transform: uppercase; letter-spacing: .4px;
-          color: var(--mut); margin: 10px 0 4px; }
-  input[type=text], textarea {
-    width: 100%; background: var(--panel2); border: 1px solid var(--line); color: var(--fg);
-    border-radius: 7px; padding: 7px 9px; font: inherit; }
-  input[readonly] { background: var(--ro); color: var(--mut); }
-  input:focus, textarea:focus { outline: none; border-color: var(--accent); }
-  /* min-height is the floor; autoGrow() (JS) sizes height to content up to a
-     ~40vh cap, then lets it scroll. overflow starts hidden so a short box shows
-     no scrollbar before JS runs. */
-  textarea { resize: vertical; min-height: 114px; overflow-y: hidden; }
-  .hint { font-size: 11.5px; color: var(--mut); margin-top: 3px; }
-  /* live byte-count for capped fields ([data-cap]): bottom-right, gray; red at/over cap */
-  .cap-wrap { position: relative; }
-  .cap-wrap textarea { padding-bottom: 20px; }
-  .cap-count { position: absolute; right: 9px; bottom: 6px; pointer-events: none;
-               font: 11px/1 ui-monospace, Menlo, monospace; color: var(--mut); opacity: .55; }
-  .cap-count.over { color: #ff9b9b; opacity: 1; }
-  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-  .params { margin-top: 14px; border-top: 1px dashed var(--line); padding-top: 10px; }
-  .params > .lbl { font-size: 11.5px; text-transform: uppercase; letter-spacing: .4px; color: var(--mut); }
-  .param { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin-top: 8px; background: var(--panel2); }
-  .param .p-top { display: flex; align-items: center; gap: 10px; }
-  .param .p-top .orig { font-family: ui-monospace, Menlo, monospace; color: var(--mut); font-size: 12px; }
-  .param .p-top .orig .req { color: var(--warn); font-weight: 700; cursor: help; }
-  .chk { display: flex; align-items: center; gap: 6px; color: var(--mut); font-size: 12px; user-select: none; }
-  .saved { font-size: 12px; color: var(--ok); opacity: 0; transition: opacity .2s; }
+  .saved { font: 11px system-ui; color: rgba(72,204,136,.55); opacity: 0; transition: opacity .2s; }
   .saved.show { opacity: 1; }
-  /* instructions */
-  .instr { border: 1px solid var(--line); border-radius: 10px; margin-bottom: 18px;
-           background: var(--panel); padding: 12px 14px; }
-  .instr h3 { margin: 0 0 2px; font-size: 14px; }
-  .instr .si { color: var(--mut); font-size: 12px; font-family: ui-monospace, Menlo, monospace; }
-  .instr textarea { min-height: 270px; font-family: ui-monospace, Menlo, monospace; font-size: 12.5px; }
-  .preview { background: var(--ro); border: 1px solid var(--line); border-radius: 7px;
-             padding: 9px 11px; white-space: pre-wrap; color: var(--mut); font-size: 12px;
-             font-family: ui-monospace, Menlo, monospace; max-height: 240px; overflow-y: auto; }
-  .b-item.gw .nm { color: var(--accent); }
-  /* modal */
-  .modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,.55); display: none; align-items: center; justify-content: center; }
+
+  /* Buttons */
+  button, .btn { font: 12px/1 system-ui; background: transparent;
+    border: 1px solid var(--b2); color: var(--tm);
+    border-radius: 7px; padding: 5px 11px; cursor: pointer; }
+  button:hover, .btn:hover { border-color: var(--ac); color: var(--t); }
+  .btn-pri { background: var(--ac); border-color: var(--ac); color: #00193a; font-weight: 600; padding: 6px 14px; }
+  .btn-pri:hover { color: #00193a; }
+  .btn-danger { color: var(--rd); border-color: rgba(255,103,103,.22); }
+  .btn-danger:hover { border-color: var(--rd); color: var(--rd); }
+
+  /* Toggle switches — real checkboxes styled as the design's pills, so all
+     existing change/gather wiring keeps working untouched. */
+  input[type=checkbox].tgl { appearance: none; -webkit-appearance: none; margin: 0;
+    width: 28px; height: 16px; border-radius: 99px; position: relative; cursor: pointer;
+    background: var(--s0); border: 1px solid var(--b); flex-shrink: 0; }
+  input[type=checkbox].tgl::after { content: ''; position: absolute; top: 2px; left: 2px;
+    width: 10px; height: 10px; border-radius: 50%; background: var(--td); transition: all .12s; }
+  input[type=checkbox].tgl:checked { background: rgba(72,204,136,.14); border-color: rgba(72,204,136,.3); }
+  input[type=checkbox].tgl:checked::after { left: auto; right: 2px; background: var(--gn); }
+  /* off-red variant (backend offline/disabled in sidebar) */
+  input[type=checkbox].tgl.tgl-red:not(:checked) { background: rgba(255,103,103,.1); border-color: rgba(255,103,103,.28); }
+  input[type=checkbox].tgl.tgl-red:not(:checked)::after { background: var(--rd); }
+
+  /* Chip */
+  .chip { font: 500 9px var(--mono); padding: 1px 5px; border-radius: 3px;
+          border: 1px solid var(--b); color: var(--tm); flex-shrink: 0; }
+
+  /* Layout */
+  .wrap { flex: 1; display: flex; min-height: 0; }
+  aside { width: 248px; background: var(--s1); border-right: 1px solid var(--b);
+          overflow-y: auto; flex-shrink: 0; }
+  main { flex: 1; overflow-y: auto; padding: 16px 20px; }
+  .empty { color: var(--td); margin-top: 40px; text-align: center; }
+
+  /* Sidebar rows (screen 2a sidebar — the one true sidebar, both screens) */
+  .b-item { padding: 10px 16px; border-bottom: 1px solid var(--b); cursor: pointer; }
+  .b-item:hover { background: rgba(255,255,255,.02); }
+  .b-item.sel-bg { background: rgba(74,147,255,.06) !important; box-shadow: inset 3px 0 0 var(--ac); }
+  .b-item.off { opacity: .65; }
+  .b-item .gw-nm { font: 12px system-ui; color: var(--tm); }
+  .b-item .gw-sub { font: 11px system-ui; color: var(--td); margin-top: 1px; }
+  .b-item .b-row { display: flex; align-items: center; gap: 8px; }
+  .b-item .b-row .nm { flex: 1; white-space: nowrap;
+                       font: 600 13px system-ui; color: var(--t); }
+  .b-item .b-sub { display: flex; justify-content: space-between; padding-left: 36px; margin-top: 5px; }
+  .b-item .b-sub .cnt { font: 11px system-ui; color: var(--tm); }
+  .b-item .b-sub .ovr { font: 11px system-ui; color: var(--ac); }
+  .b-item .b-sub .warn { font: 11px system-ui; color: var(--am); }
+
+  /* Detail — backend header */
+  .b-head { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+  .b-head h2 { font: 600 15px system-ui; color: var(--t); margin: 0; }
+  .b-head .url { font: 10.5px var(--mono); color: var(--td); }
+  .b-head .spacer { flex: 1; }
+  .b-sub-line { font: 11px system-ui; color: var(--td); margin-bottom: 14px; }
+  .b-sub-line code { background: var(--s2); padding: 1px 5px; border-radius: 3px;
+                     color: var(--tm); font: 10.5px var(--mono); }
+
+  /* Controls bar */
+  .ctrl-bar { display: flex; align-items: center; gap: 12px; margin-bottom: 14px;
+              padding: 9px 13px; background: var(--s1); border: 1px solid var(--b); border-radius: 8px; }
+  .ctrl-bar .lbl { font: 12px system-ui; color: var(--tm); display: flex; align-items: center; gap: 7px; cursor: pointer; }
+  .ctrl-bar .div { width: 1px; height: 14px; background: var(--b2); }
+  .ctrl-bar .spacer { flex: 1; }
+
+  /* Cards (instructions, sections) */
+  .card { border: 1px solid var(--b); border-radius: 10px; background: var(--s1);
+          padding: 13px 14px; margin-bottom: 14px; }
+  .card .c-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 8px; }
+  .card .c-title { font: 600 12.5px system-ui; color: var(--t); }
+  .card .c-meta { font: 11px var(--mono); color: var(--tm); }
+  .card .c-bytes { font: 10px var(--mono); color: var(--gn); margin-left: auto; }
+  .card .c-bytes.over { color: var(--rd); }
+  .si { color: var(--tm); font-size: 11px; }
+  .hint { font-size: 11px; color: var(--td); margin-top: 3px; }
+
+  /* Inputs */
+  label, .flabel { display: block; font: 500 10px system-ui; text-transform: uppercase;
+          letter-spacing: .5px; color: var(--tm); margin: 10px 0 5px; }
+  .flabel .ovd { color: var(--ac); }
+  input[type=text], textarea, select {
+    width: 100%; background: var(--s2); border: 1px solid var(--b); color: var(--t);
+    border-radius: 7px; padding: 7px 9px; font: 12.5px system-ui; }
+  input.mono, textarea.mono { font-family: var(--mono); font-size: 12px; }
+  input:focus, textarea:focus { outline: none; border-color: var(--ac); }
+  input.ov, textarea.ov { border-color: rgba(74,147,255,.35); }
+  input.bad { border-color: var(--rd); outline: 1px solid var(--rd); }
+  textarea { resize: vertical; min-height: 90px; overflow-y: hidden; font-size: 12.5px; color: var(--tm); }
+  .f-instr { font-family: var(--mono); font-size: 12.5px; min-height: 200px; }
+  .cap-wrap { position: relative; }
+  .cap-count { position: absolute; right: 9px; top: -18px; pointer-events: none;
+               font: 10px var(--mono); color: var(--gn); }
+  .cap-count.over { color: var(--rd); }
+
+  /* Tool cards */
+  .tool { border: 1px solid var(--b); border-radius: 10px; background: var(--s1); margin-bottom: 9px; }
+  .tool.ovr { border-color: rgba(74,147,255,.22); }
+  .tool.disabled { opacity: .4; }
+  .tc-h { display: flex; align-items: center; gap: 9px; padding: 11px 14px; cursor: pointer; }
+  .tc-h .orig { font: 11.5px var(--mono); color: var(--tm); }
+  .tc-h .arrow { color: var(--td); }
+  .tc-h .newname { font: 600 11.5px var(--mono); color: var(--t); }
+  .tool.ovr .tc-h .newname { color: var(--ac); }
+  .tc-h .ov-badge { font: 10px system-ui; color: var(--ac); background: rgba(74,147,255,.1);
+                    padding: 1px 6px; border-radius: 3px; }
+  .tc-h .spacer { flex: 1; }
+  .tc-h .chev { font-size: 10px; color: var(--tm); }
+  .pin-btn { font: 11px system-ui; border: 1px solid var(--b2); color: var(--tm);
+             border-radius: 5px; padding: 3px 9px; background: transparent; }
+  .pin-btn.pinned { background: rgba(231,165,58,.08); border-color: rgba(231,165,58,.3); color: var(--am); }
+  .t-body { padding: 14px; display: none; border-top: 1px solid var(--b); }
+  .tool.open .t-body { display: block; }
+  .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+
+  /* Params */
+  .params { border-top: 1px dashed rgba(255,255,255,.06); padding-top: 11px; margin-top: 12px; }
+  .param-row { background: var(--s0); border: 1px solid rgba(255,255,255,.05);
+               border-radius: 8px; padding: 9px 12px; margin-bottom: 7px; }
+  .param-row .p-top { display: flex; align-items: center; gap: 8px; }
+  .param-row .p-nm { font: 11.5px var(--mono); color: var(--tm); }
+  .req-badge { font: 10px system-ui; color: var(--am); background: rgba(231,165,58,.09);
+               padding: 1px 6px; border-radius: 3px; }
+  .param-row textarea { min-height: 54px; padding: 6px 8px; }
+
+  .preview { background: var(--s0); border: 1px solid var(--b); border-radius: 7px;
+             padding: 9px 11px; white-space: pre-wrap; color: var(--tm); font-size: 12px;
+             font-family: var(--mono); max-height: 240px; overflow-y: auto; }
+
+  /* Gateway overview (screen 2b) */
+  .gw-head { display: flex; align-items: center; gap: 10px; padding: 0 0 14px; margin-bottom: 16px;
+             border-bottom: 1px solid var(--b); }
+  .gw-head h2 { font: 600 15px system-ui; color: var(--t); margin: 0; }
+  .run-badge { display: inline-flex; align-items: center; gap: 5px; font: 11px system-ui;
+               color: var(--gn); background: rgba(72,204,136,.09); border: 1px solid rgba(72,204,136,.22);
+               padding: 2px 10px; border-radius: 99px; }
+  .run-badge .dot6 { width: 6px; height: 6px; border-radius: 50%; background: var(--gn); align-self: center; }
+  .gw-head .meta { font: 11px var(--mono); color: var(--td); }
+  .stat-grid { display: grid; grid-template-columns: repeat(4,1fr); gap: 10px; margin-bottom: 18px; }
+  .stat { background: var(--s1); border: 1px solid var(--b); border-radius: 9px; padding: 12px 14px; }
+  .stat .s-lbl { font: 10px system-ui; text-transform: uppercase; letter-spacing: .5px;
+                 color: var(--td); margin-bottom: 6px; }
+  .stat .s-val { font: 600 22px system-ui; color: var(--t); }
+  .stat .s-val.am { color: var(--am); }
+  .stat .s-val .unit { font: 600 12px system-ui; color: var(--tm); margin-left: 2px; }
+  .stat .s-sub { font: 11px system-ui; color: var(--tm); margin-top: 3px; }
+  .stat .s-sub.gn { color: var(--gn); }
+  .stat .s-sub.ac { color: var(--ac); }
+  .stat .s-sub.rd { color: var(--rd); }
+  .ep-grid { display: grid; grid-template-columns: repeat(3,1fr); gap: 10px; margin-bottom: 14px; }
+  .ep { background: var(--s1); border: 1px solid var(--b); border-radius: 9px; padding: 13px 14px; }
+  .ep.near { border-color: rgba(231,165,58,.2); }
+  .ep .e-top { display: flex; align-items: center; gap: 7px; margin-bottom: 4px; }
+  .ep .dot5 { width: 5px; height: 5px; border-radius: 50%; background: var(--gn); flex-shrink: 0; }
+  .ep .dot5.off { background: var(--rd); }
+  .ep .e-nm { font: 600 13px system-ui; color: var(--t); }
+  .ep .e-url { font: 10.5px var(--mono); color: var(--td); display: block; margin-bottom: 9px;
+               overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ep .e-counts { display: flex; justify-content: space-between; font: 11px system-ui;
+                  color: var(--tm); margin-bottom: 8px; }
+  .ep .e-counts .ac { color: var(--ac); } .ep .e-counts .am { color: var(--am); }
+  .ep .e-blabel { font: 10px system-ui; color: var(--td); margin-bottom: 4px; }
+  .ep .e-blabel.near { color: var(--am); }
+  .ep .e-bar { height: 3px; background: var(--s2); border-radius: 99px; overflow: hidden; }
+  .ep .e-bar > div { height: 100%; background: var(--gn); }
+  .ep.near .e-bar > div { background: var(--am); }
+  .fp-row { display: grid; grid-template-columns: 72px 1fr 68px; align-items: center;
+            gap: 10px; margin-bottom: 8px; }
+  .fp-row .fp-nm { font: 11px system-ui; color: var(--tm); overflow: hidden;
+                   text-overflow: ellipsis; white-space: nowrap; }
+  .fp-row .fp-bar { height: 14px; border-radius: 4px; overflow: hidden; display: flex; background: var(--s3); }
+  .fp-row .fp-bar .seg-am { background: var(--am); }
+  .fp-row .fp-bar .seg-ac { background: var(--ac); }
+  .fp-row .fp-bar .seg-nm { background: #3b5a7a; }
+  .fp-row .fp-kb { font: 10.5px var(--mono); color: var(--td); text-align: right; }
+  .legend { display: flex; align-items: center; gap: 12px; margin-left: auto; font: 11px system-ui; color: var(--tm); }
+  .legend .sw { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 4px; }
+  .fp-sum { display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+            margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--b);
+            font: 11px system-ui; color: var(--tm); }
+  .fp-sum .fs b { font: 600 11px var(--mono); color: var(--t); margin-left: 3px; }
+  .fp-sum .fs .sw { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 5px; }
+  .fp-sum .fs-eq { color: var(--td); }
+  .fp-sum .fs.up { color: var(--am); }
+  .fp-sum .fs.up b { color: var(--am); }
+  .fp-sum .fs-div { width: 1px; height: 14px; background: var(--b2); }
+
+  /* Modals + toast */
+  .modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,.6); display: none;
+              align-items: center; justify-content: center; z-index: 10; }
   .modal-bg.show { display: flex; }
-  .modal { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 20px; width: 460px; max-width: 92vw; }
-  .modal h3 { margin: 0 0 14px; }
+  .modal { background: var(--s1); border: 1px solid var(--b2); border-radius: 12px;
+           padding: 20px; width: 460px; max-width: 92vw; }
+  .modal h3 { margin: 0 0 14px; font: 600 14px system-ui; color: var(--t); }
   .modal .foot { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
-  .modal .err { color: #ff9b9b; font-size: 12.5px; min-height: 16px; margin-top: 8px; }
-  input.bad { border-color: #ff9b9b; outline: 1px solid #ff9b9b; }
+  .modal .err { color: var(--rd); font-size: 12px; min-height: 16px; margin-top: 8px; }
+  .modal .chk { display: flex; align-items: center; gap: 6px; color: var(--tm); font-size: 12px;
+                text-transform: none; letter-spacing: 0; }
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
   .toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%);
-           background: var(--panel2); border: 1px solid var(--accent); color: var(--fg);
-           padding: 10px 16px; border-radius: 8px; display: none; }
+           background: var(--s2); border: 1px solid var(--ac); color: var(--t);
+           padding: 10px 16px; border-radius: 8px; display: none; z-index: 11; font-size: 12.5px; }
   .toast.show { display: block; }
 </style>
 </head>
 <body>
 <header>
+  <span class="dot"></span>
   <h1>mcp-gateway</h1>
-  <span class="sub">edit what Claude Code sees · changes save + reload automatically</span>
+  <span class="sub">admin</span>
   <span class="spacer"></span>
-  <span id="saved" class="saved">saved ✓</span>
-  <button class="primary" onclick="openImport()">+ Import MCP</button>
+  <span id="saved" class="saved">Saved</span>
+  <button class="btn-pri" onclick="openImport()">+ Import MCP</button>
 </header>
 <div class="wrap">
   <aside id="list"></aside>
@@ -131,11 +261,10 @@
   <div class="modal">
     <h3>Import an MCP backend</h3>
     <label>Name (id + tool prefix)</label>
-    <input type="text" id="im_name" placeholder="exa"
+    <input type="text" id="im_name" class="mono" placeholder="exa"
            autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" />
     <label>Transport</label>
-    <select id="im_transport" onchange="importTransportChange()"
-            style="width:100%;background:var(--panel2);border:1px solid var(--line);color:var(--fg);border-radius:7px;padding:7px 9px;">
+    <select id="im_transport" onchange="importTransportChange()">
       <option value="http">http</option>
       <option value="streamable-http">streamable-http</option>
       <option value="sse">sse</option>
@@ -143,29 +272,28 @@
     </select>
     <div id="im_http">
       <label>URL</label>
-      <input type="text" id="im_url" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="https://host/mcp" />
+      <input type="text" id="im_url" class="mono" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="https://host/mcp" />
       <div class="row">
-        <div><label>Auth header (optional)</label><input type="text" id="im_ah" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="Authorization" /></div>
-        <div><label>Auth value (optional)</label><input type="text" id="im_av" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="Bearer ${EXA_TOKEN}" /></div>
+        <div><label>Auth header (optional)</label><input type="text" id="im_ah" class="mono" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="Authorization" /></div>
+        <div><label>Auth value (optional)</label><input type="text" id="im_av" class="mono" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="Bearer ${EXA_TOKEN}" /></div>
       </div>
-      <label>Extra headers (optional, one per line: Name: value — ${ENV} ok)</label>
-      <textarea id="im_headers" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" rows="2" placeholder="X-Client-Id: ${MY_ID}"></textarea>
-      <div class="row">
-        <div><label>Headers helper (optional command printing JSON headers)</label>
-          <input type="text" id="im_hh" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="my-sso-tool print-headers" /></div>
-        <div style="align-self:end"><label class="chk"><input type="checkbox" id="im_oauth"> OAuth (browser flow on first connect)</label></div>
-      </div>
+      <label>Extra headers (optional · one per line: Name: value · ${ENV} ok)</label>
+      <textarea id="im_headers" class="mono" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" rows="2" placeholder="X-Client-Id: ${MY_ID}" style="min-height:54px"></textarea>
+      <label>Headers helper (optional · command printing JSON headers)</label>
+      <input type="text" id="im_hh" class="mono" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="my-sso-tool print-headers" />
+      <label class="chk" style="margin-top:14px"><input type="checkbox" class="tgl" id="im_oauth">
+        OAuth <span style="color:var(--td)">· browser flow on first connect</span></label>
     </div>
     <div id="im_stdio" style="display:none">
       <label>Command</label>
-      <input type="text" id="im_cmd" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="/path/to/server  or  uvx" />
+      <input type="text" id="im_cmd" class="mono" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="/path/to/server  or  uvx" />
       <label>Args (space-separated)</label>
-      <input type="text" id="im_args" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="serena-mcp" />
+      <input type="text" id="im_args" class="mono" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="serena-mcp" />
     </div>
     <div class="err" id="im_err"></div>
     <div class="foot">
-      <button class="ghost" onclick="closeImport()">Cancel</button>
-      <button class="primary" id="im_go" onclick="doImport()">Import &amp; connect</button>
+      <button onclick="closeImport()">Cancel</button>
+      <button class="btn-pri" id="im_go" onclick="doImport()">Import &amp; connect</button>
     </div>
   </div>
 </div>
@@ -174,10 +302,10 @@
     <h3>Restart gateway</h3>
     <p class="hint" style="margin:0 0 10px">Briefly drops all live MCP connections. The grace window below lets in-flight
       requests finish before the restart fires — Cancel to abort, or Restart now to skip the wait.</p>
-    <div style="font-size:14px">Restarting in <b id="rs_n">10</b>s…</div>
+    <div style="font-size:13px">Restarting in <b id="rs_n">10</b>s…</div>
     <div class="foot">
-      <button class="ghost" onclick="cancelRestart()">Cancel</button>
-      <button class="primary danger" id="rs_now" onclick="doRestartNow()">Restart now</button>
+      <button onclick="cancelRestart()">Cancel</button>
+      <button class="btn-danger" id="rs_now" onclick="doRestartNow()">Restart now</button>
     </div>
   </div>
 </div>
@@ -200,48 +328,53 @@ async function api(method, path, body) {
 function toast(msg, ms=2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('show'); setTimeout(() => t.classList.remove('show'), ms); }
 function flashSaved() { const s = $('#saved'); s.classList.add('show'); setTimeout(() => s.classList.remove('show'), 1200); }
 
+// short transport label for chips: streamable-http -> shttp
+function chipT(t) { return t === 'streamable-http' ? 'shttp' : t; }
+
 async function load() {
   STATE = await api('GET', '/admin/api/state');
   renderList();
-  if (SELECTED && STATE.backends.find(b => b.name === SELECTED)) renderDetail(SELECTED);
+  if (SELECTED === GATEWAY) renderDetail(GATEWAY);
+  else if (SELECTED && STATE.backends.find(b => b.name === SELECTED)) renderDetail(SELECTED);
   else { SELECTED = null; $('#detail').innerHTML = '<div class="empty">Select an MCP on the left.</div>'; }
 }
 
+// how many of a backend's tools carry any override
+function overriddenCount(b) {
+  return b.tools.filter(t => t.name || t.title || t.description || !t.enabled
+    || t.params.some(p => p.name || p.description || p.hide)).length;
+}
+
+// Sidebar — screen 2a's sidebar is the one true sidebar for BOTH screens
+// (the 2b mockup's sidebar is an earlier design; per handoff + Alex, ignore it).
 function renderList() {
   const el = $('#list');
   el.innerHTML = '';
-  // Gateway pseudo-item: a read-only overview of the per-backend MCP endpoints.
   const gw = document.createElement('div');
-  gw.className = 'b-item gw' + (SELECTED === GATEWAY ? ' sel' : '');
+  gw.className = 'b-item' + (SELECTED === GATEWAY ? ' sel-bg' : '');
   gw.onclick = () => { SELECTED = GATEWAY; renderList(); renderDetail(GATEWAY); };
-  const nEp = STATE.backends.length;
-  gw.innerHTML = `<div class="nm">⚙ Gateway</div>
-    <div class="meta"><span>${nEp} endpoint${nEp === 1 ? '' : 's'}</span></div>`;
+  gw.innerHTML = `<div class="gw-nm">Gateway</div><div class="gw-sub">System overview</div>`;
   el.appendChild(gw);
   STATE.backends.forEach(b => {
     const d = document.createElement('div');
-    d.className = 'b-item' + (b.name === SELECTED ? ' sel' : '') + (b.enabled ? '' : ' off');
+    d.className = 'b-item' + (b.name === SELECTED ? ' sel-bg' : '') + (b.enabled ? '' : ' off');
     d.onclick = () => { SELECTED = b.name; renderList(); renderDetail(b.name); };
-    const overridden = b.tools.filter(t => t.name || t.title || t.description || !t.enabled
-      || t.params.some(p => p.name || p.description || p.hide)).length;
+    const overridden = overriddenCount(b);
     const label = esc(b.display_name || b.name);  // display-only name (#42)
     d.innerHTML = `<div class="b-row">
+        <input type="checkbox" class="tgl tgl-red" ${b.enabled ? 'checked' : ''}
+               title="${b.enabled ? 'broadcasting — click to disable' : 'disabled — click to enable'}">
         <div class="nm" title="${esc(b.name)}">${label}</div>
-        <span class="row-actions">
-          <input type="checkbox" class="tgl" ${b.enabled ? 'checked' : ''}
-                 title="${b.enabled ? 'broadcasting — click to disable' : 'disabled — click to enable'}">
-          <button class="x" title="delete backend">✕</button>
-        </span>
+        <span class="chip">${chipT(b.transport)}</span>
       </div>
-      <div class="meta"><span class="badge">${b.transport}</span>
-      <span>${b.tools.length} tools</span>${overridden ? `<span>· ${overridden} edited</span>` : ''}
-      ${b.introspected ? '' : '<span style="color:var(--warn)">· not introspected</span>'}
-      ${b.enabled ? '' : '<span style="color:var(--mut)">· off</span>'}</div>`;
-    // Controls must not trigger the row-select click.
+      <div class="b-sub">
+        <span class="cnt">${b.tools.filter(t => t.enabled).length}/${b.tools.length} tools</span>
+        ${!b.introspected ? '<span class="warn">not introspected</span>'
+          : overridden ? `<span class="ovr">${overridden} overridden</span>` : ''}
+      </div>`;
     const tgl = $('.tgl', d);
     tgl.addEventListener('click', e => e.stopPropagation());
     tgl.addEventListener('change', e => { e.stopPropagation(); enableBackend(b.name, tgl.checked); });
-    $('.x', d).addEventListener('click', e => { e.stopPropagation(); delBackend(b.name); });
     el.appendChild(d);
   });
 }
@@ -250,60 +383,72 @@ function renderDetail(name) {
   if (name === GATEWAY) return renderGateway();
   const b = STATE.backends.find(x => x.name === name);
   const m = $('#detail');
-  const conn = b.transport === 'http' ? esc(b.url || '') : esc((b.command || '') + ' ' + (b.args || []).join(' '));
+  const conn = b.transport === 'stdio'
+    ? esc((b.command || '') + ' ' + (b.args || []).join(' '))
+    : esc(b.url || '');
   m.innerHTML = `
-    <div class="b-head"><h2>${esc(b.display_name || b.name)}</h2><span class="badge">${b.transport}</span>${b.enabled ? '' : '<span class="badge" style="border-color:var(--warn);color:var(--warn)">off</span>'}<code>${conn}</code></div>
-    <div class="hint" style="margin:-2px 0 12px">MCP endpoint <code>http://${esc(STATE.host)}:${STATE.port}${esc(b.endpoint || '')}</code> · registers in Claude Code as <code>gateway-${esc(b.name)}</code> — that is the routing identity (a display name below does not change it)</div>
-    <div class="b-actions">
-      <label class="chk" title="pin ALL this backend's tools to load upfront (eager)">
-        <input type="checkbox" id="b-pin" ${b.always_load ? 'checked' : ''}
-               onchange="pinBackend('${escJS(b.name)}', this.checked)"> 📌 pin all tools (eager)</label>
-      <span class="spacer" style="flex:1"></span>
-      <button class="ghost" onclick="saveSnapshot('${escJS(b.name)}')" title="download this backend's field values as a JSON file">Save fields</button>
-      <button class="ghost" onclick="loadSnapshot('${escJS(b.name)}')" title="restore this backend's field values from a saved JSON file (overwrites current)">Load fields</button>
-      <button class="ghost" onclick="reintrospect('${escJS(b.name)}')">Re-introspect</button>
-      <button class="ghost danger" onclick="delBackend('${escJS(b.name)}')">Remove backend</button>
+    <div class="b-head">
+      <h2>${esc(b.display_name || b.name)}</h2>
+      <span class="chip">${chipT(b.transport)}</span>
+      <span class="url">${conn}</span>
+      <span class="spacer"></span>
+      <button class="btn" style="font-size:11px" onclick="reintrospect('${escJS(b.name)}')">Re-inspect</button>
+      <button class="btn btn-danger" style="font-size:11px" onclick="delBackend('${escJS(b.name)}')">Remove</button>
     </div>
-    <div style="margin-bottom:16px">
-      <label>Display name <span style="text-transform:none;letter-spacing:0">(admin UI only)</span></label>
-      <input type="text" class="f-display" value="${esc(b.display_name || '')}" placeholder="${esc(b.name)}">
-      <div class="hint">Cosmetic label for the sidebar + header. Does <b>not</b> change the endpoint URL, config keys, or the
-        <code>gateway-${esc(b.name)}</code> registration in Claude Code. Empty = use <code>${esc(b.name)}</code>.</div>
+    <div class="b-sub-line">MCP endpoint <code>http://${esc(STATE.host)}:${STATE.port}${esc(b.endpoint || '')}</code>
+      · registers in Claude Code as <code>gateway-${esc(b.name)}</code> — the routing identity
+      (display name is cosmetic)</div>
+    <div class="ctrl-bar">
+      <label class="lbl" title="enable/disable this backend's broadcast">
+        <input type="checkbox" class="tgl" id="b-bcast" ${b.enabled ? 'checked' : ''}> Broadcasting</label>
+      <span class="div"></span>
+      <label class="lbl" title="pin ALL this backend's tools to load upfront (eager)">
+        <input type="checkbox" class="tgl" id="b-pin" ${b.always_load ? 'checked' : ''}> Pin all tools</label>
+      <span class="div"></span>
+      <label class="lbl" title="cosmetic label for the sidebar + header; does not change routing" style="cursor:default">
+        Display name <input type="text" class="f-display mono" value="${esc(b.display_name || '')}"
+          placeholder="${esc(b.name)}" style="width:130px;padding:3px 7px;font-size:11px"></label>
+      <span class="spacer"></span>
+      <button class="btn" style="font-size:11px" onclick="loadSnapshot('${escJS(b.name)}')"
+        title="restore this backend's field values from a saved JSON file">Load fields</button>
     </div>
     ${backendInstrSection(b)}
     <div id="tools"></div>`;
+  $('#b-bcast', m).addEventListener('change', e => enableBackend(b.name, e.target.checked));
+  $('#b-pin', m).addEventListener('change', e => pinBackend(b.name, e.target.checked));
   // Display name saves on blur/Enter (#42); reload refreshes header + sidebar label.
   const dn = $('.f-display', m);
   const saveDn = () => { if ((dn.value.trim() || null) !== (b.display_name || null)) setDisplayName(b.name, dn.value.trim()); };
   dn.addEventListener('blur', saveDn);
   dn.addEventListener('keydown', e => { if (e.key === 'Enter') dn.blur(); });
+  dn.addEventListener('click', e => e.preventDefault());
   wireInstr(m, b.name, b.default_instructions);
-  wireCaps(m);  // live byte-count on the backend "Server instructions" textarea
-  wireGrow(m);  // auto-size the "Server instructions" textarea (in DOM already)
+  wireCaps(m);
+  wireGrow(m);
   const tw = $('#tools', m);
-  if (!b.introspected) { tw.innerHTML = '<div class="empty">Backend not introspected yet — click Re-introspect.</div>'; return; }
+  if (!b.introspected) { tw.innerHTML = '<div class="empty">Backend not introspected yet — click Re-inspect.</div>'; return; }
   b.tools.forEach(t => tw.appendChild(toolCard(b, t)));
-  wireGrow(m);  // auto-size tool Description + param Description textareas (now in DOM)
+  wireGrow(m);
 }
 
-// Per-backend server instructions: prefilled with the override else the captured
-// original (so it shows what flows into the gateway's composed blurb). Empty ->
-// inherit the original; if the backend sends none, the box is empty to add your own.
+// Per-backend server instructions card: prefilled with override else captured
+// original. Empty -> inherit; if the backend sends none, type to add your own.
 function backendInstrSection(b) {
   const eff = b.instructions ?? b.default_instructions ?? '';
   const has = b.default_instructions != null && b.default_instructions !== '';
   const si = b.server_info ? `${b.server_info.name} ${b.server_info.version || ''}`.trim() : '';
-  return `<div class="instr">
-    <h3>Server instructions</h3>
-    <div class="si">${si ? esc(si) + ' · ' : ''}the always-loaded blurb this MCP sends; folded into the gateway's instructions</div>
+  return `<div class="card">
+    <div class="c-head">
+      <span class="c-title">Server instructions</span>
+      ${si ? `<span class="c-meta">${esc(si)}</span>` : ''}
+    </div>
+    <div class="si" style="margin-bottom:6px">the always-loaded blurb this MCP sends at initialize</div>
     <textarea class="f-instr grow" data-cap="2048" data-default="${esc(b.default_instructions ?? '')}"
       placeholder="${has ? '' : '(this server sends no instructions — type to add your own)'}">${esc(eff)}</textarea>
     <div class="hint">Empty = inherit the server's original${has ? '' : ' (none)'}. Edits reload live.</div>
   </div>`;
 }
 
-// Wire a backend's instructions textarea: debounce-save; on blur refill to the
-// original only when it HAS one (so "empty = inherit" stays reachable when none).
 function wireInstr(root, backend, def) {
   const ta = $('.f-instr', root);
   if (!ta) return;
@@ -314,182 +459,185 @@ function wireInstr(root, backend, def) {
   });
 }
 
-// Live byte-count for any [data-cap] field: a small bottom-right span showing
-// UTF-8 BYTES (TextEncoder, not .length — which is UTF-16 units) against the
-// field's own cap, red at/over the cap. Wraps the field for positioning.
-// Idempotent: re-running over the same field is a no-op (capWired guard).
+// Live byte-count for any [data-cap] field: UTF-8 BYTES (TextEncoder) against
+// the field's cap, red at/over. Top-right of the field per the design.
 function wireCaps(root) {
   const enc = new TextEncoder();
   root.querySelectorAll('[data-cap]').forEach(field => {
-    if (field.dataset.capWired) return;            // never double-attach
+    if (field.dataset.capWired) return;
     field.dataset.capWired = '1';
     const cap = parseInt(field.dataset.cap, 10);
     const wrap = document.createElement('div');
     wrap.className = 'cap-wrap';
-    field.parentNode.insertBefore(wrap, field);    // wrap field for bottom-right anchor
+    field.parentNode.insertBefore(wrap, field);
     wrap.appendChild(field);
     const count = document.createElement('span');
     count.className = 'cap-count';
     wrap.appendChild(count);
     const upd = () => {
-      const n = enc.encode(field.value).length;    // UTF-8 bytes — matches CC's 2048-byte cap
-      count.textContent = n + ' / ' + cap;
-      count.classList.toggle('over', n >= cap);    // red at or beyond the cap
+      const n = enc.encode(field.value).length;
+      count.textContent = n + ' / ' + cap + ' B';
+      count.classList.toggle('over', n >= cap);
     };
     field.addEventListener('input', upd);
-    field.addEventListener('blur', upd);           // also catch programmatic refills on blur
-    upd();                                          // initial paint
+    field.addEventListener('blur', upd);
+    upd();
   });
 }
 
-// Auto-size a textarea to its content: height = scrollHeight, floored by CSS
-// min-height and capped at ~40vh (then it scrolls) so a big blurb can't push the
-// layout off-screen (#58). Must run once the element is laid out in the DOM.
+// Auto-size a textarea to its content, capped at ~40vh (#58).
 function autoGrow(el) {
   const max = Math.round(window.innerHeight * 0.4);
-  el.style.height = 'auto';                         // reset so scrollHeight shrinks too
+  el.style.height = 'auto';
   const h = Math.min(el.scrollHeight, max);
   el.style.height = h + 'px';
   el.style.overflowY = el.scrollHeight > max ? 'auto' : 'hidden';
 }
-// Wire every .grow textarea under root. Call AFTER root is in the DOM (a detached
-// node reports scrollHeight 0). Idempotent per element.
 function wireGrow(root) {
   root.querySelectorAll('textarea.grow').forEach(ta => {
     if (ta.dataset.growWired) return;
     ta.dataset.growWired = '1';
     ta.addEventListener('input', () => autoGrow(ta));
-    ta.addEventListener('blur', () => autoGrow(ta));  // catch programmatic refills
+    ta.addEventListener('blur', () => autoGrow(ta));
     autoGrow(ta);
   });
 }
 
-// Gateway pseudo-detail: a read-only overview of the per-backend MCP endpoints.
-// Each backend is its own MCP server now (its own URL + its own ~2KB
-// instructions budget), so there is no single cross-backend "gateway
-// instructions" — edit each backend's Server instructions on its own page. This
-// page lists the endpoints and how much of each 2KB instructions budget is used.
+// UTF-8 byte helpers for the gateway overview. Upfront accounting (#20/#117,
+// exact per Claude Code's actual loading): server instructions load at
+// initialize; EVERY enabled tool's full callable name (mcp__gateway-<b>__<name>)
+// sits in the deferred list from turn 0; a PINNED tool additionally loads its
+// title/description/params upfront. Only unpinned tools' text is deferred.
+const _enc = new TextEncoder();
+const bLen = s => _enc.encode(s || '').length;
+function nameBytes(b, t) {
+  // the deferred-list line: mcp__gateway-<backend>__<broadcast name>
+  return bLen('mcp__gateway-' + b.name + '__' + (t.name || t.default_name));
+}
+function textBytes(t) {
+  // everything beyond the name: title + description + visible params
+  let n = bLen(t.title || t.default_title)
+        + bLen(t.description || t.default_description);
+  for (const p of t.params || []) {
+    if (p.hide) continue;
+    n += bLen(p.name || p.default_name) + bLen(p.description || p.default_description);
+  }
+  return n;
+}
+function kb(n) { return (n / 1024).toFixed(1); }
+
+// Gateway overview — screen 2b (stat cards + endpoint cards + footprint bars)
 function renderGateway() {
   const m = $('#detail');
   const base = `http://${esc(STATE.host)}:${STATE.port}`;
-  const enc = new TextEncoder();
   const total = STATE.backends.length;
-  const on = STATE.backends.filter(b => b.enabled).length;  // for the master toggle (#40)
-  const rows = STATE.backends.map(b => {
-    const instr = b.instructions ?? b.default_instructions ?? '';
-    const bytes = enc.encode(instr).length;
-    const over = bytes > 2048;
-    return `<tr>
-      <td style="padding:4px 8px"><b>${esc(b.name)}</b>${b.enabled ? '' : ' <span style="color:var(--warn)">off</span>'}</td>
-      <td style="padding:4px 8px"><code>${esc(base + (b.endpoint || ''))}</code></td>
-      <td style="padding:4px 8px;text-align:right;color:${over ? '#ff9b9b' : 'var(--mut)'}">${bytes} / 2048 B</td>
-    </tr>`;
+  const on = STATE.backends.filter(b => b.enabled).length;
+  let namesTot = 0, pinnedTot = 0, instrTot = 0, deferTot = 0,
+      toolTot = 0, ovrTot = 0, pinTot = 0;
+  const per = STATE.backends.map(b => {
+    const instr = bLen(b.instructions ?? b.default_instructions ?? '');
+    let names = 0, pinned = 0, defer = 0, pins = 0;
+    if (b.enabled) {
+      for (const t of b.tools) {
+        if (!t.enabled) continue;
+        names += nameBytes(b, t);          // every callable name is visible at turn 0
+        const txt = textBytes(t);
+        if (t.always_load || b.always_load) { pinned += txt; pins += 1; }
+        else defer += txt;                  // only unpinned text is deferred
+      }
+    }
+    const ovr = overriddenCount(b);
+    toolTot += b.tools.length; ovrTot += ovr; pinTot += pins;
+    if (b.enabled) { namesTot += names; pinnedTot += pinned; instrTot += instr; deferTot += defer; }
+    return { b, instr, names, pinned, defer, pins, ovr };
+  });
+  const upfront = namesTot + pinnedTot + instrTot;
+  const catalog = upfront + deferTot;
+  const maxRow = Math.max(1, ...per.map(x => x.b.enabled ? x.names + x.pinned + x.instr + x.defer : 0));
+
+  const epCards = per.map(({ b, instr, pins, ovr }) => {
+    const pct = Math.min(100, Math.round(100 * instr / 2048));
+    const near = pct >= 80;
+    return `<div class="ep${near ? ' near' : ''}">
+      <div class="e-top"><span class="dot5${b.enabled ? '' : ' off'}"></span>
+        <span class="e-nm">${esc(b.display_name || b.name)}</span><span class="chip">${chipT(b.transport)}</span></div>
+      <span class="e-url">${esc(base + (b.endpoint || ''))}</span>
+      <div class="e-counts"><span>${b.tools.length} tools</span>
+        <span><span class="ac">${ovr} over</span> · <span class="am">${pins} pinned</span></span></div>
+      <div class="e-blabel${near ? ' near' : ''}">instructions ${instr} / 2048 B</div>
+      <div class="e-bar"><div style="width:${pct}%"></div></div>
+    </div>`;
   }).join('');
 
-  // #20: context footprint in UTF-8 bytes. Per enabled backend, sum the broadcast
-  // text of ALL enabled tools vs EAGER (pinned) tools only — the latter, plus
-  // instructions, is the real UPFRONT per-session cost (deferred tools are ~free
-  // until used). A disabled backend broadcasts nothing (#72), so it contributes 0.
-  const tbytes = t => {
-    const eff = (v, d) => (v || d || '');
-    let n = enc.encode(eff(t.name, t.default_name)).length
-          + enc.encode(eff(t.title, t.default_title)).length
-          + enc.encode(eff(t.description, t.default_description)).length;
-    for (const p of t.params || []) {
-      if (p.hide) continue;  // hidden params aren't broadcast
-      n += enc.encode(eff(p.name, p.default_name)).length
-         + enc.encode(eff(p.description, p.default_description)).length;
-    }
-    return n;
-  };
-  // #117: of the eager (always-transmitted-upfront) bytes, the DESCRIPTION slice
-  // specifically. Unlike a deferred tool's description (fetched only when Claude
-  // reaches for the tool), an eager tool's description is in context every
-  // session — like instructions, unavoidable. Tracked on its own so that cost is
-  // legible. A disabled backend / tool contributes 0 (same guards as the eager sum).
-  const descBytes = t => enc.encode(t.description || t.default_description || '').length;
-  let allTot = 0, eagerTot = 0, eagerDescTot = 0, instrTot = 0;
-  const mRows = STATE.backends.map(b => {
-    if (!b.enabled) return `<tr style="color:var(--mut)">
-      <td style="padding:4px 8px">${esc(b.name)} <span style="color:var(--warn)">off</span></td>
-      <td colspan="4" style="padding:4px 8px">— not broadcast —</td></tr>`;
-    let all = 0, eager = 0, eagerDesc = 0;
-    for (const t of b.tools) {
-      if (!t.enabled) continue;  // disabled tool -> not broadcast
-      const n = tbytes(t);
-      all += n;
-      if (t.always_load || b.always_load) { eager += n; eagerDesc += descBytes(t); }  // pinned -> upfront
-    }
-    const instr = enc.encode(b.instructions ?? b.default_instructions ?? '').length;
-    allTot += all; eagerTot += eager; eagerDescTot += eagerDesc; instrTot += instr;
-    return `<tr>
-      <td style="padding:4px 8px"><b>${esc(b.name)}</b></td>
-      <td style="padding:4px 8px;text-align:right">${all.toLocaleString()} B</td>
-      <td style="padding:4px 8px;text-align:right;color:${eager ? 'var(--warn)' : 'var(--mut)'}">${eager.toLocaleString()} B</td>
-      <td style="padding:4px 8px;text-align:right;color:var(--mut)">${eagerDesc.toLocaleString()} B</td>
-      <td style="padding:4px 8px;text-align:right;color:var(--mut)">${instr.toLocaleString()} B</td></tr>`;
+  const fpRows = per.map(({ b, instr, names, pinned, defer }) => {
+    if (!b.enabled) return `<div class="fp-row" style="opacity:.45">
+      <span class="fp-nm">${esc(b.display_name || b.name)}</span>
+      <div class="fp-bar"></div><span class="fp-kb">off</span></div>`;
+    const totalB = names + pinned + instr + defer;
+    const w = Math.round(100 * totalB / maxRow);
+    const pc = n => totalB ? (100 * n / totalB) : 0;
+    return `<div class="fp-row">
+      <span class="fp-nm" title="${esc(b.name)}">${esc(b.display_name || b.name)}</span>
+      <div style="display:flex"><div class="fp-bar" style="width:${w}%"
+          title="upfront: ${names} B names + ${pinned} B pinned + ${instr} B instructions · deferred: ${defer} B">
+        <div class="seg-am" style="width:${pc(pinned)}%"></div>
+        <div class="seg-ac" style="width:${pc(instr)}%"></div>
+        <div class="seg-nm" style="width:${pc(names)}%"></div>
+      </div></div>
+      <span class="fp-kb">${kb(totalB)} KB</span>
+    </div>`;
   }).join('');
-  const upfront = eagerTot + instrTot;
-  const pct = allTot ? Math.round(100 * eagerTot / allTot) : 0;
 
   m.innerHTML = `
-    <div class="b-head"><h2>⚙ Gateway</h2><code>${STATE.backends.length} MCP endpoint(s)</code>
-      <span class="badge" title="running gateway build">v${esc(STATE.version || '?')}</span></div>
-    <p class="hint" style="margin:0 0 14px">Each backend is exposed as its <b>own MCP endpoint</b> below — register each as a
-      separate server in Claude Code, so each gets its own ~2KB instructions budget. Edit a backend's server
-      instructions on its own page (left).</p>
-    <div class="b-actions" style="margin-bottom:10px">
-      <label class="chk" title="enable or disable broadcast for ALL backends at once">
-        <input type="checkbox" id="masterTgl"> broadcast all backends</label>
-      <span class="hint" style="margin-top:0">${on}/${total} enabled${on > 0 && on < total ? ' · mixed' : ''}</span>
+    <div class="gw-head">
+      <h2>Gateway</h2>
+      <span class="run-badge"><span class="dot6"></span>running</span>
+      <span class="meta">v${esc(STATE.version || '?')}</span>
+      <span class="meta">${base}</span>
+      <span class="spacer" style="flex:1"></span>
+      <button class="btn" style="font-size:11px" onclick="exportSettings()"
+        title="download the complete stored settings as one JSON bundle">Export</button>
+      <button class="btn" style="font-size:11px" onclick="importSettings()"
+        title="restore settings from an exported bundle (or a legacy field snapshot)">Import</button>
+      <button class="btn btn-danger" style="font-size:11px" onclick="restartGateway()">Restart</button>
     </div>
-    <div class="b-actions" style="margin-bottom:10px">
-      <button class="ghost" onclick="saveSnapshot(GATEWAY)" title="download EVERY backend's field values as one JSON file">Save all fields</button>
-      <button class="ghost" onclick="loadSnapshot(GATEWAY)" title="restore EVERY backend's field values from a saved JSON file (overwrites current)">Load all fields</button>
-      <span class="hint" style="margin-top:0">Snapshot or restore every editable field across all backends (instructions, names, descriptions, params, pins, enable state).</span>
+    <div class="stat-grid">
+      <div class="stat"><div class="s-lbl">Backends</div>
+        <div class="s-val" style="display:flex;align-items:center;gap:10px">${on}/${total}
+          <input type="checkbox" class="tgl" id="masterTgl"
+            title="broadcast all backends on/off"></div>
+        <div class="s-sub ${on === total ? 'gn' : 'rd'}">${on === total ? 'all connected' : (total - on) + ' off'}</div></div>
+      <div class="stat"><div class="s-lbl">Tools</div>
+        <div class="s-val">${toolTot}</div>
+        <div class="s-sub ac">${ovrTot} overridden</div></div>
+      <div class="stat"><div class="s-lbl">Upfront per session</div>
+        <div class="s-val am">${kb(upfront)}<span class="unit">KB</span></div>
+        <div class="s-sub">instructions + names + ${pinTot} pinned</div></div>
+      <div class="stat"><div class="s-lbl">Full catalog</div>
+        <div class="s-val">${kb(catalog)}<span class="unit">KB</span></div>
+        <div class="s-sub">${kb(deferTot)} KB deferred on demand</div></div>
     </div>
-    <div class="b-actions" style="margin-bottom:16px">
-      <button class="ghost danger" onclick="restartGateway()">Restart gateway</button>
-      <span class="hint" style="margin-top:0">Restarts the daemon — briefly drops all live MCP connections.</span>
+    <div class="card">
+      <div class="c-head"><span class="c-title">Context footprint</span>
+        <span class="si">UTF-8 bytes broadcast to Claude</span>
+        <span class="legend">
+          <span><span class="sw" style="background:var(--am)"></span>Pinned</span>
+          <span><span class="sw" style="background:var(--ac)"></span>Instructions</span>
+          <span><span class="sw" style="background:#3b5a7a"></span>Tool names</span>
+          <span><span class="sw" style="background:var(--s3)"></span>Deferred</span>
+        </span></div>
+      ${fpRows}
+      <div class="fp-sum">
+        <span class="fs"><span class="sw" style="background:var(--ac)"></span>Instructions <b>${kb(instrTot)} KB</b></span>
+        <span class="fs"><span class="sw" style="background:#3b5a7a"></span>Tool names <b>${kb(namesTot)} KB</b></span>
+        <span class="fs"><span class="sw" style="background:var(--am)"></span>Pinned <b>${kb(pinnedTot)} KB</b></span>
+        <span class="fs-eq">=</span>
+        <span class="fs up">Upfront every session <b>${kb(upfront)} KB</b></span>
+        <span class="fs-div"></span>
+        <span class="fs"><span class="sw" style="background:var(--s3)"></span>Deferred <b>${kb(deferTot)} KB</b></span>
+      </div>
     </div>
-    <div class="instr">
-      <h3>Context footprint <span class="si" style="font-weight:400">· UTF-8 bytes broadcast to Claude</span></h3>
-      <table style="width:100%;border-collapse:collapse;font-size:13px">
-        <thead><tr style="color:var(--mut);text-align:left">
-          <th style="padding:4px 8px">Backend</th>
-          <th style="padding:4px 8px;text-align:right">All tools</th>
-          <th style="padding:4px 8px;text-align:right">Eager (upfront)</th>
-          <th style="padding:4px 8px;text-align:right" title="the description slice of the eager total — always in context, like instructions">Eager descriptions</th>
-          <th style="padding:4px 8px;text-align:right">Instructions</th></tr></thead>
-        <tbody>${mRows}</tbody>
-        <tfoot><tr style="border-top:1px solid var(--ro);font-weight:600">
-          <td style="padding:6px 8px">All backends</td>
-          <td style="padding:6px 8px;text-align:right">${allTot.toLocaleString()} B</td>
-          <td style="padding:6px 8px;text-align:right;color:var(--warn)">${eagerTot.toLocaleString()} B</td>
-          <td style="padding:6px 8px;text-align:right;color:var(--mut)">${eagerDescTot.toLocaleString()} B</td>
-          <td style="padding:6px 8px;text-align:right;color:var(--mut)">${instrTot.toLocaleString()} B</td></tr></tfoot>
-      </table>
-      <div style="margin:12px 8px 4px;height:10px;background:var(--ro);border-radius:5px;overflow:hidden"
-           title="eager tools as a share of the full tool catalog">
-        <div style="height:100%;width:${pct}%;background:var(--warn)"></div></div>
-      <div class="hint" style="margin:4px 8px">
-        <b>${upfront.toLocaleString()} B upfront</b> every session — eager tools
-        (${eagerTot.toLocaleString()} B, ${pct}% of the ${allTot.toLocaleString()} B
-        full catalog; ${eagerDescTot.toLocaleString()} B of that is descriptions) +
-        instructions (${instrTot.toLocaleString()} B). Deferred tools cost nothing
-        upfront until Claude reaches for them.</div>
-    </div>
-    <div class="instr">
-      <h3>Endpoints</h3>
-      <table style="width:100%;border-collapse:collapse;font-size:13px">
-        <thead><tr style="color:var(--mut);text-align:left">
-          <th style="padding:4px 8px">Backend</th><th style="padding:4px 8px">URL</th>
-          <th style="padding:4px 8px;text-align:right">Instructions</th></tr></thead>
-        <tbody>${rows}</tbody>
-      </table>
-    </div>`;
-  // Master toggle (#40): checked = all on, indeterminate = mixed (set in JS since
-  // `indeterminate` has no HTML attribute), unchecked = all off.
+    <div class="ep-grid">${epCards}</div>`;
   const mt = $('#masterTgl');
   if (mt) {
     mt.checked = total > 0 && on === total;
@@ -498,71 +646,82 @@ function renderGateway() {
   }
 }
 
-// Editable fields are PREFILLED with their effective value (override if set,
-// else the backend default) so they are never blank — what you see is what
-// Claude Code gets. The read-only "real" name is the provider-facing identifier
-// the gateway forwards to (not editable).
+// Tool card — editable fields prefilled with effective values (#62 semantics).
 function toolCard(b, t) {
   const card = document.createElement('div');
-  card.className = 'tool' + (t.enabled ? '' : ' disabled');
+  const isOvr = !!(t.name || t.title || t.description
+    || t.params.some(p => p.name || p.description || p.hide));
+  card.className = 'tool' + (t.enabled ? '' : ' disabled') + (isOvr ? ' ovr' : '');
   card.dataset.original = t.original;
   card.dataset.defaultName = t.default_name;
   const name = t.name || t.default_name;
   const title = t.title || t.default_title || '';
   const desc = t.description || t.default_description || '';
+  const pinned = !!t.always_load;
+  const dot = k => t[k] ? ' <span class="ovd">·</span>' : '';
   card.innerHTML = `
-    <div class="t-head" onclick="this.parentElement.classList.toggle('open')">
+    <div class="tc-h" onclick="this.parentElement.classList.toggle('open'); this.querySelector('.chev').textContent = this.parentElement.classList.contains('open') ? '▾' : '›'">
       <span class="orig" title="real MCP tool name (provider-facing, not editable)">${esc(t.original)}</span>
       <span class="arrow">→</span>
-      <span class="newname">${esc(name)}</span><span class="spacer"></span>
-      <label class="chk" onclick="event.stopPropagation()" title="load this tool UPFRONT — exempt from tool-search deferral (anthropic/alwaysLoad)">
-        <input type="checkbox" class="f-always" ${t.always_load ? 'checked' : ''}> 📌 eager</label>
-      <label class="chk" onclick="event.stopPropagation()">
-        <input type="checkbox" class="f-enabled" ${t.enabled ? 'checked' : ''}> broadcast</label>
+      <span class="newname">${esc(name)}</span>
+      ${isOvr ? '<span class="ov-badge">overridden</span>' : ''}
+      <span class="spacer"></span>
+      <button class="pin-btn${pinned ? ' pinned' : ''}" onclick="event.stopPropagation()"
+        title="load this tool upfront — exempt from tool-search deferral (anthropic/alwaysLoad)">${pinned ? 'Pinned' : 'Pin'}</button>
+      <input type="checkbox" class="tgl f-enabled" ${t.enabled ? 'checked' : ''}
+        onclick="event.stopPropagation()" title="broadcast this tool">
+      <input type="checkbox" class="f-always" ${t.always_load ? 'checked' : ''} style="display:none">
+      <span class="chev">›</span>
     </div>
     <div class="t-body">
-      <div class="row">
-        <div><label>Broadcast name</label><input type="text" class="f-name" value="${esc(name)}" data-default="${esc(t.default_name)}"></div>
-        <div><label>Title</label><input type="text" class="f-title" value="${esc(title)}" data-default="${esc(t.default_title||'')}"></div>
+      <div class="row2">
+        <div><span class="flabel">Broadcast name${dot('name')}</span>
+          <input type="text" class="f-name mono${t.name ? ' ov' : ''}" value="${esc(name)}" data-default="${esc(t.default_name)}"></div>
+        <div><span class="flabel">Title${dot('title')}</span>
+          <input type="text" class="f-title${t.title ? ' ov' : ''}" value="${esc(title)}" data-default="${esc(t.default_title||'')}"></div>
       </div>
-      <label>Description (what Claude reads)</label>
-      <textarea class="f-desc grow" data-cap="2048" data-default="${esc(t.default_description||'')}">${esc(desc)}</textarea>
+      <span class="flabel">Description${dot('description')}</span>
+      <textarea class="f-desc grow${t.description ? ' ov' : ''}" data-cap="2048" data-default="${esc(t.default_description||'')}">${esc(desc)}</textarea>
       <div class="params">
-        <div class="lbl">Parameters</div>
-        ${t.params.map(p => paramRow(p)).join('')}
+        <span class="flabel" style="margin-top:0">Parameters</span>
+        ${t.params.map(p => paramRow(p)).join('') || '<div class="si">no parameters</div>'}
       </div>
       ${schemaSection(t)}
       <div style="margin-top:12px;display:flex;gap:8px;">
-        <button class="ghost" onclick="resetTool('${escJS(b.name)}','${escJS(t.original)}')">Reset to default</button>
-        <button class="ghost" onclick="toggleRun('${escJS(b.name)}','${escJS(t.original)}', this)">▶ Run</button>
+        <button class="btn" onclick="resetTool('${escJS(b.name)}','${escJS(t.original)}')">Reset to default</button>
+        <button class="btn" onclick="toggleRun('${escJS(b.name)}','${escJS(t.original)}', this)">▶ Run</button>
       </div>
       <div class="runbox" style="display:none"></div>
     </div>`;
+  // Pin pill drives the hidden .f-always checkbox so gather()/save wiring is unchanged.
+  const pinBtn = $('.pin-btn', card), always = $('.f-always', card);
+  pinBtn.addEventListener('click', () => {
+    always.checked = !always.checked;
+    pinBtn.classList.toggle('pinned', always.checked);
+    pinBtn.textContent = always.checked ? 'Pinned' : 'Pin';
+    scheduleSave(b.name, t.original, card);
+  });
   wireCard(b.name, t.original, card);
-  wireCaps(card);  // live byte-count on the tool "Description" textarea
+  wireCaps(card);
   return card;
 }
 
 function paramRow(p) {
-  // #128: param names are read-only and there is no per-param hide affordance.
-  // Existing name/hide overrides ride along untouched via data attributes so a
-  // description edit can't drop a legacy rename or un-hide a hidden footgun.
+  // #128: param names are read-only, no per-param hide affordance. Stored
+  // name/hide overrides pass through untouched via data attributes.
   const desc = p.description || p.default_description || '';
-  const req = p.required ? '<span class="req" title="required by the backend">*</span>' : '';
+  const req = p.required ? ' <span class="req-badge">required</span>' : '';
   const renamed = p.name && p.name !== p.default_name
     ? ` <span class="si" title="legacy broadcast rename (read-only)">→ ${esc(p.name)}</span>` : '';
   const hidden = p.hide ? ' <span class="si" title="hidden from broadcast (stored override)">hidden</span>' : '';
-  return `<div class="param" data-original="${esc(p.original)}" data-name="${esc(p.name||'')}" data-hide="${p.hide?'1':''}">
-    <div class="p-top"><span class="orig" title="parameter name (not editable)">${esc(p.original)}${req}</span>${renamed}${hidden}</div>
-    <div style="margin-top:8px;"><label>Description</label><textarea class="p-desc grow" data-default="${esc(p.default_description||'')}">${esc(desc)}</textarea></div>
+  const dot = p.description ? ' <span class="ovd" style="color:var(--ac)">·</span>' : '';
+  return `<div class="param-row" data-original="${esc(p.original)}" data-name="${esc(p.name||'')}" data-hide="${p.hide?'1':''}">
+    <div class="p-top"><span class="p-nm" title="parameter name (not editable)">${esc(p.original)}</span>${req}${renamed}${hidden}${dot}</div>
+    <div style="margin-top:7px;"><textarea class="p-desc grow${p.description ? ' ov' : ''}" data-default="${esc(p.default_description||'')}">${esc(desc)}</textarea></div>
     </div>`;
 }
 
-// Read-only schema surface (issue #2): a tool's outputSchema, _meta (FastMCP
-// tags + our anthropic/alwaysLoad pin) and ToolAnnotations (readOnly/destructive/
-// idempotent/openWorld) as captured from the wire. Shown only when the backend
-// advertises them; display only, never editable. Reuses the .instr card, the .si
-// muted label, and the .preview JSON box.
+// Read-only schema surface (issue #2) — display only, never editable.
 function schemaSection(t) {
   const block = (label, obj) =>
     (obj && Object.keys(obj).length)
@@ -573,12 +732,11 @@ function schemaSection(t) {
     + block('_meta', t.meta)
     + block('annotations', t.annotations);
   if (!body) return '';
-  return `<div class="instr" style="margin:14px 0 4px">
-    <h3>Schema &amp; metadata <span class="si" style="font-weight:400">· read-only</span></h3>${body}</div>`;
+  return `<div style="margin:14px 0 4px">
+    <span class="flabel">Schema &amp; metadata · read-only</span>${body}</div>`;
 }
 
-// Wire auto-save: debounce on input; flush immediately on blur; refill a
-// cleared field with its default so it is never effectively empty.
+// Wire auto-save: debounce on input; flush on blur; refill cleared fields.
 function wireCard(backend, original, card) {
   card.querySelectorAll('input, textarea').forEach(inp => {
     if (inp.type === 'checkbox') {
@@ -588,16 +746,16 @@ function wireCard(backend, original, card) {
     inp.addEventListener('input', () => scheduleSave(backend, original, card));
     inp.addEventListener('blur', () => {
       if (inp.dataset.default !== undefined && inp.value.trim() === '' && inp.dataset.default !== '') {
-        inp.value = inp.dataset.default;  // never leave it blank — fall back to default
+        inp.value = inp.dataset.default;
         if (inp.classList.contains('f-name')) $('.newname', card).textContent = inp.value;
       }
-      flushSave(backend, original, card);  // persist on leaving the field
+      flushSave(backend, original, card);
     });
   });
 }
 
 function gather(card) {
-  const params = [...card.querySelectorAll('.param')].map(pe => ({
+  const params = [...card.querySelectorAll('.param-row')].map(pe => ({
     original: pe.dataset.original,
     name: pe.dataset.name,           // #128: read-only pass-through
     description: $('.p-desc', pe).value,
@@ -613,57 +771,50 @@ function gather(card) {
   };
 }
 
-// ---- #113: Save / Load field snapshots ------------------------------------
-// A snapshot is a plain JSON file the browser downloads (Save) and re-uploads
-// (Load) — no server-side storage. It captures every EDITABLE field's effective
-// value (override if set, else the backend default) so a restore reproduces
-// exactly what Claude Code sees. Load replays the existing, lock-guarded save
-// endpoints (override / instructions / pin / display-name / enabled), so it goes
-// through the same validation + hot-reload as manual edits.
+// ---- #113: Load field snapshots (browser-side restore; Save buttons removed —
+// use GET /admin/api/export for downloads, or the old snapshot files still load).
 const SNAP_KIND = 'mcp-gateway-fields';
 const EMPTY_OVERRIDE = { name: '', title: '', description: '', enabled: true, always_load: false, params: [] };
 
-function backendSnapshot(b) {
-  return {
-    name: b.name,
-    display_name: b.display_name || '',
-    enabled: b.enabled,
-    always_load: !!b.always_load,               // backend-level pin (all tools)
-    instructions: b.instructions ?? b.default_instructions ?? '',
-    tools: (b.tools || []).map(t => ({
-      original: t.original,
-      name: t.name || t.default_name || '',
-      title: t.title || t.default_title || '',
-      description: t.description || t.default_description || '',
-      enabled: t.enabled !== false,
-      always_load: !!t.always_load,
-      params: (t.params || []).map(p => ({
-        original: p.original,
-        name: p.name || p.default_name || '',
-        description: p.description || p.default_description || '',
-        hide: !!p.hide,
-      })),
-    })),
-  };
+// ---- #136 settings bundles: Export/Import wired to the server-side API ----
+async function exportSettings() {
+  try {
+    const bundle = await api('GET', '/admin/api/export');
+    const url = URL.createObjectURL(new Blob([JSON.stringify(bundle, null, 2)], { type: 'application/json' }));
+    const a = document.createElement('a');
+    a.href = url; a.download = 'mcp-gateway-settings.json';
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+    toast('exported settings');
+  } catch (e) { toast('export failed: ' + e.message); }
 }
 
-function saveSnapshot(scope) {
-  const gw = scope === GATEWAY;
-  const backends = gw ? STATE.backends : STATE.backends.filter(b => b.name === scope);
-  if (!backends.length) { toast('nothing to save'); return; }
-  const snap = {
-    kind: SNAP_KIND, version: 1,
-    scope: gw ? 'gateway' : scope,
-    host: STATE.host, port: STATE.port,
-    backends: backends.map(backendSnapshot),
+function importSettings() {
+  const inp = document.createElement('input');
+  inp.type = 'file'; inp.accept = 'application/json,.json';
+  inp.onchange = async () => {
+    const file = inp.files && inp.files[0];
+    if (!file) return;
+    let data;
+    try { data = JSON.parse(await file.text()); }
+    catch { toast('import failed: not valid JSON'); return; }
+    if (data && data.kind === SNAP_KIND) return applySnapshot(GATEWAY, data);  // legacy field snapshot
+    if (!data || data.kind !== 'mcp-gateway-settings') {
+      toast('import failed: not an mcp-gateway settings bundle'); return;
+    }
+    const names = Object.keys(data.backends || {});
+    if (!confirm(`Import settings for ${names.length} backend(s) (${names.join(', ')})? This replaces their stored overrides + instructions.`)) return;
+    try {
+      const r = await fetch('/admin/api/import', { method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode: 'replace', settings: data }) });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) { toast('import rejected: ' + (j.errors || [j.error || 'HTTP ' + r.status]).join(' · '), 6000); return; }
+      await load();
+      toast('imported settings for ' + (j.backends || []).length + ' backend(s)');
+    } catch (e) { toast('import failed: ' + e.message, 4000); }
   };
-  const url = URL.createObjectURL(new Blob([JSON.stringify(snap, null, 2)], { type: 'application/json' }));
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `mcp-gateway-${gw ? 'gateway' : scope}-fields.json`;
-  document.body.appendChild(a); a.click(); a.remove();
-  URL.revokeObjectURL(url);
-  toast(gw ? 'saved all fields' : `saved ${scope} fields`);
+  inp.click();
 }
 
 function loadSnapshot(scope) {
@@ -687,8 +838,6 @@ async function applySnapshot(scope, snap) {
   const gw = scope === GATEWAY;
   const byName = {};
   snap.backends.forEach(sb => { byName[sb.name] = sb; });
-  // Restore only live backends the snapshot names: gateway = all matching, single
-  // = just this one (which must appear in the file).
   const targets = (gw ? STATE.backends : STATE.backends.filter(b => b.name === scope))
     .filter(b => byName[b.name]);
   if (!targets.length) {
@@ -701,20 +850,16 @@ async function applySnapshot(scope, snap) {
   for (const b of targets) {
     const sb = byName[b.name];
     try {
-      // Text + pin first (live backends hot-reload; disabled ones just write
-      // config), enabled LAST so a re-mount reflects everything above.
       await api('PUT', '/admin/api/instructions', { backend: b.name, value: sb.instructions ?? '' });
       await api('POST', `/admin/api/backend/${encodeURIComponent(b.name)}/display-name`, { value: sb.display_name || '' });
       await api('POST', `/admin/api/backend/${encodeURIComponent(b.name)}/pin`, { value: !!sb.always_load });
-      // Pass 1 — reset every CURRENT tool to its default. Clears edits absent
-      // from the snapshot AND avoids a transient name collision when the snapshot
-      // swaps two tools' broadcast names (check_no_collision would reject it).
+      // Pass 1 — reset every current tool (clears absent edits; avoids transient
+      // rename collisions). Pass 2 — apply the snapshot's overrides.
       for (const ct of b.tools)
         await api('PUT', '/admin/api/override', { backend: b.name, tool_original: ct.original, override: EMPTY_OVERRIDE });
-      // Pass 2 — apply the snapshot's overrides for tools that still exist.
       const live = new Set(b.tools.map(t => t.original));
       for (const st of (sb.tools || [])) {
-        if (!live.has(st.original)) continue;  // tool removed upstream — skip
+        if (!live.has(st.original)) continue;
         await api('PUT', '/admin/api/override', {
           backend: b.name, tool_original: st.original,
           override: {
@@ -760,9 +905,7 @@ function scheduleSave(backend, original, card) {
   timers[key] = setTimeout(() => doSave(backend, original, card), 550);  // debounce
 }
 
-// Persist one tool's override. Each change is written to config.toml (atomic +
-// fsync) server-side, so nothing is lost on crash. keepalive lets it finish
-// during page unload.
+// Persist one tool's override (atomic + fsync server-side; keepalive on unload).
 async function doSave(backend, original, card, keepalive = false) {
   if (!namesValid(card)) return;  // #41
   const key = backend + '::' + original;
@@ -778,9 +921,9 @@ async function doSave(backend, original, card, keepalive = false) {
   } catch (e) { toast('save failed: ' + e.message); pending[key] = { backend, original, card }; }
 }
 
-// #62 — keep the in-memory STATE current after a debounced text save WITHOUT a
-// full load() (a re-render on every keystroke would yank focus mid-typing).
-// Mirrors the server's _override_vs_default: empty or equal-to-default -> null.
+// #62 — keep in-memory STATE current after a debounced save WITHOUT a full
+// load() (a re-render every keystroke would yank focus). Mirrors
+// _override_vs_default: empty or equal-to-default -> null.
 function ovVal(v, dflt) {
   v = (v || '').trim();
   return v && v !== (dflt || '') ? v : null;
@@ -816,7 +959,7 @@ window.addEventListener('beforeunload', () => {
 });
 
 // --- instructions save (per-backend: backend = name) ---------------------
-const instrPending = {};  // key -> textarea for an unsaved instructions edit
+const instrPending = {};
 function instrKey(backend) { return 'instr::' + (backend ?? GATEWAY); }
 
 function scheduleInstr(backend, ta) {
@@ -838,7 +981,6 @@ async function doSaveInstr(backend, ta, keepalive = false) {
       { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body, keepalive });
     const j = await r.json().catch(() => ({}));
     if (!r.ok) { toast('save failed: ' + (j.error || ('HTTP ' + r.status))); instrPending[key] = { backend, ta }; return; }
-    // #62 — patch STATE in place (same rule as set_instructions server-side)
     const bs = STATE && STATE.backends.find(x => x.name === backend);
     if (bs) bs.instructions = ovVal(ta.value, bs.default_instructions);
     flashSaved();
@@ -855,21 +997,20 @@ function toggleRun(backend, original, btn) {
   if (!t) return;
   const rows = t.params.filter(p => !p.hide).map(p => {
     const eff = p.name || p.default_name;
-    const req = p.required ? ' <span class="req">*</span>' : '';
+    const req = p.required ? ' <span class="req-badge">required</span>' : '';
     const hint = p.description || p.default_description || '';
-    return `<div style="margin-top:8px;"><label>${esc(eff)}${req}${hint ? ` <span class="si">· ${esc(hint).slice(0, 120)}</span>` : ''}</label>
-      <input type="text" class="r-arg" data-arg="${esc(eff)}" placeholder="value (JSON or plain text)"></div>`;
+    return `<div style="margin-top:8px;"><span class="flabel">${esc(eff)}${req}${hint ? ` <span class="si" style="text-transform:none;letter-spacing:0">· ${esc(hint).slice(0, 120)}</span>` : ''}</span>
+      <input type="text" class="r-arg mono" data-arg="${esc(eff)}" placeholder="value (JSON or plain text)"></div>`;
   }).join('');
   box.innerHTML = `${rows || '<div class="si" style="margin-top:8px">no parameters</div>'}
     <div style="margin-top:10px;display:flex;gap:8px;align-items:center;">
-      <button class="ghost r-go">Execute</button><span class="si r-status"></span></div>
+      <button class="btn r-go">Execute</button><span class="si r-status"></span></div>
     <pre class="preview r-out" style="display:none;margin:8px 0 0"></pre>`;
   box.style.display = '';
   box.querySelector('.r-go').onclick = () => runTool(backend, t, box);
 }
 
-// A value that parses as JSON is sent typed (numbers, booleans, objects,
-// arrays); anything else is sent as the raw string. Empty inputs are omitted.
+// JSON-parseable values are sent typed; anything else raw string; empty omitted.
 function argValue(raw) {
   const v = raw.trim();
   if (v === '') return undefined;
@@ -893,9 +1034,9 @@ async function runTool(backend, t, box) {
     if (r.structured != null) shown += (shown ? '\n\n— structured —\n' : '') + JSON.stringify(r.structured, null, 2);
     out.textContent = shown || '(empty result)';
     out.style.display = '';
-    out.style.borderColor = r.is_error ? 'var(--warn)' : '';
+    out.style.borderColor = r.is_error ? 'var(--am)' : '';
     status.textContent = (r.is_error ? '⚠ tool error' : '✓ ok') + ' · ' + r.ms + 'ms';
-  } catch (e) { status.textContent = ''; out.style.display = ''; out.style.borderColor = 'var(--warn)'; out.textContent = 'run failed: ' + e.message; }
+  } catch (e) { status.textContent = ''; out.style.display = ''; out.style.borderColor = 'var(--am)'; out.textContent = 'run failed: ' + e.message; }
 }
 
 async function resetTool(backend, original) {
@@ -903,16 +1044,14 @@ async function resetTool(backend, original) {
   catch (e) { toast('reset failed: ' + e.message); }
 }
 async function reintrospect(name) {
-  try { await api('POST', '/admin/api/introspect/' + encodeURIComponent(name)); await load(); toast('re-introspected ' + name); }
-  catch (e) { toast('introspect failed: ' + e.message); }
+  try { await api('POST', '/admin/api/introspect/' + encodeURIComponent(name)); await load(); toast('re-inspected ' + name); }
+  catch (e) { toast('inspect failed: ' + e.message); }
 }
 async function pinBackend(name, value) {
-  // #62 — reload re-syncs STATE so navigating away and back keeps the tick
   try { await api('POST', '/admin/api/backend/' + encodeURIComponent(name) + '/pin', { value }); await load(); toast(value ? 'pinned all tools (eager)' : 'unpinned'); }
   catch (e) { toast('pin failed: ' + e.message); await load(); }
 }
-// #38 — enable/disable one backend's broadcast (hot-reload). reload re-syncs the
-// sidebar toggle + dimming from the server's truth.
+// #38 — enable/disable one backend's broadcast (hot-reload).
 async function enableBackend(name, value) {
   try { await api('POST', '/admin/api/backend/' + encodeURIComponent(name) + '/enabled', { value }); await load(); toast(value ? 'enabled ' + name : 'disabled ' + name); }
   catch (e) { toast('toggle failed: ' + e.message); await load(); }
@@ -922,8 +1061,7 @@ async function enableAll(value) {
   try { await api('POST', '/admin/api/enabled', { value }); await load(); toast(value ? 'all backends enabled' : 'all backends disabled'); }
   catch (e) { toast('toggle failed: ' + e.message); await load(); }
 }
-// #42 — set a backend's display-only name (cosmetic; no restart). reload updates
-// the sidebar label + detail header.
+// #42 — set a backend's display-only name (cosmetic; no restart).
 async function setDisplayName(name, value) {
   try { await api('POST', '/admin/api/backend/' + encodeURIComponent(name) + '/display-name', { value }); await load(); }
   catch (e) { toast('rename failed: ' + e.message); }
@@ -933,10 +1071,7 @@ async function delBackend(name) {
   try { const r = await api('DELETE', '/admin/api/backend/' + encodeURIComponent(name)); SELECTED = null; afterRestart(r, 'removed'); }
   catch (e) { toast('remove failed: ' + e.message); }
 }
-// Manual on-demand restart of the daemon (#56) with a ~10s grace countdown so
-// in-flight requests can drain and the restart is never a surprise; Cancel aborts,
-// "Restart now" skips the wait. The daemon keeps serving during the countdown
-// (the POST that triggers the kickstart only fires at 0), so that IS the drain.
+// Manual restart (#56) with a ~10s grace countdown; Cancel aborts.
 let _rsTimer = null;
 function restartGateway() {
   let n = 10;
@@ -960,9 +1095,7 @@ async function doRestartNow() {
   try { const r = await api('POST', '/admin/api/restart'); afterRestart(r, 'restart requested'); }
   catch (e) { toast('restart failed: ' + e.message); }
 }
-// Honor the honest reloaded state (#53): a real launchd restart → poll back; in
-// dev/foreground there is no restart, so just say so and refresh from disk.
-// #7: an import hot-adds into the running daemon — live immediately, no restart.
+// Honor the honest reloaded state (#53); #7 hot-add needs no restart.
 function afterRestart(r, verb) {
   if (r && r.reloaded === 'hot-add') { toast(verb + ' — live, no restart needed'); load(); }
   else if (r && r.reloaded === 'mount-failed') { toast(verb + ' — saved, but mounting failed; check logs / restart gateway'); load(); }
@@ -972,7 +1105,7 @@ function afterRestart(r, verb) {
 
 // import modal
 function openImport() {
-  // #124: always present a clean form — a previous import's values must not leak.
+  // #124: always present a clean form.
   for (const id of ['im_name','im_url','im_ah','im_av','im_headers','im_hh','im_cmd','im_args'])
     $('#'+id).value = '';
   $('#im_oauth').checked = false;
@@ -983,7 +1116,6 @@ function openImport() {
 }
 function closeImport() { $('#importBg').classList.remove('show'); }
 function importTransportChange() {
-  // http / streamable-http / sse all use the URL+auth fields; only stdio differs.
   const stdio = $('#im_transport').value === 'stdio';
   $('#im_http').style.display = stdio ? 'none' : '';
   $('#im_stdio').style.display = stdio ? '' : 'none';
@@ -1022,11 +1154,7 @@ async function waitReload() {
 
 // HTML-context escape (text nodes + quoted attribute values).
 function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
-// For a value dropped into an inline on*="fn('…')" handler: the handler is a JS
-// single-quoted string that itself lives inside an HTML double-quoted attribute,
-// so the parser HTML-decodes ONCE before JS runs. JS-escape ( \ and ' ) first,
-// THEN HTML-escape, so the decode leaves a correctly JS-escaped string and a
-// backend-controlled tool name like  x');alert(1)//  can't break out. Issue #51.
+// JS-escape then HTML-escape for inline on*="fn('…')" handlers (issue #51).
 function escJS(s) { return esc(String(s ?? '').replace(/\\/g, '\\\\').replace(/'/g, "\\'")); }
 
 load();
