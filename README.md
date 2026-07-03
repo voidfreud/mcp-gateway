@@ -10,6 +10,25 @@ Runs as one persistent loopback HTTP daemon, started at login, shared by every
 Claude Code session in every project. It is a thin wrapper over
 [FastMCP](https://github.com/prefecthq/fastmcp) (v3) — mostly config, not code.
 
+## Why this exists
+
+MCP is largely unusable in Claude Code today, and the fault is upstream: server
+authors ship tools with vague or missing names, empty `instructions`, and
+parameter descriptions that tell the model nothing. The protocol is fine — the
+surface authors expose over it is not, so most MCPs arrive as dead weight the
+model can't reliably select or call.
+
+And that waste is doubly a shame, because Claude Code **lazy-loads** tools: an
+MCP costs almost nothing to keep connected until one of its tools is actually
+called. They are nearly free to have around, and drastically underused for it.
+
+mcp-gateway reclaims them. It lets us override the text a backend broadcasts —
+names, `instructions`, parameter docs, and eager-load pinning — until a sloppy
+server reads to the model like a well-designed one, without forking it. It's
+tedious hand-work, but it turns otherwise-useless MCPs into ones that work. The
+[`mcp-tool-design`](.claude/skills/mcp-tool-design/SKILL.md) skill in this repo
+is the rubric we grade those overrides against.
+
 ## What it does
 
 Per tool, from `config.toml`, it can:

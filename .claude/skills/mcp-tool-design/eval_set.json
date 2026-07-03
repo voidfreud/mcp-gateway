@@ -1,0 +1,22 @@
+[
+  {"query": "I'm adding a delete_document tool to our MCP server — can you help me write its description and input schema?", "should_trigger": true},
+  {"query": "review the tool definitions in this MCP server, the model keeps calling the wrong one", "should_trigger": true},
+  {"query": "what should I put in the server instructions field for my MCP server so Claude actually picks up the tools?", "should_trigger": true},
+  {"query": "should this param be an enum or just a string, and do I mark it required? it's for a search_orders tool", "should_trigger": true},
+  {"query": "our mcp tool for refunds is dangerous, how do I signal that so clients confirm before running it", "should_trigger": true},
+  {"query": "rename these tools — right now they're called getData, thing2, and query. building an mcp integration", "should_trigger": true},
+  {"query": "the descriptions on my FastMCP tools are one-liners and Claude misuses them, how detailed should they be", "should_trigger": true},
+  {"query": "audit our internal MCP server's tool surface before we ship it to the connector directory", "should_trigger": true},
+  {"query": "what fields should a tool return? right now we dump the whole DB row including internal uuids", "should_trigger": true},
+  {"query": "set the readOnlyHint and destructiveHint annotations correctly across our tool set", "should_trigger": true},
+  {"query": "how do I install the github MCP server in claude code", "should_trigger": false},
+  {"query": "my MCP server won't connect, the /mcp panel shows it failed — how do I debug the OAuth", "should_trigger": false},
+  {"query": "add the playwright mcp server to my .mcp.json for this project", "should_trigger": false},
+  {"query": "write a python function that deletes a document by id", "should_trigger": false},
+  {"query": "help me design the REST API endpoints for our orders service", "should_trigger": false},
+  {"query": "should this be an MCP server or a Claude Code skill?", "should_trigger": false},
+  {"query": "how do I enable tool search / set ENABLE_TOOL_SEARCH in claude code", "should_trigger": false},
+  {"query": "write a JSON schema to validate this config file we load at startup", "should_trigger": false},
+  {"query": "the mcp server tool output is getting truncated, how do I raise MAX_MCP_OUTPUT_TOKENS", "should_trigger": false},
+  {"query": "document these REST parameters in our OpenAPI spec", "should_trigger": false}
+]
