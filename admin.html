@@ -131,7 +131,8 @@
   <div class="modal">
     <h3>Import an MCP backend</h3>
     <label>Name (id + tool prefix)</label>
-    <input type="text" id="im_name" placeholder="exa" />
+    <input type="text" id="im_name" placeholder="exa"
+           autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" />
     <label>Transport</label>
     <select id="im_transport" onchange="importTransportChange()"
             style="width:100%;background:var(--panel2);border:1px solid var(--line);color:var(--fg);border-radius:7px;padding:7px 9px;">
@@ -142,24 +143,24 @@
     </select>
     <div id="im_http">
       <label>URL</label>
-      <input type="text" id="im_url" placeholder="https://host/mcp" />
+      <input type="text" id="im_url" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="https://host/mcp" />
       <div class="row">
-        <div><label>Auth header (optional)</label><input type="text" id="im_ah" placeholder="Authorization" /></div>
-        <div><label>Auth value (optional)</label><input type="text" id="im_av" placeholder="Bearer ${EXA_TOKEN}" /></div>
+        <div><label>Auth header (optional)</label><input type="text" id="im_ah" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="Authorization" /></div>
+        <div><label>Auth value (optional)</label><input type="text" id="im_av" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="Bearer ${EXA_TOKEN}" /></div>
       </div>
       <label>Extra headers (optional, one per line: Name: value — ${ENV} ok)</label>
-      <textarea id="im_headers" rows="2" placeholder="X-Client-Id: ${MY_ID}"></textarea>
+      <textarea id="im_headers" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" rows="2" placeholder="X-Client-Id: ${MY_ID}"></textarea>
       <div class="row">
         <div><label>Headers helper (optional command printing JSON headers)</label>
-          <input type="text" id="im_hh" placeholder="my-sso-tool print-headers" /></div>
+          <input type="text" id="im_hh" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="my-sso-tool print-headers" /></div>
         <div style="align-self:end"><label class="chk"><input type="checkbox" id="im_oauth"> OAuth (browser flow on first connect)</label></div>
       </div>
     </div>
     <div id="im_stdio" style="display:none">
       <label>Command</label>
-      <input type="text" id="im_cmd" placeholder="/path/to/server  or  uvx" />
+      <input type="text" id="im_cmd" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="/path/to/server  or  uvx" />
       <label>Args (space-separated)</label>
-      <input type="text" id="im_args" placeholder="serena-mcp" />
+      <input type="text" id="im_args" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="serena-mcp" />
     </div>
     <div class="err" id="im_err"></div>
     <div class="foot">

@@ -5,11 +5,12 @@ from __future__ import annotations
 
 import os
 import string
+import tomllib
 
 import pytest
-import tomllib
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
+from pydantic import ValidationError
 
 import config_loader as cl
 
@@ -109,7 +110,9 @@ def test_roundtrip_handles_tricky_description():
                 "tools": [
                     {
                         "original": "t",
-                        "description": 'has "quotes", a \\backslash,\nand a newline = ok',
+                        "description": (
+                            'has "quotes", a \\backslash,\nand a newline = ok'
+                        ),
                     }
                 ],
             }
@@ -134,6 +137,7 @@ def test_self_check_main_runs_clean():
     r = subprocess.run(
         [sys.executable, "config_loader.py", "config.default.toml"],
         cwd=repo,
+        check=False,  # returncode asserted below with stderr attached
         capture_output=True,
         text=True,
     )
@@ -580,7 +584,7 @@ def test_legacy_pair_wins_over_headers_on_clash():
 def test_oauth_passes_through():
     e = cl.backend_entry(_http_backend(auth="oauth"))
     assert e["auth"] == "oauth"
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         _http_backend(auth="basic")  # only "oauth" is a valid literal
 
 
