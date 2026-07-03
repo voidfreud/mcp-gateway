@@ -1,0 +1,67 @@
+{
+  "skill_name": "create-mcp",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "I want to build an MCP server that gives AI clients access to CoinGecko's free public API. Users should be able to: get current prices for any cryptocurrency by name or symbol, see the top 10 gainers and losers over the last 24 hours, and search for a coin by name. No API key needed — CoinGecko's public endpoints are free. I plan to deploy it as an HTTP server on Railway.",
+      "expected_output": "A complete TypeScript MCP project scaffolded with: client-compatible tool names (e.g. crypto_price, crypto_gainers, crypto_search unless the target clients are verified to support dotted names), server instructions field, all tools annotated with READONLY_EXTERNAL (since they call an external API), parameter .describe() + .meta({ title }) on every input, getOrFetch caching with appropriate TTL, safeFetch with error handling, smithery.remote-config.json (since it's hosted), package.json with all metadata fields including homepage and repository, hosted discovery surfaces for AI search, and a smithery.remote-config.json file.",
+      "files": [],
+      "expectations": [
+        "Tool names are specific and client-compatible (e.g. crypto_price or coin_price, not vague get_price or getCryptoPrice)",
+        "All tools have READONLY_EXTERNAL annotations (readOnlyHint: true and openWorldHint: true)",
+        "All parameters have .describe() with example values",
+        "All parameters have .meta({ title }) set",
+        "Server has an instructions field explaining tool usage order",
+        "Live API calls are wrapped in getOrFetch() with a TTL constant inside the handler body (not just imported)",
+        "All tool handlers have try/catch that returns isError: true on error",
+        "package.json includes homepage, repository, keywords, description, author, license — none are placeholder values like 'https://github.com/user/repo'",
+        "smithery.remote-config.json is present (since it's a hosted HTTP server)",
+        "Hosted discovery surfaces are planned or generated: /health, /llms.txt, sitemap, and crawlable text/JSON pages for AI search",
+        "Docs clearly state that ChatGPT Search can cite pages but cannot execute MCP tools unless connected as an app/connector",
+        "At least one prompt is registered using server.registerPrompt()",
+        "Every tool description starts with a verb (Get, List, Search, Find, Create) — not 'This tool', 'A tool', or a noun phrase",
+        "The registered prompt's message text explicitly names at least one tool by its actual client-compatible name (e.g. 'Call crypto_price' or 'use crypto_search') — not a generic template"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "I have an existing MCP server I need you to audit and fix. The source file is at evals/files/broken-mcp-index.ts. It's a recipe finder MCP. Please audit it, fix all the issues, and tell me the estimated Smithery score before and after.",
+      "expected_output": "The audit identifies: noun-first descriptions, missing annotations, missing parameter .describe() and .meta(), no server instructions, static data loaded inside handlers (not at startup), no error handling (throws instead of returning isError:true), no caching, no prompts, vague get_ prefix naming, and missing discovery guidance. All issues are fixed in the output code. A before/after score report is provided. package.json and smithery config files are written as output files.",
+      "files": ["evals/files/broken-mcp-index.ts"],
+      "expectations": [
+        "Identifies and fixes vague get_* tool naming to specific client-compatible names (recipe_list, recipe_detail, recipe_search or similar)",
+        "Identifies and fixes the missing annotations (adds readOnlyHint: true)",
+        "Identifies and fixes the missing .describe() on parameters (cuisine, maxTime, id, ingredients, matchAll)",
+        "Identifies and fixes the static file loading inside handlers (moves readFileSync to module level)",
+        "Identifies and fixes the missing try/catch in get_recipe_detail that throws instead of returning isError",
+        "Adds server instructions field to McpServer options",
+        "Provides a before/after estimated Smithery score",
+        "Mentions the 20pt Smithery UI manual steps (icon, display name, server description)",
+        "Writes package.json as an output file with name, description, homepage, repository, keywords — not just suggests adding these fields",
+        "Writes smithery.yaml or smithery.remote-config.json as an output file with required: []",
+        "Does not force dotted tool names if target clients are Claude clients that may not support them reliably"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "Build me an MCP that exposes OpenWeatherMap data. I have an API key. I want three tools: get current weather for a city, get a 5-day forecast for a city, and compare current weather across multiple cities. This will run locally via npx on Claude Desktop.",
+      "expected_output": "A complete TypeScript MCP with: client-compatible tool names (weather_current, weather_forecast, weather_compare or similar), smithery.yaml with configSchema that has apiKey as optional (required: []), the API key passed via environment variable, READONLY_EXTERNAL annotations (external API), appropriate TTL caching (30min for weather, 4h for forecast), parameter .describe() + .meta(), server instructions, package.json with all fields, MCPB packaging guidance for one-click local setup, and a prompt for a typical weather workflow.",
+      "files": [],
+      "expectations": [
+        "Tool names are client-compatible (e.g. weather_current, weather_forecast, weather_compare)",
+        "smithery.yaml is generated with configSchema block (not smithery.remote-config.json — this is a stdio server)",
+        "smithery.yaml has required: [] so the API key is optional not required",
+        "API key is accessed via process.env not hardcoded",
+        "Weather tools use READONLY_EXTERNAL annotation (openWorldHint: true)",
+        "weather_current uses a shorter TTL constant (30min range) than weather_forecast (4h range) — verified in the handler call, not just the TTL definition",
+        "All parameters have .describe() with concrete example values",
+        "Server instructions mention which tool to call first and in what order",
+        "package.json has homepage, repository, keywords, description — none are the boilerplate placeholder 'https://github.com/user/repo'",
+        "Every tool description starts with a verb (Get, List, Search, Compare) — not 'This tool' or a noun phrase",
+        "README or release checklist includes MCPB packaging guidance for reducing Claude Desktop setup friction",
+        "The registered prompt message text explicitly names at least one of the three weather tools by name",
+        "If the server startup validates API key presence (e.g. checks for empty key), the smithery.yaml commandFunction always passes the env var — or the server handles a missing key gracefully without calling process.exit(1)"
+      ]
+    }
+  ]
+}
