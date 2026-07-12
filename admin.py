@@ -323,6 +323,23 @@ def check_no_collision(
             )
 
 
+def uniquify_name(base: str, taken: set[str]) -> str:
+    """Deterministically suffix *base* (``_2``, then ``_3``, …) until it is not
+    in *taken* (#22). The result always satisfies the ``[A-Za-z0-9_-]{1,64}``
+    name rule: when appending the suffix would overflow 64 chars, the base is
+    trimmed so the suffix fits. Returns *base* unchanged when it doesn't
+    collide."""
+    if base not in taken:
+        return base
+    n = 2
+    while True:
+        suffix = f"_{n}"
+        candidate = base[: 64 - len(suffix)] + suffix
+        if candidate not in taken:
+            return candidate
+        n += 1
+
+
 def build_state(cfg: GatewayConfig) -> dict:
     backends = []
     for b in cfg.backends:
@@ -471,7 +488,7 @@ def _override_vs_default(value, default) -> str | None:
     return v
 
 
-def apply_tool_override(cfg: GatewayConfig, backend: str, payload: dict) -> None:
+def apply_tool_override(cfg: GatewayConfig, backend: str, payload: dict) -> str | None:
     """Upsert one tool's override from a UI payload, diffing against defaults.
 
     Every editable field arrives prefilled with its effective value; we only
@@ -482,6 +499,10 @@ def apply_tool_override(cfg: GatewayConfig, backend: str, payload: dict) -> None
     partial PUT (e.g. description only) can't silently resurrect a tool the UI
     disabled. The UI always sends every field, so it is unaffected; to reset a
     field explicitly, send its default value.
+
+    Returns the final broadcast name when the opt-in ``"on_collision":
+    "uniquify"`` flag (payload top level, #22) auto-suffixed a colliding
+    rename, else None (the strict-reject default behaviour is unchanged).
     """
     b = next((x for x in cfg.backends if x.name == backend), None)
     if b is None:
@@ -559,14 +580,32 @@ def apply_tool_override(cfg: GatewayConfig, backend: str, payload: dict) -> None
         always_load=always_load,
         params=params,
     )
+    # Opt-in escape hatch (#22): `"on_collision": "uniquify"` at the payload
+    # top level suffixes a colliding broadcast NAME (_2, _3, …) into uniqueness
+    # instead of rejecting. Description collisions still reject below — a
+    # duplicated description can't be "uniquified" into something meaningful.
+    uniquified: str | None = None
+    if payload.get("on_collision") == "uniquify" and new.enabled:
+        eff_name = new.name or original
+        taken = {
+            t["name"]
+            for t in effective_tools(cfg, backend)
+            if t["original"] != original
+        }
+        if eff_name in taken:
+            final = uniquify_name(eff_name, taken)
+            # equal-to-default still inherits (config stays minimal)
+            new.name = final if final != default_name else None
+            uniquified = final
     has_override = bool(
-        name or title or description or not enabled or always_load or params
+        new.name or title or description or not enabled or always_load or params
     )
     # Reject a rename/description that would collide with another broadcast tool.
     check_no_collision(cfg, backend, original, new)
     b.tools = [t for t in b.tools if t.original != original]
     if has_override:
         b.tools.append(new)
+    return uniquified
 
 
 # ---------------------------------------------------------------------------
@@ -916,11 +955,16 @@ def _settings_routes(ctx: _AdminCtx) -> list[Route]:
         payload = await request.json()
         cfg = ctx.load()
         try:
-            apply_tool_override(cfg, payload["backend"], payload)
+            uniquified = apply_tool_override(cfg, payload["backend"], payload)
         except (cl.ConfigError, KeyError) as exc:
             return _err(str(exc))
         ctx.commit(cfg, payload["backend"])
-        return JSONResponse({"ok": True, "reloaded": "in-process"})
+        out: dict = {"ok": True, "reloaded": "in-process"}
+        if uniquified is not None:
+            # #22: the opt-in uniquify stored a suffixed name — hand the final
+            # name back so the UI can reflect what actually shipped.
+            out.update({"name": uniquified, "uniquified": True})
+        return JSONResponse(out)
 
     async def reset_tool(request: Request):
         """Clear all overrides for one tool (revert to the backend default)."""

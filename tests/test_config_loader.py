@@ -84,6 +84,8 @@ def gw_config_dict(draw) -> dict:
         "log_file": "~/x.log",
         "backends": backends,
     }
+    if draw(st.booleans()):  # optional gateway bearer token (#26), stored as a ref
+        out["bearer_token"] = "${GW_TOKEN}"
     return out
 
 
@@ -424,6 +426,31 @@ def test_backend_instructions_survive_toml_roundtrip():
     cfg = _instr_cfg([_http("a", instructions="line1\nline2 = ok")])
     reparsed = cl.GatewayConfig.model_validate(tomllib.loads(cl.dump_toml(cfg)))
     assert reparsed.backends[0].instructions == cfg.backends[0].instructions
+
+
+# --- gateway bearer token (#26) ---------------------------------------------
+# The stored VALUE is a ${ENV} ref (like every secret); server._build_app
+# resolves it once at startup via expand_env — see tests/test_server.py.
+
+
+def test_bearer_token_roundtrips_toml():
+    cfg = cl.GatewayConfig.model_validate(
+        {
+            "bearer_token": "${MCP_GATEWAY_TOKEN}",
+            "backends": [{"name": "b", "transport": "stdio", "command": "/bin/x"}],
+        }
+    )
+    assert cl.to_raw(cfg)["bearer_token"] == "${MCP_GATEWAY_TOKEN}"
+    reparsed = cl.GatewayConfig.model_validate(tomllib.loads(cl.dump_toml(cfg)))
+    assert reparsed.bearer_token == "${MCP_GATEWAY_TOKEN}"
+
+
+def test_bearer_token_omitted_when_unset():
+    # default None -> the key never lands in config.toml (config stays minimal)
+    cfg = _one_backend()
+    assert cfg.bearer_token is None
+    assert "bearer_token" not in cl.to_raw(cfg)
+    assert "bearer_token" not in cl.dump_toml(cfg)
 
 
 # --- durable save ----------------------------------------------------------

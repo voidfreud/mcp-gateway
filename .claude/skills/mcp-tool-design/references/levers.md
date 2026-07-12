@@ -28,7 +28,7 @@ Not levers: schemas (types/enums/required), annotations, response shapes — tho
 
 ## Guardrails the app enforces
 
-- Broadcast names: `[A-Za-z0-9_-]`, unique per backend (each backend is its own endpoint — cross-backend name reuse is fine). Collision-checked on save; a deliberately-set description identical to a sibling's is also rejected.
+- Broadcast names: `[A-Za-z0-9_-]`, unique per backend (each backend is its own endpoint — cross-backend name reuse is fine). Collision-checked on save; opt-in escape hatch per save (#22): `"on_collision": "uniquify"` at the top level of the `PUT /admin/api/override` payload auto-suffixes a colliding name (`_2`, `_3`, …) instead of rejecting, and the response then carries the final `name` + `uniquified: true`. A deliberately-set description identical to a sibling's is always rejected (no uniquify for descriptions).
 - Overrides are stored as diffs against captured defaults — saving the default value stores nothing.
 - All admin writes are lock-wrapped and the config save is atomic; edit through the API, not by hand-editing `config.toml` under a running daemon.
 

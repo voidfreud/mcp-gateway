@@ -337,6 +337,9 @@ async function api(method, path, body) {
 }
 function toast(msg, ms=2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('show'); setTimeout(() => t.classList.remove('show'), ms); }
 function flashSaved() { const s = $('#saved'); s.classList.add('show'); setTimeout(() => s.classList.remove('show'), 1200); }
+// #22 — persistent client-side preference (default off): on a name collision,
+// retry the save once asking the server to auto-suffix (_2, _3, …).
+function autoUniquify() { return localStorage.getItem('autoUniquify') === '1'; }
 
 // short transport label for chips: streamable-http -> shttp
 function chipT(t) { return t === 'streamable-http' ? 'shttp' : t; }
@@ -617,6 +620,9 @@ function renderGateway() {
       <span class="meta">v${esc(STATE.version || '?')}</span>
       <span class="meta">${base}</span>
       <span class="spacer" style="flex:1"></span>
+      <label style="display:flex;align-items:center;gap:6px;font:11px system-ui;color:var(--tm);cursor:pointer"
+        title="on a broadcast-name collision, retry the save once with an auto-suffixed name (_2, _3, …) instead of failing (#22)">
+        <input type="checkbox" class="tgl" id="autoUniq"> auto-uniquify name collisions</label>
       <button class="btn" style="font-size:11px" onclick="exportSettings()"
         title="download the complete stored settings as one JSON bundle">Export</button>
       <button class="btn" style="font-size:11px" onclick="importSettings()"
@@ -666,6 +672,10 @@ function renderGateway() {
     mt.indeterminate = on > 0 && on < total;
     mt.addEventListener('change', () => enableAll(mt.checked));
   }
+  // #22 — the preference lives client-side only (localStorage, default off).
+  const au = $('#autoUniq');
+  au.checked = autoUniquify();
+  au.addEventListener('change', () => localStorage.setItem('autoUniquify', au.checked ? '1' : '0'));
 }
 
 // Tool card — editable fields prefilled with effective values (#62 semantics).
@@ -947,12 +957,24 @@ async function doSave(backend, original, card, keepalive = false) {
   if (!namesValid(card)) return;  // #41
   const key = backend + '::' + original;
   clearTimeout(timers[key]); delete timers[key]; delete pending[key];
-  const body = JSON.stringify({ backend, tool_original: original, override: gather(card) });
+  const put = payload => fetch('/admin/api/override',
+    { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload), keepalive });
+  const payload = { backend, tool_original: original, override: gather(card) };
   try {
-    const r = await fetch('/admin/api/override',
-      { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body, keepalive });
-    const j = await r.json().catch(() => ({}));
+    let r = await put(payload);
+    let j = await r.json().catch(() => ({}));
+    // #22 — opted-in auto-fix: on a name collision, retry ONCE with the server
+    // suffixing the name (_2, _3, …) into uniqueness. Default off; never silent.
+    if (!r.ok && autoUniquify() && /already used by tool/.test(j.error || '')) {
+      r = await put({ ...payload, on_collision: 'uniquify' });
+      j = await r.json().catch(() => ({}));
+    }
     if (!r.ok) { toast('save failed: ' + (j.error || ('HTTP ' + r.status))); pending[key] = { backend, original, card }; return; }
+    if (j.uniquified && j.name) {  // reflect the final stored name in the card
+      $('.f-name', card).value = j.name;
+      $('.newname', card).textContent = j.name;
+      toast(`name taken — saved as "${j.name}"`);
+    }
     patchToolState(backend, original, gather(card));
     flashSaved();
   } catch (e) { toast('save failed: ' + e.message); pending[key] = { backend, original, card }; }

@@ -4,6 +4,7 @@ apply_tool_override (store iff differs), and build_state merge."""
 from __future__ import annotations
 
 import json
+import re
 import string
 
 import pytest
@@ -718,6 +719,133 @@ def test_duplicate_description_rejected(defaults_dir):
                 },
             },
         )
+
+
+# --- #22 opt-in collision auto-uniquify -------------------------------------
+
+# Full-width name strategy: the whole legal charset up to the 64-char cap, so
+# the property exercises the trim-to-fit branch too.
+name64 = st.text(
+    alphabet=string.ascii_letters + string.digits + "_-", min_size=1, max_size=64
+)
+
+
+def test_uniquify_appends_2_then_3():
+    assert admin.uniquify_name("t", set()) == "t"  # no collision -> untouched
+    assert admin.uniquify_name("t", {"t"}) == "t_2"
+    assert admin.uniquify_name("t", {"t", "t_2"}) == "t_3"
+    assert admin.uniquify_name("t", {"t", "t_2", "t_3"}) == "t_4"
+
+
+def test_uniquify_trims_base_to_keep_64_char_cap():
+    base = "a" * 64
+    assert admin.uniquify_name(base, {base}) == "a" * 62 + "_2"
+    # the trimmed _2 also taken -> rolls to _3, still exactly at the cap
+    assert admin.uniquify_name(base, {base, "a" * 62 + "_2"}) == "a" * 62 + "_3"
+
+
+@given(base=name64, taken=st.sets(name64, max_size=20))
+def test_uniquify_unique_valid_deterministic(base, taken):
+    out = admin.uniquify_name(base, taken)
+    assert out not in taken
+    assert re.fullmatch(r"[A-Za-z0-9_-]{1,64}", out)  # the _NAME_RE rule holds
+    assert out == admin.uniquify_name(base, taken)  # deterministic
+    if base not in taken:
+        assert out == base  # never renames a non-colliding name
+
+
+def test_apply_uniquify_flag_stores_suffixed_name(defaults_dir):
+    _write_defaults_multi(defaults_dir, "b", [("t1", "d1"), ("t2", "d2")])
+    cfg = _single_cfg()
+    final = admin.apply_tool_override(
+        cfg,
+        "b",
+        {
+            "tool_original": "t1",
+            "on_collision": "uniquify",
+            "override": {"name": "t2", "enabled": True, "params": []},
+        },
+    )
+    assert final == "t2_2"
+    assert cfg.backends[0].tools[0].name == "t2_2"
+
+
+def test_apply_uniquify_flag_no_collision_returns_none(defaults_dir):
+    # flag present but nothing collides -> stored verbatim, no uniquified name
+    _write_defaults_multi(defaults_dir, "b", [("t1", "d1"), ("t2", "d2")])
+    cfg = _single_cfg()
+    final = admin.apply_tool_override(
+        cfg,
+        "b",
+        {
+            "tool_original": "t1",
+            "on_collision": "uniquify",
+            "override": {"name": "fresh", "enabled": True, "params": []},
+        },
+    )
+    assert final is None
+    assert cfg.backends[0].tools[0].name == "fresh"
+
+
+def test_apply_without_flag_still_rejects_collision(defaults_dir):
+    # the default (no on_collision key) stays exactly today's strict reject
+    _write_defaults_multi(defaults_dir, "b", [("t1", "d1"), ("t2", "d2")])
+    cfg = _single_cfg()
+    with pytest.raises(cl.ConfigError, match="already used"):
+        admin.apply_tool_override(
+            cfg,
+            "b",
+            {
+                "tool_original": "t1",
+                "override": {"name": "t2", "enabled": True, "params": []},
+            },
+        )
+
+
+def test_apply_uniquify_flag_keeps_description_collision_rejected(defaults_dir):
+    # uniquifying a DESCRIPTION makes no sense — it rejects even with the flag
+    _write_defaults_multi(defaults_dir, "b", [("t1", "d1"), ("t2", "SHARED DESC")])
+    cfg = _single_cfg()
+    with pytest.raises(cl.ConfigError, match="identical"):
+        admin.apply_tool_override(
+            cfg,
+            "b",
+            {
+                "tool_original": "t1",
+                "on_collision": "uniquify",
+                "override": {
+                    "description": "SHARED DESC",
+                    "enabled": True,
+                    "params": [],
+                },
+            },
+        )
+
+
+def test_apply_uniquify_skips_names_of_other_overrides(defaults_dir):
+    # taken = EFFECTIVE names: t2 already renamed to "x", so t1 -> "x" lands "x_2"
+    _write_defaults_multi(defaults_dir, "b", [("t1", "d1"), ("t2", "d2")])
+    cfg = _single_cfg()
+    admin.apply_tool_override(
+        cfg,
+        "b",
+        {
+            "tool_original": "t2",
+            "override": {"name": "x", "enabled": True, "params": []},
+        },
+    )
+    final = admin.apply_tool_override(
+        cfg,
+        "b",
+        {
+            "tool_original": "t1",
+            "on_collision": "uniquify",
+            "override": {"name": "x", "enabled": True, "params": []},
+        },
+    )
+    assert final == "x_2"
+    t1 = next(t for t in cfg.backends[0].tools if t.original == "t1")
+    assert t1.name == "x_2"
 
 
 def test_cross_backend_same_broadcast_name_ok(defaults_dir):

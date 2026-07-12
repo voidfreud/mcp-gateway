@@ -232,6 +232,12 @@ class GatewayConfig(BaseModel, extra="forbid"):
     host: str = "127.0.0.1"
     port: int = 9100
     log_file: str = "~/.local/state/mcp-gateway/gateway.log"
+    # Optional bearer token required on every backend MCP endpoint (#26) —
+    # defense-in-depth on the loopback bind. Store a ${ENV} ref, never the raw
+    # value; the server resolves it ONCE at startup via expand_env (a missing
+    # var fails loudly), not per request. /admin, /health and /ready stay open
+    # (see server.BearerAuthMiddleware).
+    bearer_token: str | None = None
     backends: list[Backend] = Field(default_factory=list)
 
     @model_validator(mode="after")
@@ -549,6 +555,8 @@ def to_raw(cfg: GatewayConfig) -> dict:  # noqa: PLR0915 — field-by-field TOML
         "port": cfg.port,
         "log_file": cfg.log_file,
     }
+    if cfg.bearer_token is not None:  # default None — only persist when set (#26)
+        out["bearer_token"] = cfg.bearer_token
     out["backends"] = [_backend(b) for b in cfg.backends]
     return out
 
