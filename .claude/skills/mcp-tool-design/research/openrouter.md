@@ -1,6 +1,6 @@
 # openrouter — research cache
 
-Researched 2026-07-03. Tools seen: benchmarks, credits-get, app-rankings, rankings-daily, model-endpoints, generation-get, model-get, models-list, providers-list, ping, docs-search (+ chat-send, view-skill DISABLED). Sources: live schema dump via local `/openrouter/mcp` tools/list, live probes via `POST /admin/api/run`, upstream = official `mcp.openrouter.ai/mcp` (`OpenRouterMcp` v0.0.2).
+Researched 2026-07-03; **refreshed 2026-07-12 after an upstream full-rename** (every tool renamed, e.g. models-list→list-models, chat-send→send-message; all overrides migrated to the new originals — the levers.md `override_no_match` recipe). Tools seen 2026-07-12: list-models, get-model, list-model-endpoints, list-benchmarks, list-daily-model-rankings, list-app-rankings, list-task-classifications, get-credits, get-generation, list-providers, search-docs, generate-image, send-feedback, ping (+ send-message, view-skills DISABLED). Sources: live schema dump via local `/openrouter/mcp` tools/list, live probes via `POST /admin/api/run`, upstream = official `mcp.openrouter.ai/mcp` (`OpenRouterMcp` v0.0.2).
 
 ## Backend / auth
 - Official OpenRouter MCP, streamable-http, **stateless**. Was `auth = "oauth"` — FastMCP stores OAuth tokens in memory, so every daemon kickstart dropped the token and dynamic re-registration then failed upstream (500 "Failed to register client"), leaving the mount alive but tools/list EMPTY (silent-empty, no error).
@@ -31,3 +31,9 @@ No per-call billing on any enabled tool (credits are the account's LLM spend, no
 - OpenRouter API usage ("how do I stream via OpenRouter") → docs-search here, NOT context7 (fresher, canonical) — mirror of the cc-docs pattern.
 - Anthropic-direct model IDs/pricing → the claude-api skill / Anthropic docs; OpenRouter prices for Anthropic models are OpenRouter's, not Anthropic API list prices.
 - Model quality *benchmarks* live here (artificial-analysis, design-arena); general "best model" web chatter → Exa/Tavily.
+
+## New tools (upstream 2026-07-12; tuned same day, cold-eval 5/5)
+- **list-task-classifications** → `list_usage_by_task` — traffic market-share by task type (code gen, web search, …) + top models per type; shares are 0–1 fractions, no absolute volumes. Boundary added vs list_top_models (by model) / list_top_apps (by app).
+- **send-feedback** → `report_generation_issue` — feedback on one generation (id from get_generation_cost). Upstream desc referenced raw/disabled names (get-generation, send-message) — rewritten.
+- **generate-image** → `generate_image` — text→image inline content block; BILLS the account per call; flat params (model/prompt/size), no request wrapper. Desc points at search_model_catalog (output_modalities=image) for slugs.
+- Instructions extended (+117B → 1584B/2048) with a one-line route for both new capabilities.
