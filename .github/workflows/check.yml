@@ -8,12 +8,41 @@ on:
   push:
     branches: [main]
 
+# A superseded run (new push to the same PR/branch) is cancelled instead of
+# burning minutes to completion.
+concurrency:
+  group: check-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
 jobs:
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
+        with:
+          # cache the uv download/wheel cache between runs, keyed on the lock
+          enable-cache: true
+          cache-dependency-glob: uv.lock
       - uses: extractions/setup-just@v2
+      # the lockfile must be consistent with pyproject — catches a dependency
+      # edit that forgot `uv lock`
+      - run: uv lock --check
       - run: uv sync
       - run: just check
+      # the wheel must build and carry its data files (admin.html + the seed
+      # config ship inside the package — a packaging regression breaks install)
+      - run: uv build
+      - run: |
+          python3 - <<'EOF'
+          import glob, zipfile
+          whl = glob.glob("dist/*.whl")[0]
+          names = zipfile.ZipFile(whl).namelist()
+          for want in ("mcp_gateway/admin.html", "mcp_gateway/config.default.toml"):
+              assert any(n.endswith(want) for n in names), f"{want} missing from {whl}"
+          print("wheel carries its data files")
+          EOF
