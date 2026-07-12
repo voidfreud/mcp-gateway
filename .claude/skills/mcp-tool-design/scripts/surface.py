@@ -125,7 +125,16 @@ def main() -> int:
                 po = dp["original"]
                 pov = povs.get(po)
                 if pov and pov.hide:
-                    print(f"      param {po}: HIDDEN")
+                    # #35: a hidden param may carry an injected default — the
+                    # backend still receives that value on every call. That is
+                    # mechanics the tuner must see (a bare HIDDEN reads as
+                    # "the backend gets nothing").
+                    inj = (
+                        f" (gateway injects default={pov.default!r})"
+                        if pov.default is not None
+                        else ""
+                    )
+                    print(f"      param {po}: HIDDEN{inj}")
                     continue
                 pname = pov.name if (pov and pov.name) else po
                 pdesc = (
@@ -135,7 +144,15 @@ def main() -> int:
                 )
                 if full:
                     ptag = f" (renamed from {po})" if pname != po else ""
-                    print(f"      param {pname}{ptag}: {pdesc or '(no description)'}")
+                    pdef = (
+                        f" [injected default={pov.default!r} when omitted]"
+                        if (pov and pov.default is not None)
+                        else ""
+                    )
+                    print(
+                        f"      param {pname}{ptag}{pdef}: "
+                        f"{pdesc or '(no description)'}"
+                    )
         print()
     if target and shown == 0:
         print(f"no enabled backend named {target!r}", file=sys.stderr)

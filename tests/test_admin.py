@@ -795,9 +795,14 @@ def test_rename_to_unique_name_ok(defaults_dir):
     assert cfg.backends[0].tools[0].name == "fresh_name"
 
 
-def test_collision_ignored_when_other_tool_disabled(defaults_dir):
+def test_taking_a_disabled_tools_name_is_a_clean_400(defaults_dir):
+    # SEMANTICS CORRECTED with the transform dry-run: "disabled -> not
+    # broadcast -> can't collide" held at the selection level, but FastMCP's
+    # ToolTransform rejects duplicate TARGET names regardless of enabled — the
+    # old behavior persisted a config that 500s every later hot-reload/mount.
+    # Reusing a disabled tool's name now needs renaming the disabled entry
+    # away first (the error hints at it).
     _write_defaults_multi(defaults_dir, "b", [("t1", "d1"), ("t2", "d2")])
-    # t2 is disabled -> not broadcast -> t1 may take its name
     cfg = cl.GatewayConfig.model_validate(
         {
             "backends": [
@@ -809,6 +814,19 @@ def test_collision_ignored_when_other_tool_disabled(defaults_dir):
                 }
             ]
         }
+    )
+    with pytest.raises(cl.ConfigError, match="break the tool transforms"):
+        admin.apply_tool_override(
+            cfg,
+            "b",
+            {
+                "tool_original": "t1",
+                "override": {"name": "t2", "enabled": True, "params": []},
+            },
+        )
+    # rename the disabled entry aside -> the name frees up
+    admin.apply_tool_override(
+        cfg, "b", {"tool_original": "t2", "override": {"name": "t2_retired"}}
     )
     admin.apply_tool_override(
         cfg,
@@ -1282,3 +1300,101 @@ def test_refresh_defaults_instructions_change_counts_as_changed(
     log = structlog.get_logger("test")
     res = anyio.run(lambda: admin.refresh_defaults(_b(), log))
     assert res["changed"] is True
+
+
+# --- dangling overrides still occupy their broadcast names -------------------
+# A #43 baseline refresh can orphan an override (backend renamed the tool
+# upstream). The dangling entry still lands in the transforms, so FastMCP
+# rejects a duplicate TARGET name at build time — the collision check must see
+# dangling names as taken or the save 500s (found live: openrouter drift).
+
+
+def _cfg_with_dangling(defaults_dir):
+    _write_defaults(defaults_dir, "b", "new-tool")  # captured baseline
+    cfg = _single_cfg()
+    cfg.backends[0].tools = [
+        cl.ToolOverride(original="old-tool", name="shiny")  # dangling: not captured
+    ]
+    return cfg
+
+
+def test_dangling_override_name_counts_as_taken(defaults_dir):
+    cfg = _cfg_with_dangling(defaults_dir)
+    names = {t["name"] for t in admin.effective_tools(cfg, "b")}
+    assert "shiny" in names  # the dangling entry's broadcast name is occupied
+    with pytest.raises(cl.ConfigError, match="already used"):
+        admin.apply_tool_override(
+            cfg, "b", {"tool_original": "new-tool", "override": {"name": "shiny"}}
+        )
+
+
+def test_dangling_override_uniquify_dodges_it(defaults_dir):
+    cfg = _cfg_with_dangling(defaults_dir)
+    admin.apply_tool_override(
+        cfg,
+        "b",
+        {
+            "tool_original": "new-tool",
+            "on_collision": "uniquify",
+            "override": {"name": "shiny"},
+        },
+    )
+    stored = {t.original: t for t in cfg.backends[0].tools}
+    assert stored["new-tool"].name == "shiny_2"  # suffixed past the dangler
+
+
+def test_dangling_disabled_override_still_blocks_via_dry_build(defaults_dir):
+    # A DISABLED dangler doesn't broadcast, but FastMCP's ToolTransform rejects
+    # duplicate TARGET names regardless of enabled — the transform dry-run must
+    # turn that into a clean 400 (with the reset hint), never a persisted
+    # landmine that 500s every later mount.
+    cfg = _cfg_with_dangling(defaults_dir)
+    cfg.backends[0].tools[0].enabled = False
+    with pytest.raises(cl.ConfigError, match="reset that tool"):
+        admin.apply_tool_override(
+            cfg, "b", {"tool_original": "new-tool", "override": {"name": "shiny"}}
+        )
+
+
+def test_disabled_captured_tool_duplicate_target_rejected(defaults_dir):
+    # Pre-existing landmine, no dangler needed: rename tool A -> "x", disable
+    # it, then rename tool B -> "x". The broadcast-level check skips disabled
+    # entries, but the transform build still raises — must be a 400 at save.
+    _write_defaults(defaults_dir, "b", "a")
+    d = json.loads((defaults_dir / "b.json").read_text())
+    d["tools"].append(
+        {"original": "bb", "title": None, "description": "d", "params": []}
+    )
+    (defaults_dir / "b.json").write_text(json.dumps(d))
+    cfg = _single_cfg()
+    admin.apply_tool_override(
+        cfg, "b", {"tool_original": "a", "override": {"name": "x", "enabled": False}}
+    )
+    with pytest.raises(cl.ConfigError, match="break the tool transforms"):
+        admin.apply_tool_override(
+            cfg, "b", {"tool_original": "bb", "override": {"name": "x"}}
+        )
+
+
+def test_uniquify_dodges_disabled_entries_too(defaults_dir):
+    # the suffix must not land on a DISABLED entry's target name
+    _write_defaults(defaults_dir, "b", "a")
+    d = json.loads((defaults_dir / "b.json").read_text())
+    d["tools"] += [
+        {"original": "bb", "title": None, "description": "d2", "params": []},
+        {"original": "cc", "title": None, "description": "d3", "params": []},
+    ]
+    (defaults_dir / "b.json").write_text(json.dumps(d))
+    cfg = _single_cfg()
+    admin.apply_tool_override(
+        cfg, "b", {"tool_original": "a", "override": {"name": "x"}}
+    )
+    admin.apply_tool_override(
+        cfg, "b", {"tool_original": "bb", "override": {"name": "x_2", "enabled": False}}
+    )
+    final = admin.apply_tool_override(
+        cfg,
+        "b",
+        {"tool_original": "cc", "on_collision": "uniquify", "override": {"name": "x"}},
+    )
+    assert final == "x_3"  # skipped enabled "x" AND disabled "x_2"
