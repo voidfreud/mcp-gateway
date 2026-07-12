@@ -190,8 +190,9 @@ The **⚙ Gateway** item collects gateway-wide settings and information:
   backend costs Claude.
 - **Export / import.** Your complete stored settings — every tool and parameter
   override, pins, server instructions, and display names — round-trip as a single
-  JSON bundle. The **Save all fields** button downloads it; **Load all fields**
-  applies one. Import validates every item the same way a single edit is
+  JSON bundle. The **Export** button downloads it; **Import** applies one.
+  (Each backend's detail bar also has a **Load fields** button that restores
+  that one backend from an older per-field snapshot file.) Import validates every item the same way a single edit is
   validated and is all-or-nothing: if any item is invalid, nothing is applied.
   Backend topology (which backends exist, their URLs) is never part of an
   import — only the text overrides move.
