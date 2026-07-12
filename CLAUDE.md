@@ -22,7 +22,7 @@ Python 3.12 · FastMCP 3.x · Pydantic · structlog · `uv`.
 ## How to verify
 With the daemon up: `uv run verify_rename.py http://127.0.0.1:9100` — checks every
 backend endpoint (bare names, instructions <=2KB) + a real passthrough call.
-`uv run config_loader.py config.toml` prints parsed backends + transform keys.
+`uv run python -m mcp_gateway.config_loader config.toml` prints parsed backends + transform keys.
 Per-backend liveness: `GET /admin/api/status` (#23).
 
 ## Layout
