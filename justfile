@@ -21,7 +21,7 @@ smoke:
     uv run python -c "import mcp_gateway.server, mcp_gateway.admin, mcp_gateway.config_loader; print('imports OK')"
 
 # End-to-end rename check against the RUNNING daemon (needs live backends)
-verify url="http://127.0.0.1:9100/mcp":
+verify url="http://127.0.0.1:9100":
     uv run verify_rename.py {{url}}
 
 # Restart the launchd daemon

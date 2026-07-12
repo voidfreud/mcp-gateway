@@ -81,7 +81,7 @@ only add tool and param blocks for the tools and params you actually change.
 | `command` | string or unset | unset | The program to run for a `stdio` backend. **Required for `stdio`.** |
 | `args` | list of strings | empty | Arguments for the `stdio` `command`. |
 | `env` | table of string→string | empty | Environment variables for the `stdio` process. Values may use `${ENV}`. |
-| `stateless` | boolean | `false` | Session strategy. `true` uses a fresh session per request (typical for remote HTTP backends); `false` keeps one persistent connection for the daemon's lifetime (typical for a local `stdio` backend). |
+| `stateless` | boolean | `false` | Session strategy. `false` (**warm**, the default and what the UI's import uses) keeps one persistent connection — much faster, and the gateway automatically reconnects it if it dies (at most one repair per 30s). `true` opens a fresh session per request — a fallback for backends whose sessions misbehave when held. Toggleable live per backend in the admin UI. |
 | `always_load` | boolean | `false` | Pin **all** of this backend's tools to load upfront (eager), instead of Claude Code's default deferred loading. |
 | `enabled` | boolean | `true` | Whether the backend is broadcast at all. `false` disables every tool, drops its server instructions, and unmounts the endpoint. Toggles live in the admin UI without a restart. |
 | `instructions` | string or unset | unset | Overrides the backend's server-level instructions (the always-loaded blurb Claude reads at connect). Unset inherits the backend's captured original. Set it even when the backend sends none, to add your own. Capped at Claude Code's ~2KB budget. |

@@ -49,6 +49,8 @@ of this — but it is here when you want it.
 | POST | `/admin/api/reset` | `{backend, tool_original}` | `{ok}`. Clears every override for that one tool (reverts to the backend default). |
 | PUT | `/admin/api/instructions` | `{backend, value}` | `{ok}`. Sets the backend's server-instructions override (`value` empty inherits the original). Rejected if it exceeds the ~2KB budget. |
 | POST | `/admin/api/import` | `{mode: "merge"\|"replace", settings: {...}}` | `{ok, backends, mode}` on success; `400 {ok:false, errors, applied:false}` if any item is invalid (all-or-nothing). Backend topology is never imported. |
+| POST | `/admin/api/backend/{name}/migrate-override` | `{from, to}` | Carries a stale override (its `from` tool no longer exists upstream) onto the tool's new name `to`; params that no longer exist are dropped and reported. `{ok, dropped_params}`. `400` if `to` is unknown or already overridden. |
+| POST | `/admin/api/backend/{name}/discard-override` | `{original}` | Drops a stale override entry. `{ok}`; `400` when no such entry. |
 
 ## Backends (topology)
 
@@ -61,6 +63,9 @@ of this — but it is here when you want it.
 | POST | `/admin/api/backend/{name}/enabled` | `{value: bool}` | Enable (mount live) or disable (unmount) the backend. `{ok, reloaded: "in-process"}`. |
 | POST | `/admin/api/enabled` | `{value: bool}` | Master switch: enable/disable every backend, mounting or unmounting each. `{ok, reloaded: "in-process"}`. |
 | POST | `/admin/api/backend/{name}/pin` | `{value: bool}` | Toggle per-backend eager loading (pin all its tools). `{ok, reloaded: "in-process"}`. |
+| POST | `/admin/api/backend/{name}/stateless` | `{value: bool}` | Session strategy: `false` = warm (one persistent connection, auto-repaired if it dies), `true` = fresh session per call. Saves and recycles the backend live — no restart. `{ok, reloaded: "recycled", stateless}`. |
+| GET | `/admin/api/settings` | — | The gateway-wide settings: `{bearer_token, introspect_interval}` (the token is the `${ENV}` reference, never a resolved secret). |
+| PUT | `/admin/api/settings` | `{bearer_token?, introspect_interval?}` | Validates (`bearer_token` empty or containing `${...}`; interval ≥ 0) and saves. Both are read at daemon start, so the response carries restart semantics. |
 
 ## Claude Code registration
 
@@ -73,6 +78,8 @@ added to the registration and redacted from the response.
 |--------|------|------|----------|
 | POST | `/admin/api/backend/{name}/register` | `{scope: "local"\|"user"\|"project"}` (default `local`) | Runs `claude mcp add` for `gateway-<name>` pointing at the backend's endpoint. `{ok, exit, stdout, stderr, command, note}`. |
 | POST | `/admin/api/backend/{name}/deregister` | `{scope}` | Runs `claude mcp remove gateway-<name>`. Works even if the backend is already gone (post-remove cleanup). Same response shape. |
+| GET | `/admin/api/cc-registrations` | — (`?fresh=1` busts the 60s cache) | Which configured backends are registered in Claude Code, parsed from `claude mcp list`. `{available, registered: {<backend>: bool}}`; `{available:false}` without the CLI. |
+| POST | `/admin/api/cc-reregister-all` | `{scope}` | Deregister + register every **enabled** backend, sequentially; one failure doesn't stop the rest. `{ok, count, ok_count, backends: [...]}`. |
 
 ## Operations
 

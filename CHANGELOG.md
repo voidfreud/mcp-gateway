@@ -4,7 +4,7 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project aims to
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.0.0] - 2026-07-12
 
 The first feature-complete release. This wave (#150) turns the gateway from a
 text-rewriting proxy into a full admin surface, then hardens and packages it for
@@ -34,6 +34,22 @@ distribution as 1.0.0.
   through `~/.local/opt/mcp-gateway`, so moving the repo is fixed by re-running
   the script; `/health` now names the daemon's resolved code path to expose a
   stale process from an old clone (#149).
+- **Warm sessions with self-repair** — a backend can hold one persistent
+  connection (2–4× faster on live probes) instead of reconnecting per call; a
+  dead session is detected and recycled automatically, at most once per 30
+  seconds. Newly imported backends are warm by default, with a live per-backend
+  toggle (#161).
+- **Stale-override repair** — when a backend renames its tools upstream, the
+  admin UI shows the now-inactive edits with one-click migrate/discard, and the
+  sidebar flags the backend (#153).
+- **Gateway settings card** — the bearer-token reference and the scheduled
+  re-scan interval are editable in the UI (#155), with a one-click
+  **Re-register all in Claude Code** for after a token change (#154).
+- **Registration indicator** — each backend shows whether it is actually
+  registered in Claude Code (#46).
+- Startup sweep removes captured-defaults files for backends that no longer
+  exist (#156); admin favicon; `verify_rename.py` gained status/injection/
+  bearer receipts (#158).
 
 ### Security
 
@@ -49,9 +65,12 @@ distribution as 1.0.0.
 
 ### Fixed
 
-- **Transform ordering** — apply tool transforms *after* the per-backend
-  reconcile, so renamed tools are no longer falsely flagged as unmatched
-  overrides (#152).
+- **Duplicate broadcast names can no longer brick a backend** — a stale or
+  disabled override sharing a transform target name used to pass validation and
+  then fail every mount; saves now dry-build the transforms and reject with a
+  clear message (#152).
+- `claude mcp add --header` argument order (the flag is variadic and swallowed
+  the name/URL when placed first) — caught in the live testing pass (#150).
 
 ### Changed
 
@@ -60,5 +79,8 @@ distribution as 1.0.0.
   login-service plist ships as a template rendered per user by `install.sh`; the
   project is MIT licensed and distributed via uv from GitHub, not PyPI (#164).
 - Pinned FastMCP to 3.4.4 (#163).
+- **CI** — dependency caching, lockfile consistency check, superseded-run
+  cancellation, a wheel-integrity gate, and a tag-triggered release workflow
+  that attaches the built wheel to a GitHub release (#165).
 
-[Unreleased]: https://github.com/voidfreud/mcp-gateway/compare/main...HEAD
+[1.0.0]: https://github.com/voidfreud/mcp-gateway/releases/tag/v1.0.0

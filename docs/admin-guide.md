@@ -60,9 +60,23 @@ backend-wide controls:
 - **Rename…** A real identity change (see [Rename vs Display name](#rename-vs-display-name)).
 - **Register in CC.** Registers this backend's gateway endpoint with Claude Code
   in one click, with a selectable scope (see [Registering in Claude Code](#registering-in-claude-code)).
+  A small chip next to the button shows whether the backend is currently
+  **registered in Claude Code** (checked via the `claude` command and cached for
+  a minute; the chip disappears if the command isn't installed).
+- **Warm session toggle.** Keeps one persistent connection to the backend open
+  instead of reconnecting on every call — noticeably faster for remote
+  backends (measured 2–4× on live probes). If the held connection ever dies,
+  the gateway detects it and reconnects by itself (at most one repair per 30
+  seconds). Newly imported backends are warm by default; flipping the toggle
+  reconnects the backend live, no restart.
 - **Re-inspect.** Forces the gateway to reconnect to the backend and re-capture
   its live tool list, then reports how many tools were added or removed (`+N/−N`).
   Use it after you know the backend has changed (a new version, new tools).
+- **Stale-override warning.** If the backend renamed its tools upstream (a new
+  version, say), your saved edits for the old names stop applying — the detail
+  view then shows an amber banner listing each stale entry with two choices:
+  **migrate** it onto the tool's new name (your text carries over) or
+  **discard** it. The sidebar marks such backends with ⚠.
 - **Server instructions.** A box to edit the backend's server-level
   instructions — the always-loaded blurb Claude reads about the whole server at
   connect time (for example, "use this server whenever the user asks about a
@@ -183,6 +197,16 @@ The **⚙ Gateway** item collects gateway-wide settings and information:
   import — only the text overrides move.
 - **Auto-uniquify toggle.** The name-collision escape hatch described under
   [Collision handling](#collision-handling).
+- **Gateway settings.** Edit the two config-file-only knobs without touching a
+  file: the **bearer token reference** (an `${ENV_VAR}` name, never the secret
+  itself — see [security.md](security.md)) and the **scheduled re-scan
+  interval** (0 = off). These are read at daemon start, so saving offers a
+  restart. Changing the token breaks existing Claude Code registrations until
+  they carry the new one — the UI offers **Re-register all** right after such a
+  save.
+- **Re-register all in CC.** One click to refresh every enabled backend's
+  Claude Code registration (remove + add each, sequentially, with a per-backend
+  result). Use after changing the bearer token or the port.
 - **Restart.** Restarts the daemon on demand. (In foreground/dev mode, where
   there is no login service to restart, the UI says so honestly instead of
   hanging.)
