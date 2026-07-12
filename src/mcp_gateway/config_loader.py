@@ -612,7 +612,7 @@ def save(cfg: GatewayConfig, path: str | Path) -> None:
 
 
 if __name__ == "__main__":
-    # Quick self-check: `uv run config_loader.py [config.toml]`
+    # Quick self-check: `uv run python -m mcp_gateway.config_loader [config.toml]`
     path = sys.argv[1] if len(sys.argv) > 1 else "config.toml"
     cfg = load(path)
     # build_transforms is per-backend now (#29); accumulate every backend's index.

@@ -129,7 +129,8 @@ def test_roundtrip_handles_tricky_description():
 
 
 def test_self_check_main_runs_clean():
-    # #80: the documented `uv run config_loader.py <cfg>` self-check must not
+    # #80: the documented `python -m mcp_gateway.config_loader <cfg>`
+    # self-check must not
     # crash (it used to call build_transforms with a missing arg).
     import pathlib
     import subprocess
