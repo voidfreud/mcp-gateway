@@ -536,6 +536,248 @@ def test_display_name_route_sets_and_clears(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# #44 — hard-rename a backend (real identity change, unlike display_name #42)
+# ---------------------------------------------------------------------------
+
+
+def _cfg_app(tmp_path, cfg_dict) -> Starlette:
+    """Admin app over an arbitrary config dict (rename needs tools/multiple
+    backends, which _admin_app's fixed single-backend config can't express)."""
+    cfg = cl.GatewayConfig.model_validate(cfg_dict)
+    path = tmp_path / "config.toml"
+    cl.save(cfg, str(path))
+    app = Starlette()
+    admin.register(app, str(path), structlog.get_logger("test"), {}, {})
+    return app
+
+
+def _write_defaults(name, tools=("t",)):
+    """Captured-defaults stub (same shape as test_admin's _write_defaults);
+    conftest already points admin.DEFAULTS_DIR at a throwaway dir."""
+    d = admin.DEFAULTS_DIR
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"{name}.json").write_text(
+        json.dumps(
+            {
+                "backend": name,
+                "instructions": None,
+                "tools": [
+                    {"original": t, "title": None, "description": "d", "params": []}
+                    for t in tools
+                ],
+            }
+        )
+    )
+
+
+def test_rename_backend_renames_config_and_migrates_defaults(tmp_path):
+    app = _cfg_app(
+        tmp_path,
+        {
+            "backends": [
+                {
+                    "name": "b",
+                    "transport": "stdio",
+                    "command": "/bin/x",
+                    "display_name": "Nice Label",
+                    "tools": [{"original": "t", "name": "renamed_tool"}],
+                }
+            ]
+        },
+    )
+    _write_defaults("b")
+    r = TestClient(app).post("/admin/api/backend/b/rename", json={"value": "nb"})
+    assert r.status_code == 200
+    j = r.json()
+    assert j["ok"] is True
+    # the UI needs both identities to tell the user what to reconfigure
+    assert j["old_endpoint"] == "http://127.0.0.1:9100/b/mcp"
+    assert j["new_endpoint"] == "http://127.0.0.1:9100/nb/mcp"
+    assert j["old_registration"] == "gateway-b"
+    assert j["new_registration"] == "gateway-nb"
+    after = cl.load(str(tmp_path / "config.toml"))
+    assert [x.name for x in after.backends] == ["nb"]  # config key renamed
+    b = after.backends[0]
+    assert b.display_name == "Nice Label"  # cosmetic label rides along
+    assert [t.original for t in b.tools] == ["t"]  # overrides survive intact
+    assert b.tools[0].name == "renamed_tool"
+    # captured-defaults baseline migrated old -> new (backend key updated too)
+    assert not (admin.DEFAULTS_DIR / "b.json").exists()
+    migrated = json.loads((admin.DEFAULTS_DIR / "nb.json").read_text())
+    assert migrated["backend"] == "nb"
+    assert [t["original"] for t in migrated["tools"]] == ["t"]
+
+
+def test_rename_backend_without_defaults_file_still_renames(tmp_path):
+    # never-introspected backend: no defaults file to migrate — tolerated
+    r = TestClient(_admin_app(tmp_path)).post(
+        "/admin/api/backend/b/rename", json={"value": "nb"}
+    )
+    assert r.status_code == 200
+    assert [x.name for x in cl.load(_cfg_path(tmp_path)).backends] == ["nb"]
+
+
+@pytest.mark.parametrize("bad", ["has space", "dot.name", "", "a" * 65, 7])
+def test_rename_backend_invalid_name_is_400(tmp_path, bad):
+    r = TestClient(_admin_app(tmp_path)).post(
+        "/admin/api/backend/b/rename", json={"value": bad}
+    )
+    assert r.status_code == 400
+    assert [x.name for x in cl.load(_cfg_path(tmp_path)).backends] == ["b"]
+
+
+def test_rename_backend_duplicate_name_is_400(tmp_path):
+    app = _cfg_app(
+        tmp_path,
+        {
+            "backends": [
+                {"name": "b", "transport": "stdio", "command": "/bin/x"},
+                {"name": "c", "transport": "stdio", "command": "/bin/x"},
+            ]
+        },
+    )
+    r = TestClient(app).post("/admin/api/backend/b/rename", json={"value": "c"})
+    assert r.status_code == 400
+    assert "already exists" in r.json()["error"]
+    names = [x.name for x in cl.load(str(tmp_path / "config.toml")).backends]
+    assert names == ["b", "c"]  # nothing changed
+
+
+def test_rename_backend_unknown_is_400(tmp_path):
+    r = TestClient(_admin_app(tmp_path)).post(
+        "/admin/api/backend/nope/rename", json={"value": "nb"}
+    )
+    assert r.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# #45 — one-click Claude Code registration via the `claude` CLI
+# ---------------------------------------------------------------------------
+
+
+def _fake_claude_cli(monkeypatch, calls, rc=0, stdout="", stderr=""):
+    """Pretend `claude` is on PATH and capture the exact argv it's run with."""
+    monkeypatch.setattr(admin.shutil, "which", lambda _cmd: "/usr/bin/claude")
+
+    def fake_run(argv, **_kwargs):
+        calls.append(list(argv))
+        return subprocess.CompletedProcess(argv, rc, stdout=stdout, stderr=stderr)
+
+    monkeypatch.setattr(admin.subprocess, "run", fake_run)
+
+
+def test_register_backend_runs_claude_mcp_add(tmp_path, monkeypatch):
+    calls = []
+    _fake_claude_cli(monkeypatch, calls, stdout="added")
+    r = TestClient(_admin_app(tmp_path)).post(
+        "/admin/api/backend/b/register", json={"scope": "user"}
+    )
+    assert r.status_code == 200
+    j = r.json()
+    assert j["ok"] is True and j["exit"] == 0 and j["stdout"] == "added"
+    # exact argv: gateway-<name> convention + the real endpoint URL
+    assert calls == [
+        [
+            "claude",
+            "mcp",
+            "add",
+            "--transport",
+            "http",
+            "--scope",
+            "user",
+            "gateway-b",
+            "http://127.0.0.1:9100/b/mcp",
+        ]
+    ]
+    assert j["command"] == " ".join(calls[0])
+    assert "reload" in j["note"] or "restart" in j["note"]
+
+
+def test_register_backend_defaults_to_local_scope(tmp_path, monkeypatch):
+    calls = []
+    _fake_claude_cli(monkeypatch, calls)
+    r = TestClient(_admin_app(tmp_path)).post("/admin/api/backend/b/register", json={})
+    assert r.status_code == 200
+    argv = calls[0]
+    assert argv[argv.index("--scope") + 1] == "local"
+
+
+def test_register_cli_failure_is_ok_false_http_200(tmp_path, monkeypatch):
+    # the HTTP call succeeded; the CLI failed — surface it, don't 4xx/5xx
+    calls = []
+    _fake_claude_cli(monkeypatch, calls, rc=1, stderr="No such command")
+    r = TestClient(_admin_app(tmp_path)).post(
+        "/admin/api/backend/b/register", json={"scope": "local"}
+    )
+    assert r.status_code == 200
+    j = r.json()
+    assert j["ok"] is False and j["exit"] == 1
+    assert j["stderr"] == "No such command"
+
+
+def test_register_missing_claude_cli_is_400(tmp_path, monkeypatch):
+    monkeypatch.setattr(admin.shutil, "which", lambda _cmd: None)
+    r = TestClient(_admin_app(tmp_path)).post(
+        "/admin/api/backend/b/register", json={"scope": "local"}
+    )
+    assert r.status_code == 400
+    assert "claude CLI not found" in r.json()["error"]
+
+
+def test_register_bad_scope_is_400(tmp_path, monkeypatch):
+    calls = []
+    _fake_claude_cli(monkeypatch, calls)
+    r = TestClient(_admin_app(tmp_path)).post(
+        "/admin/api/backend/b/register", json={"scope": "global"}
+    )
+    assert r.status_code == 400
+    assert calls == []  # rejected before any CLI run
+
+
+def test_register_unknown_backend_is_400(tmp_path, monkeypatch):
+    # register requires the backend to exist so the registered URL is real
+    calls = []
+    _fake_claude_cli(monkeypatch, calls)
+    r = TestClient(_admin_app(tmp_path)).post(
+        "/admin/api/backend/ghost/register", json={"scope": "local"}
+    )
+    assert r.status_code == 400
+    assert calls == []
+
+
+def test_deregister_runs_claude_mcp_remove(tmp_path, monkeypatch):
+    calls = []
+    _fake_claude_cli(monkeypatch, calls)
+    r = TestClient(_admin_app(tmp_path)).post(
+        "/admin/api/backend/b/deregister", json={"scope": "project"}
+    )
+    assert r.status_code == 200 and r.json()["ok"] is True
+    assert calls == [["claude", "mcp", "remove", "--scope", "project", "gateway-b"]]
+
+
+def test_deregister_of_removed_backend_still_runs(tmp_path, monkeypatch):
+    # the remove/rename cleanup path: the backend is already gone from config,
+    # but its stale Claude Code registration must still be removable
+    calls = []
+    _fake_claude_cli(monkeypatch, calls)
+    r = TestClient(_admin_app(tmp_path)).post(
+        "/admin/api/backend/gone/deregister", json={"scope": "local"}
+    )
+    assert r.status_code == 200 and r.json()["ok"] is True
+    assert calls == [["claude", "mcp", "remove", "--scope", "local", "gateway-gone"]]
+
+
+def test_deregister_bad_scope_is_400(tmp_path, monkeypatch):
+    calls = []
+    _fake_claude_cli(monkeypatch, calls)
+    r = TestClient(_admin_app(tmp_path)).post(
+        "/admin/api/backend/b/deregister", json={"scope": "everywhere"}
+    )
+    assert r.status_code == 400
+    assert calls == []
+
+
+# ---------------------------------------------------------------------------
 # #96 — bad config recovers from a backup instead of crash-looping
 # ---------------------------------------------------------------------------
 

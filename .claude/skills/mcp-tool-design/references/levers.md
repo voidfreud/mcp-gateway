@@ -18,7 +18,7 @@ The gateway rewrites broadcast text and forwards calls untouched. Every lever, i
 
 Deprecation heads-up: **param renaming (`params[].name`) is scheduled to stop being editable.** Don't build tuning on param renames — carry the fix in the param description instead. Tool broadcast names stay editable.
 
-Not levers: schemas (types/enums/required), annotations, response shapes — those are the backend's. When their text under-informs, compensate in the descriptions we do own.
+Not levers: schemas (types/enums/required), annotations, response shapes — those are the backend's. When their text under-informs, compensate in the descriptions we do own. Also not a tuning lever: hard-renaming a backend (#44, `POST /admin/api/backend/{name}/rename` `{value}`) is a topology op — the endpoint URL and the `gateway-<name>` Claude Code registration both change, the gateway restarts, and Claude Code must be re-registered (distinct from the cosmetic `display_name`, #42).
 
 ## Reading state
 
