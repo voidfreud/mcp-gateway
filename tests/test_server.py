@@ -1396,3 +1396,27 @@ def test_install_sh_is_executable_and_parses():
         ["/bin/bash", "-n", str(script)], capture_output=True, text=True, check=False
     )
     assert proc.returncode == 0, proc.stderr
+
+
+def test_register_carries_bearer_header_and_redacts_it(tmp_path, monkeypatch):
+    """#26 x #45: a bearer-protected gateway registers WITH the resolved
+    Authorization header (or every call would 401), and the response never
+    echoes the raw token back to the browser."""
+    monkeypatch.setenv("GW_TOK", "s3cret")
+    calls = []
+    _fake_claude_cli(monkeypatch, calls, stdout="added Bearer s3cret")
+    app = _cfg_app(
+        tmp_path,
+        {
+            "bearer_token": "${GW_TOK}",
+            "backends": [{"name": "b", "transport": "stdio", "command": "/bin/x"}],
+        },
+    )
+    r = TestClient(app).post("/admin/api/backend/b/register", json={})
+    assert r.status_code == 200
+    j = r.json()
+    argv = calls[0]
+    assert argv[argv.index("--header") + 1] == "Authorization: Bearer s3cret"
+    # redaction: neither command nor CLI output may leak the token
+    assert "s3cret" not in j["command"] and "***" in j["command"]
+    assert "s3cret" not in j["stdout"]

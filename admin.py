@@ -971,7 +971,11 @@ CLAUDE_CLI_TIMEOUT = 30
 
 
 def claude_mcp_command(
-    action: str, name: str, url: str | None = None, scope: str = "local"
+    action: str,
+    name: str,
+    url: str | None = None,
+    scope: str = "local",
+    bearer_token: str | None = None,
 ) -> list[str]:
     """Argv to register/deregister ONE backend in Claude Code via the CLI.
 
@@ -979,6 +983,11 @@ def claude_mcp_command(
     the backend's own gateway mount (``http://host:port/<name>/mcp``). Pure —
     builds the argv only (the route runs it), so the exact command is testable
     and surfaceable to the UI.
+
+    *bearer_token* (#26 × #45): when the gateway requires a bearer token, a
+    registration without it would 401 on every call — so `add` carries it via
+    ``--header``, RESOLVED (the CLI stores the literal header in Claude's
+    config; the route redacts it from anything echoed back to the browser).
     """
     if scope not in CLAUDE_SCOPES:
         raise cl.ConfigError(
@@ -988,7 +997,7 @@ def claude_mcp_command(
     if action == "add":
         if not url:
             raise cl.ConfigError("register needs the backend's endpoint url")
-        return [
+        argv = [
             "claude",
             "mcp",
             "add",
@@ -996,9 +1005,10 @@ def claude_mcp_command(
             "http",
             "--scope",
             scope,
-            registration,
-            url,
         ]
+        if bearer_token:
+            argv += ["--header", f"Authorization: Bearer {bearer_token}"]
+        return [*argv, registration, url]
     if action == "remove":
         return ["claude", "mcp", "remove", "--scope", scope, registration]
     raise cl.ConfigError(f"unknown action {action!r} (use add or remove)")
@@ -1439,7 +1449,7 @@ def _claude_routes(ctx: _AdminCtx) -> list[Route]:
     A CLI failure comes back as ``ok: false`` with its output at HTTP 200 (the
     HTTP call itself succeeded); missing binary / bad scope are 400."""
 
-    async def _run_cli(argv: list[str]) -> JSONResponse:
+    async def _run_cli(argv: list[str], redact: str | None = None) -> JSONResponse:
         try:
             r = await asyncio.to_thread(
                 subprocess.run,
@@ -1452,13 +1462,18 @@ def _claude_routes(ctx: _AdminCtx) -> list[Route]:
             rc, stdout, stderr = r.returncode, r.stdout, r.stderr
         except (subprocess.SubprocessError, OSError) as exc:
             rc, stdout, stderr = -1, "", f"{type(exc).__name__}: {exc}"
+
+        def _hide(s: str) -> str:
+            # never echo the bearer token (#26) back to the browser
+            return s.replace(redact, "***") if redact else s
+
         return JSONResponse(
             {
                 "ok": rc == 0,
                 "exit": rc,
-                "stdout": stdout,
-                "stderr": stderr,
-                "command": " ".join(argv),
+                "stdout": _hide(stdout),
+                "stderr": _hide(stderr),
+                "command": _hide(" ".join(argv)),
                 "note": "Claude Code may need a reload/restart to pick up the change",
             }
         )
@@ -1486,10 +1501,16 @@ def _claude_routes(ctx: _AdminCtx) -> list[Route]:
             return missing
         url = f"http://{cfg.host}:{cfg.port}/{name}/mcp"
         try:
-            argv = claude_mcp_command("add", name, url=url, scope=scope)
+            # #26 × #45: a bearer-protected gateway needs the header in the
+            # registration or every call would 401. Resolved once, redacted
+            # from the response.
+            token = cl.expand_env(cfg.bearer_token) if cfg.bearer_token else None
+            argv = claude_mcp_command(
+                "add", name, url=url, scope=scope, bearer_token=token
+            )
         except cl.ConfigError as exc:
             return _err(str(exc))
-        return await _run_cli(argv)
+        return await _run_cli(argv, redact=token)
 
     async def deregister_backend(request: Request):
         """``claude mcp remove`` for ``gateway-<name>``. Deliberately does NOT
