@@ -118,6 +118,8 @@ def _bearer_app(token):
             Route("/health", ping, methods=["GET"]),
             Route("/ready", ping, methods=["GET"]),
             Route("/admin/api/state", ping, methods=["GET"]),
+            Route("/admin/api/run", ping, methods=["POST"]),
+            Route("/admin", ping, methods=["GET", "POST"]),
         ],
         middleware=[Middleware(server.BearerAuthMiddleware, token=token)],
     )
@@ -152,12 +154,28 @@ def test_bearer_correct_token_passes():
     assert r.status_code == 200
 
 
-def test_bearer_exempts_admin_health_ready():
-    # same-origin admin UI fetches carry no header; liveness probes neither —
-    # loopback trust for those paths is the status quo.
+def test_bearer_exempts_health_ready_and_admin_page_only():
+    # liveness probes stay open, and so does the bare GET /admin page (the UI
+    # shell must load to prompt for the token) — but the admin API is
+    # challenged: an unauthenticated local process could otherwise rewrite
+    # config or execute backend tools via /admin/api/run (2026-07-12 audit).
     client = TestClient(_bearer_app("sekret"))
-    for path in ("/health", "/ready", "/admin/api/state"):
-        assert client.get(path).status_code == 200
+    for path in ("/health", "/ready", "/admin"):
+        assert client.get(path).status_code == 200, path
+    assert client.get("/admin/api/state").status_code == 401
+    assert client.post("/admin/api/run").status_code == 401
+    assert (
+        client.get(
+            "/admin/api/state", headers={"Authorization": "Bearer sekret"}
+        ).status_code
+        == 200
+    )
+
+
+def test_bearer_admin_page_open_is_get_only():
+    # only the GET page shell is exempt — other methods on /admin are challenged
+    client = TestClient(_bearer_app("sekret"))
+    assert client.post("/admin").status_code == 401
 
 
 def test_build_app_missing_bearer_env_fails_loudly(tmp_path, monkeypatch):
@@ -183,8 +201,8 @@ def test_build_app_missing_bearer_env_fails_loudly(tmp_path, monkeypatch):
 
 
 def test_build_app_wires_bearer_auth(tmp_path, monkeypatch):
-    # end-to-end wiring: token resolved from the env once, backend paths gated,
-    # admin/health/ready exempt.
+    # end-to-end wiring: token resolved from the env once, backend paths AND
+    # the admin API gated; health/ready + the GET /admin shell exempt.
     monkeypatch.setenv("GW_TOKEN_26", "sekret")
     cfg = cl.GatewayConfig.model_validate(
         {
@@ -200,7 +218,14 @@ def test_build_app_wires_bearer_auth(tmp_path, monkeypatch):
     with TestClient(app) as client:
         assert client.get("/health").status_code == 200  # exempt
         assert client.get("/ready").status_code == 503  # exempt (degraded, not 401)
-        assert client.get("/admin/api/state").status_code == 200  # exempt
+        assert client.get("/admin").status_code == 200  # UI shell exempt
+        assert client.get("/admin/api/state").status_code == 401  # API challenged
+        assert (
+            client.get(
+                "/admin/api/state", headers={"Authorization": "Bearer sekret"}
+            ).status_code
+            == 200
+        )
         r = client.get("/b/mcp")
         assert r.status_code == 401
         assert r.headers["WWW-Authenticate"] == "Bearer"

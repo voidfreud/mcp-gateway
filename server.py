@@ -321,30 +321,39 @@ class _ListChangedHandler(MessageHandler):
 
 
 class BearerAuthMiddleware:
-    """Require ``Authorization: Bearer <token>`` on backend MCP endpoints (#26).
+    """Require ``Authorization: Bearer <token>`` on backend MCP endpoints AND
+    the admin API (#26; admin coverage added by the 2026-07-12 audit).
 
     Defense-in-depth for the loopback bind: with a token configured, a curious
-    or compromised local process can't call the backends without it. ``token``
-    is resolved ONCE at startup (``expand_env`` in ``_build_app``), never per
-    request; a falsy token makes the middleware a pure passthrough. Paths under
-    ``/admin``, ``/health`` and ``/ready`` stay open — the admin UI is a
-    same-origin browser fetch that carries no header, so loopback trust for
-    those is the status quo. The comparison is ``hmac.compare_digest`` on the
-    encoded bytes (no timing side channel); a failure gets a 401 JSON body plus
-    the ``WWW-Authenticate: Bearer`` challenge.
+    or compromised local process can't call the backends without it — and the
+    admin API had to follow, or the same process could simply rewrite config,
+    restart the daemon, or execute backend tools through ``/admin/api/run``
+    (the audit did exactly that). ``token`` is resolved ONCE at startup
+    (``expand_env`` in ``_build_app``), never per request; a falsy token makes
+    the middleware a pure passthrough.
+
+    Open without a token: ``/health`` + ``/ready`` (liveness probes) and the
+    bare ``GET /admin`` page — the static UI shell, which needs to load so it
+    can prompt for the token; every piece of data it then fetches is behind
+    ``/admin/api/*`` and challenged. The comparison is ``hmac.compare_digest``
+    on the encoded bytes (no timing side channel); a failure gets a 401 JSON
+    body plus the ``WWW-Authenticate: Bearer`` challenge.
     """
 
-    EXEMPT_PREFIXES = ("/admin", "/health", "/ready")
+    EXEMPT_PREFIXES = ("/health", "/ready")
 
     def __init__(self, app, *, token: str | None):
         self.app = app
         self._expected = f"Bearer {token}".encode() if token else None
 
     async def __call__(self, scope, receive, send):
+        path = scope.get("path", "")
         if (
             self._expected is None  # no token configured -> zero overhead
             or scope["type"] != "http"
-            or scope.get("path", "").startswith(self.EXEMPT_PREFIXES)
+            or path.startswith(self.EXEMPT_PREFIXES)
+            # the UI shell only — it carries no data and prompts for the token
+            or (path == "/admin" and scope.get("method") == "GET")
         ):
             await self.app(scope, receive, send)
             return

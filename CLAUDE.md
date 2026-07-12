@@ -148,7 +148,10 @@ Per-backend liveness: `GET /admin/api/status` (#23).
   `list_tools` per backend concurrently (STATUS_TIMEOUT 5s). Counts post-transform
   tools; a probe of a stateless stdio backend spawns a short-lived subprocess.
 - **Bearer token (#26):** resolved via `expand_env` ONCE in `_build_app` (missing
-  env fails boot loudly); `/admin`, `/health`, `/ready` exempt. In `claude mcp add`
+  env fails boot loudly); gates backend endpoints AND `/admin/api/*` (an open
+  admin API would let any local process rewrite config or run backend tools —
+  2026-07-12 audit); only `/health`, `/ready`, and the bare `GET /admin` page
+  are exempt (the UI prompts for the token and stores it in localStorage). In `claude mcp add`
   the `--header` option is VARIADIC — it must come AFTER `<name> <url>` or it
   swallows them (live-caught); `claude_mcp_command` encodes this and the register
   route redacts the token from everything it echoes.
