@@ -172,6 +172,12 @@
   .req-badge { font: 10px system-ui; color: var(--am); background: rgba(231,165,58,.09);
                padding: 1px 6px; border-radius: 3px; }
   .param-row textarea { min-height: 54px; padding: 6px 8px; }
+  /* #35 — injected param default + hide pill */
+  .param-row .p-default { width: 150px; padding: 3px 7px; font-size: 11px; flex-shrink: 0; }
+  .param-row .lbl { font: 11px system-ui; color: var(--tm); display: flex;
+                    align-items: center; gap: 5px; cursor: pointer; flex-shrink: 0;
+                    text-transform: none; letter-spacing: 0; margin: 0; }
+  .param-row.p-hidden .p-nm { opacity: .55; text-decoration: line-through; }
 
   .preview { background: var(--s0); border: 1px solid var(--b); border-radius: 7px;
              padding: 9px 11px; white-space: pre-wrap; color: var(--tm); font-size: 12px;
@@ -352,7 +358,7 @@ async function load() {
 // how many of a backend's tools carry any override
 function overriddenCount(b) {
   return b.tools.filter(t => t.name || t.title || t.description || !t.enabled
-    || t.params.some(p => p.name || p.description || p.hide)).length;
+    || t.params.some(p => p.name || p.description || p.hide || p.default != null)).length;
 }
 
 // Sidebar — screen 2a's sidebar is the one true sidebar for BOTH screens
@@ -447,7 +453,7 @@ function renderDetail(name) {
   // Order: pinned first, switched-off last; among equals, overridden above.
   const grpOf = t => !t.enabled ? 2 : (t.always_load || b.always_load ? 0 : 1);
   const ovrOf = t => (t.name || t.title || t.description
-    || t.params.some(p => p.name || p.description || p.hide)) ? 0 : 1;
+    || t.params.some(p => p.name || p.description || p.hide || p.default != null)) ? 0 : 1;
   [...b.tools].sort((a, z) => grpOf(a) - grpOf(z) || ovrOf(a) - ovrOf(z))
     .forEach(t => tw.appendChild(toolCard(b, t)));
   wireGrow(m);
@@ -672,7 +678,7 @@ function renderGateway() {
 function toolCard(b, t) {
   const card = document.createElement('div');
   const isOvr = !!(t.name || t.title || t.description
-    || t.params.some(p => p.name || p.description || p.hide));
+    || t.params.some(p => p.name || p.description || p.hide || p.default != null));
   card.className = 'tool' + (t.enabled ? '' : ' disabled') + (isOvr ? ' ovr' : '');
   card.dataset.original = t.original;
   card.dataset.defaultName = t.default_name;
@@ -741,16 +747,28 @@ function toolCard(b, t) {
 }
 
 function paramRow(p) {
-  // #128: param names are read-only, no per-param hide affordance. Stored
-  // name/hide overrides pass through untouched via data attributes.
+  // #128: param names are read-only. #35: an "injected default" input per
+  // param; setting one unlocks the hide pill (a hidden param's value is
+  // injected by the gateway on every call, so hiding is safe — even for a
+  // required param). Without a default, hide stays affordance-less as #128
+  // decided (a stored legacy hide still shows so it can be switched off).
   const desc = p.description || p.default_description || '';
   const req = p.required ? ' <span class="req-badge">required</span>' : '';
   const renamed = p.name && p.name !== p.default_name
     ? ` <span class="si" title="legacy broadcast rename (read-only)">→ ${esc(p.name)}</span>` : '';
-  const hidden = p.hide ? ' <span class="si" title="hidden from broadcast (stored override)">hidden</span>' : '';
   const dot = p.description ? ' <span class="ovd" style="color:var(--ac)">·</span>' : '';
-  return `<div class="param-row" data-original="${esc(p.original)}" data-name="${esc(p.name||'')}" data-hide="${p.hide?'1':''}">
-    <div class="p-top"><span class="p-nm" title="parameter name (not editable)">${esc(p.original)}</span>${req}${renamed}${hidden}${dot}</div>
+  const defVal = p.default == null ? ''
+    : (typeof p.default === 'string' ? p.default : JSON.stringify(p.default));
+  const showHide = p.hide || defVal !== '';
+  return `<div class="param-row${p.hide ? ' p-hidden' : ''}" data-original="${esc(p.original)}" data-name="${esc(p.name||'')}" data-required="${p.required ? '1' : ''}">
+    <div class="p-top"><span class="p-nm" title="parameter name (not editable)">${esc(p.original)}</span>${req}${renamed}${dot}
+      <span style="flex:1"></span>
+      <input type="text" class="p-default mono${defVal !== '' ? ' ov' : ''}" value="${esc(defVal)}"
+        placeholder="inject value…" autocomplete="off" spellcheck="false"
+        title="fixed value the gateway injects on every call (JSON or plain text) — setting one allows hiding this param">
+      <label class="lbl p-hide-w" style="${showHide ? '' : 'display:none'}" title="hide from Claude's broadcast; the injected value is still sent to the backend">
+        <input type="checkbox" class="tgl p-hide" ${p.hide ? 'checked' : ''}> hidden</label>
+    </div>
     <div style="margin-top:7px;"><textarea class="p-desc grow${p.description ? ' ov' : ''}" data-default="${esc(p.default_description||'')}">${esc(desc)}</textarea></div>
     </div>`;
 }
@@ -789,6 +807,30 @@ function wireCard(backend, original, card) {
       flushSave(backend, original, card);
     });
   });
+  // #35: the injected-default input unlocks the hide pill; clearing the value
+  // re-locks it (and un-hides a required param, which can't stay hidden
+  // without an injected value — mirrors the server guard).
+  card.querySelectorAll('.param-row').forEach(pe => {
+    const def = $('.p-default', pe), pillWrap = $('.p-hide-w', pe), pill = $('.p-hide', pe);
+    if (!def || !pill) return;
+    const sync = () => {
+      if (def.value.trim() === '' && pe.dataset.required === '1' && pill.checked)
+        pill.checked = false;
+      pillWrap.style.display = (def.value.trim() !== '' || pill.checked) ? '' : 'none';
+      pe.classList.toggle('p-hidden', pill.checked);
+    };
+    def.addEventListener('input', sync);
+    pill.addEventListener('change', sync);
+  });
+}
+
+// #35: JSON-parseable defaults are sent typed (numbers, booleans); anything
+// else goes as a raw string; empty means "no injection". Non-scalar JSON
+// (arrays/objects) is sent as-parsed so the server rejects it with a clear 400.
+function paramDefaultValue(raw) {
+  const v = raw.trim();
+  if (v === '') return '';
+  try { return JSON.parse(v); } catch { return v; }
 }
 
 function gather(card) {
@@ -796,7 +838,8 @@ function gather(card) {
     original: pe.dataset.original,
     name: pe.dataset.name,           // #128: read-only pass-through
     description: $('.p-desc', pe).value,
-    hide: pe.dataset.hide === '1',   // #128: pass-through, no UI affordance
+    hide: $('.p-hide', pe).checked,  // #35: unlocked by an injected default
+    default: paramDefaultValue($('.p-default', pe).value),
   }));
   return {
     name: $('.f-name', card).value,
@@ -902,7 +945,7 @@ async function applySnapshot(scope, snap) {
           override: {
             name: st.name || '', title: st.title || '', description: st.description || '',
             enabled: st.enabled !== false, always_load: !!st.always_load,
-            params: (st.params || []).map(p => ({ original: p.original, name: p.name || '', description: p.description || '', hide: !!p.hide })),
+            params: (st.params || []).map(p => ({ original: p.original, name: p.name || '', description: p.description || '', hide: !!p.hide, default: p.default ?? '' })),
           },
         });
       }
@@ -980,6 +1023,8 @@ function patchToolState(backend, original, o) {
     p.name = ovVal(op.name, p.default_name);
     p.description = ovVal(op.description, p.default_description);
     p.hide = op.hide;
+    p.default = typeof op.default === 'string'
+      ? (op.default.trim() || null) : (op.default ?? null);
   });
 }
 

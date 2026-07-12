@@ -124,6 +124,11 @@ class ParamOverride(BaseModel, extra="forbid"):
     name: str | None = None
     description: str | None = None
     hide: bool = False
+    # #35: a fixed value the gateway injects on every call (FastMCP
+    # ArgTransform default). Scalars only — mirrors ArgTransformConfig.default.
+    # With a default set, hiding is safe even for a required param: Claude
+    # never sees it, the backend always receives this value.
+    default: str | int | float | bool | None = None
 
 
 class ToolOverride(BaseModel, extra="forbid"):
@@ -413,6 +418,8 @@ def build_transforms(  # noqa: PLR0912 — one branch per override field; splitt
                 arg_kwargs["name"] = param.name
             if param.description is not None:
                 arg_kwargs["description"] = param.description
+            if param.default is not None:  # #35: injected on every call
+                arg_kwargs["default"] = param.default
             arguments[param.original] = ArgTransformConfig(**arg_kwargs)
 
         # Backend disabled (#38) forces every tool off, whatever its own state.
@@ -542,6 +549,8 @@ def to_raw(cfg: GatewayConfig) -> dict:  # noqa: PLR0915 — field-by-field TOML
         if p.description is not None:
             d["description"] = p.description
         d["hide"] = p.hide
+        if p.default is not None:
+            d["default"] = p.default
         return d
 
     out: dict = {

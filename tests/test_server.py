@@ -715,3 +715,59 @@ def test_unmount_drops_route_and_registry():
     paths = [getattr(r, "path", None) for r in app.router.routes]
     assert "/b" not in paths  # backend mount removed
     assert "/health" in paths  # other routes untouched
+
+
+# ---------------------------------------------------------------------------
+# #35 — a hidden param's injected default reaches the backend
+# ---------------------------------------------------------------------------
+
+
+def test_hidden_required_param_default_injected():
+    """The whole #35 chain through a REAL FastMCP proxy: the hidden param
+    vanishes from the broadcast schema, and the backend still receives the
+    injected value on every call."""
+    from fastmcp import Client, FastMCP
+    from fastmcp.server import create_proxy
+
+    m = FastMCP("b")
+
+    @m.tool
+    def greet(text: str, mode: str) -> str:
+        """Greet."""
+        return mode + ":" + text
+
+    cfg = cl.GatewayConfig.model_validate(
+        {
+            "backends": [
+                {
+                    "name": "b",
+                    "transport": "stdio",
+                    "command": "/bin/x",  # unused — the proxy wraps m in-process
+                    "tools": [
+                        {
+                            "original": "greet",
+                            "params": [
+                                {"original": "mode", "hide": True, "default": "loud"}
+                            ],
+                        }
+                    ],
+                }
+            ]
+        }
+    )
+    proxy = create_proxy(m, name="mcp-gateway-b")
+    transforms, _ = cl.build_transforms(cfg, cfg.backends[0])
+    proxy.add_transform(transforms)
+
+    async def go():
+        async with Client(proxy) as c:
+            (tool,) = [t for t in await c.list_tools() if t.name == "greet"]
+            props = (tool.inputSchema or {}).get("properties", {})
+            assert "mode" not in props  # hidden from Claude's broadcast
+            assert "mode" not in (tool.inputSchema or {}).get("required", [])
+            return await c.call_tool_mcp("greet", {"text": "hi"})
+
+    res = anyio.run(go)
+    assert res.isError is False
+    texts = [blk.text for blk in res.content if blk.type == "text"]
+    assert texts == ["loud:hi"]  # the injected default reached the backend

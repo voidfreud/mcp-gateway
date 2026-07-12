@@ -699,3 +699,51 @@ def test_disabled_backend_broadcasts_no_instructions():
     assert cl.backend_instructions(b, {"b": "captured blurb"}) is None
     b.enabled = True
     assert cl.backend_instructions(b, {"b": "captured blurb"}) == "my override"
+
+
+# --- #35: injected param default -> ArgTransformConfig.default ---------------
+
+
+def _cfg_with_param(param: dict) -> cl.GatewayConfig:
+    return cl.GatewayConfig.model_validate(
+        {
+            "backends": [
+                {
+                    "name": "b",
+                    "transport": "stdio",
+                    "command": "/bin/x",
+                    "tools": [{"original": "t", "params": [param]}],
+                }
+            ]
+        }
+    )
+
+
+def test_param_default_maps_to_arg_transform():
+    cfg = _cfg_with_param({"original": "mode", "hide": True, "default": "loud"})
+    tr, _ = cl.build_transforms(cfg, cfg.backends[0])
+    arg = tr._transforms["t"].arguments["mode"]
+    assert arg.hide is True and arg.default == "loud"
+
+
+def test_param_without_default_leaves_arg_transform_unset():
+    # `default` must be ABSENT (exclude_unset) — an explicit None would differ
+    # from never-set in FastMCP's to_arg_transform.
+    cfg = _cfg_with_param({"original": "mode", "hide": True})
+    tr, _ = cl.build_transforms(cfg, cfg.backends[0])
+    arg = tr._transforms["t"].arguments["mode"]
+    assert "default" not in arg.model_dump(exclude_unset=True)
+
+
+def test_param_default_survives_toml_roundtrip():
+    for value in ("v", 3, 2.5, True):
+        cfg = _cfg_with_param({"original": "p", "default": value})
+        reparsed = cl.GatewayConfig.model_validate(tomllib.loads(cl.dump_toml(cfg)))
+        p = reparsed.backends[0].tools[0].params[0]
+        assert p.default == value and type(p.default) is type(value)
+
+
+def test_param_no_default_omitted_from_toml():
+    cfg = _cfg_with_param({"original": "p", "hide": True})
+    raw = cl.to_raw(cfg)
+    assert "default" not in raw["backends"][0]["tools"][0]["params"][0]

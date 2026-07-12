@@ -565,6 +565,122 @@ def test_apply_required_param_not_hidden_ok(defaults_dir):
     assert p.name == "repo" and p.hide is False
 
 
+# --- #35: injected param default — hide a required param safely --------------
+
+
+def _param_payload(param="repoName", **fields):
+    return {
+        "tool_original": "t",
+        "override": {
+            "enabled": True,
+            "params": [
+                {"original": param, "name": None, "description": None, **fields}
+            ],
+        },
+    }
+
+
+def test_apply_hide_required_with_default_ok(defaults_dir):
+    _write_defaults(
+        defaults_dir,
+        "b",
+        "t",
+        params=[{"original": "repoName", "description": "d", "required": True}],
+    )
+    cfg = _single_cfg()
+    admin.apply_tool_override(
+        cfg, "b", _param_payload(hide=True, default="acme/widgets")
+    )
+    p = cfg.backends[0].tools[0].params[0]
+    assert p.hide is True and p.default == "acme/widgets"
+
+
+def test_apply_hide_required_without_default_names_the_fix(defaults_dir):
+    _write_defaults(
+        defaults_dir,
+        "b",
+        "t",
+        params=[{"original": "repoName", "description": "d", "required": True}],
+    )
+    cfg = _single_cfg()
+    with pytest.raises(cl.ConfigError, match="injected default"):
+        admin.apply_tool_override(cfg, "b", _param_payload(hide=True))
+
+
+def test_apply_default_alone_is_an_override(defaults_dir):
+    # a default WITHOUT hide is stored too (the param becomes optional for
+    # Claude; the backend gets the value when Claude omits it)
+    _write_defaults(
+        defaults_dir,
+        "b",
+        "t",
+        params=[{"original": "page", "description": "d", "required": False}],
+    )
+    cfg = _single_cfg()
+    admin.apply_tool_override(cfg, "b", _param_payload("page", hide=False, default=3))
+    p = cfg.backends[0].tools[0].params[0]
+    assert p.default == 3 and p.hide is False
+
+
+def test_apply_empty_string_default_stores_nothing(defaults_dir):
+    # the UI's cleared field sends "" -> no injection, no override entry
+    _write_defaults(
+        defaults_dir,
+        "b",
+        "t",
+        params=[{"original": "page", "description": "d", "required": False}],
+    )
+    cfg = _single_cfg()
+    admin.apply_tool_override(cfg, "b", _param_payload("page", hide=False, default=""))
+    assert cfg.backends[0].tools == []
+
+
+def test_apply_non_scalar_default_rejected(defaults_dir):
+    _write_defaults(
+        defaults_dir,
+        "b",
+        "t",
+        params=[{"original": "page", "description": "d", "required": False}],
+    )
+    cfg = _single_cfg()
+    with pytest.raises(cl.ConfigError, match="string, number, or boolean"):
+        admin.apply_tool_override(
+            cfg, "b", _param_payload("page", hide=False, default=[1, 2])
+        )
+    assert cfg.backends[0].tools == []
+
+
+def test_build_state_surfaces_param_default(defaults_dir):
+    _write_defaults(
+        defaults_dir,
+        "b",
+        "t",
+        params=[{"original": "page", "description": "d", "required": False}],
+    )
+    cfg = _single_cfg()
+    admin.apply_tool_override(cfg, "b", _param_payload("page", hide=True, default=7))
+    params = admin.build_state(cfg)["backends"][0]["tools"][0]["params"]
+    assert params[0]["default"] == 7 and params[0]["hide"] is True
+
+
+def test_export_import_round_trips_param_default(defaults_dir):
+    _write_defaults(
+        defaults_dir,
+        "b",
+        "t",
+        params=[{"original": "repoName", "description": "d", "required": True}],
+    )
+    cfg = _single_cfg()
+    admin.apply_tool_override(cfg, "b", _param_payload(hide=True, default=True))
+    bundle = admin.export_settings(cfg)
+    assert bundle["backends"]["b"]["tools"]["t"]["params"][0]["default"] is True
+    cfg2 = _single_cfg()
+    affected, errors = admin.import_settings(cfg2, bundle)
+    assert errors == [] and affected == ["b"]
+    p = cfg2.backends[0].tools[0].params[0]
+    assert p.hide is True and p.default is True
+
+
 # --- read-only schema surface (issue #2) -----------------------------------
 # The wire tools/list carries outputSchema, _meta (FastMCP tags + our
 # anthropic/alwaysLoad pin), and ToolAnnotations. capture_defaults needs a live

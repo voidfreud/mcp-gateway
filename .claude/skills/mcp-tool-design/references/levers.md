@@ -12,6 +12,7 @@ The gateway rewrites broadcast text and forwards calls untouched. Every lever, i
 | Pin tool upfront | `ToolOverride.always_load` | same `override` payload | hot-reload (meta only) |
 | Pin whole backend | `Backend.always_load` | `POST /admin/api/backend/{name}/pin` `{value}` | hot-reload |
 | Param description / hide / name | `ToolOverride.params[]` (`original`, `description`, `hide`, `name`) | inside the `override` payload | hot-reload |
+| Injected param default (#35) | `ToolOverride.params[].default` (scalar: str/int/float/bool) — the gateway injects it on every call; setting one is the ONLY way to hide a *required* param (hide without a default is rejected for required params) | same `params[]` entry (`{original, hide, default}`) | hot-reload |
 | Backend on/off | `Backend.enabled` | `POST /admin/api/backend/{name}/enabled` `{value}` | mounts/unmounts live |
 | Reset a tool to captured defaults | — | `POST /admin/api/reset` `{backend, tool_original}` | hot-reload |
 
@@ -30,6 +31,7 @@ Not levers: schemas (types/enums/required), annotations, response shapes — tho
 
 - Broadcast names: `[A-Za-z0-9_-]`, unique per backend (each backend is its own endpoint — cross-backend name reuse is fine). Collision-checked on save; a deliberately-set description identical to a sibling's is also rejected.
 - Overrides are stored as diffs against captured defaults — saving the default value stores nothing.
+- Hiding a param the backend marks *required* needs an injected `default` on that param (#35); without one the save is a 400. Non-required params hide freely.
 - All admin writes are lock-wrapped and the config save is atomic; edit through the API, not by hand-editing `config.toml` under a running daemon.
 
 ## The verify loop (not optional)

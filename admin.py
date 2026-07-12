@@ -348,6 +348,8 @@ def build_state(cfg: GatewayConfig) -> dict:
                         "name": p.name if p else None,
                         "description": p.description if p else None,
                         "hide": p.hide if p else False,
+                        # injected fixed value (#35) — None = no injection
+                        "default": p.default if p else None,
                     }
                 )
             tools_state.append(
@@ -435,6 +437,23 @@ def _clean(v):
             _validate_text(v)
         return v or None
     return v
+
+
+def _clean_param_default(v, param: str):
+    """Validate an injected param default (#35): scalars only, mirroring
+    FastMCP ``ArgTransformConfig.default`` (str | int | float | bool). An empty
+    string means "no default" (the UI's cleared field); anything non-scalar is
+    a clean 400 instead of a pydantic 500 downstream."""
+    if v is None:
+        return None
+    if isinstance(v, str):
+        return _clean(v)
+    if isinstance(v, (int, float, bool)):
+        return v
+    raise cl.ConfigError(
+        f"parameter {param!r}: injected default must be a string, number, or "
+        f"boolean (got {type(v).__name__})"
+    )
 
 
 _NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
@@ -527,17 +546,26 @@ def apply_tool_override(cfg: GatewayConfig, backend: str, payload: dict) -> None
         pdesc = _override_vs_default(p.get("description"), dp.get("description"))
         _validate_name(pname, "parameter name")
         hide = bool(p.get("hide", False))
+        default = _clean_param_default(p.get("default"), po)
         # Correctness guardrail (alongside check_no_collision): a param the
-        # backend marks required can't be hidden — Claude could never supply it,
-        # so every call would break. (No param-default injection exists yet.)
-        if hide and dp.get("required", False):
+        # backend marks required can't be hidden UNLESS a fixed default is
+        # injected (#35) — without one Claude could never supply it, so every
+        # call would break.
+        if hide and dp.get("required", False) and default is None:
             raise cl.ConfigError(
                 f"parameter {po!r} is required by the backend — hiding it "
-                f"would break the tool"
+                f"would break the tool; set an injected default value to hide "
+                f"it safely"
             )
-        if pname or pdesc or hide:
+        if pname or pdesc or hide or default is not None:
             params.append(
-                ParamOverride(original=po, name=pname, description=pdesc, hide=hide)
+                ParamOverride(
+                    original=po,
+                    name=pname,
+                    description=pdesc,
+                    hide=hide,
+                    default=default,
+                )
             )
 
     if "params" not in ov and prev is not None:
@@ -611,6 +639,7 @@ def export_settings(  # noqa: PLR0912 — one branch per serialized override fie
                         **({"name": p.name} if p.name else {}),
                         **({"description": p.description} if p.description else {}),
                         **({"hide": True} if p.hide else {}),
+                        **({"default": p.default} if p.default is not None else {}),
                     }
                     for p in t.params
                 ]

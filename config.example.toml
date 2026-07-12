@@ -57,6 +57,15 @@ stateless = true                   # parsed; shared-session reuse is a
     original = "internal_flag"
     hide = true                    # remove this param from the schema
 
+    [[backends.tools.params]]
+    original = "api_mode"
+    hide = true                    # hidden from Claude…
+    default = "strict"             # …but the gateway injects this value on
+                                   # every call (#35). Scalar only (str/int/
+                                   # float/bool). Required params can only be
+                                   # hidden WITH a default; optional params
+                                   # may take a default without hiding.
+
 # A local stdio backend looks like this:
 # [[backends]]
 # name = "serena"
