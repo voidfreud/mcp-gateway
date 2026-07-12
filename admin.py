@@ -1005,10 +1005,16 @@ def claude_mcp_command(
             "http",
             "--scope",
             scope,
+            registration,
+            url,
         ]
+        # --header is a VARIADIC option (like -e/--env): placed before the
+        # positionals it swallows <name> <url> and the CLI errors with
+        # "missing required argument 'name'" — found live (#123). The CLI's
+        # own --help example puts --header last; do the same.
         if bearer_token:
             argv += ["--header", f"Authorization: Bearer {bearer_token}"]
-        return [*argv, registration, url]
+        return argv
     if action == "remove":
         return ["claude", "mcp", "remove", "--scope", scope, registration]
     raise cl.ConfigError(f"unknown action {action!r} (use add or remove)")

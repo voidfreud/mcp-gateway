@@ -1419,6 +1419,9 @@ def test_register_carries_bearer_header_and_redacts_it(tmp_path, monkeypatch):
     j = r.json()
     argv = calls[0]
     assert argv[argv.index("--header") + 1] == "Authorization: Bearer s3cret"
+    # --header is variadic in the CLI: BEFORE the positionals it would swallow
+    # "<name> <url>" (live-caught in #123) — it must come after them.
+    assert argv.index("--header") > argv.index("gateway-b") > argv.index("--scope")
     # redaction: neither command nor CLI output may leak the token
     assert "s3cret" not in j["command"] and "***" in j["command"]
     assert "s3cret" not in j["stdout"]
@@ -1457,3 +1460,39 @@ def test_admin_html_inline_script_parses():
         assert proc.returncode == 0, proc.stderr
     finally:
         os.unlink(js_path)
+
+
+def test_interval_refresh_loop_sweeps_and_stops(tmp_path, monkeypatch):
+    """#43 trigger 4: with an interval set, mounted+enabled backends are swept
+    on the clock; close() ends the loop promptly (no shutdown hang)."""
+    refreshed = []
+
+    async def fake_refresh(b, *a, **k):
+        refreshed.append(b.name)
+        return {"status": "refreshed", "changed": False}
+
+    monkeypatch.setattr(admin, "refresh_and_reload", fake_refresh)
+    cfg = cl.GatewayConfig.model_validate(
+        {
+            "backends": [
+                {"name": "up", "transport": "stdio", "command": "/bin/x"},
+                {"name": "down", "transport": "stdio", "command": "/bin/y"},
+            ]
+        }
+    )
+    path = tmp_path / "config.toml"
+    cl.save(cfg, str(path))
+    log = structlog.get_logger("test")
+
+    async def go():
+        ar = server._AutoRefresh(1, str(path), {"up": object()}, {}, log)
+        ar.interval = 0.05  # fast clock for the test
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(ar.interval_loop)
+            with anyio.fail_after(2):
+                while not refreshed:
+                    await anyio.sleep(0.01)
+            ar.close()  # must end the loop; the task group then drains
+
+    anyio.run(go)
+    assert refreshed and set(refreshed) == {"up"}  # only mounted+enabled swept
