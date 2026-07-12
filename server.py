@@ -380,6 +380,52 @@ class BearerAuthMiddleware:
 
 
 # ---------------------------------------------------------------------------
+# Origin validation (pure-ASGI middleware) — MCP spec DNS-rebinding protection
+# ---------------------------------------------------------------------------
+
+
+class OriginGuardMiddleware:
+    """Reject cross-origin browser requests: MCP spec (Streamable HTTP
+    security), normative — servers MUST validate the ``Origin`` header to
+    prevent DNS rebinding, and MUST answer an invalid one with 403.
+
+    The attack: a malicious web page rebinds its hostname to 127.0.0.1 and
+    fetches the loopback gateway from the victim's browser. Such a request
+    always carries the page's own ``Origin``; requests from non-browser
+    clients (Claude Code, curl) carry none and pass. Allowed origins are the
+    gateway's own (admin UI same-origin fetches) on any loopback host
+    spelling; everything else — including ``Origin: null`` from sandboxed
+    documents — is 403. Applies to every route: the MCP mounts, the admin
+    API, even /health (a rebinding page has no business probing liveness).
+    """
+
+    def __init__(self, app, *, host: str, port: int):
+        self.app = app
+        hosts = {host, "127.0.0.1", "localhost", "[::1]"}
+        self._allowed = {f"http://{h}:{port}".encode() for h in hosts}
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            origin = dict(scope.get("headers", [])).get(b"origin")
+            if origin is not None and origin not in self._allowed:
+                await send(
+                    {
+                        "type": "http.response.start",
+                        "status": 403,
+                        "headers": [(b"content-type", b"application/json")],
+                    }
+                )
+                await send(
+                    {
+                        "type": "http.response.body",
+                        "body": b'{"ok": false, "error": "invalid origin"}',
+                    }
+                )
+                return
+        await self.app(scope, receive, send)
+
+
+# ---------------------------------------------------------------------------
 # Startup reconciliation: warn on configured tools that no backend exposes
 # ---------------------------------------------------------------------------
 
@@ -708,6 +754,9 @@ def _build_app(  # noqa: PLR0913, PLR0915 — composition root; takes what it wi
         ],
         lifespan=lifespan,
         middleware=[
+            # Origin guard FIRST — a rebinding page's request dies before any
+            # body buffering or auth work (MCP spec MUST).
+            StarletteMiddleware(OriginGuardMiddleware, host=cfg.host, port=cfg.port),
             StarletteMiddleware(BodyLimitMiddleware, max_bytes=ADMIN_BODY_LIMIT),
             StarletteMiddleware(BearerAuthMiddleware, token=bearer_token),
         ],

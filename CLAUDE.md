@@ -64,7 +64,12 @@ Per-backend liveness: `GET /admin/api/status` (#23).
   its OWN endpoint (`/<backend>/mcp`), so tools are exposed BARE — no `<backend>_`
   prefix; the endpoint / Claude-Code server registration namespaces them.
 
-## Gotchas (verified against FastMCP 3.4.2)
+## Gotchas (verified against FastMCP 3.4.4)
+- **Origin guard (MCP spec MUST):** `server.OriginGuardMiddleware` 403s any
+  browser request whose `Origin` isn't the gateway's own loopback origin — the
+  spec's DNS-rebinding protection for Streamable HTTP. Non-browser clients send
+  no Origin and pass. FastMCP grew its own opt-in Host/Origin guard in 3.4.3/4;
+  ours sits on the parent app so /admin is covered too.
 - Spec was written for FastMCP 2.x. v3 changes: `create_proxy()` (not
   `FastMCP.as_proxy`); transforms are `ToolTransform({name: ToolTransformConfig(
   ..., arguments={p: ArgTransformConfig(...)})})`; arg field is `arguments`,

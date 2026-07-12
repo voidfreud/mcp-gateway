@@ -207,14 +207,13 @@ async def ensure_defaults(cfg: GatewayConfig, log, force: str | None = None) -> 
     A defaults file written before server-level capture lacks the ``instructions``
     key; treat such a file as stale and re-capture it once, so old installs gain
     instructions/serverInfo without a manual re-introspect.
+
+    Captures run CONCURRENTLY (each already bounded by CAPTURE_TIMEOUT, each
+    failure its own log line): a first run / fresh install pays the slowest
+    backend, not the sum — the same rule boot mounting follows (#61).
     """
-    for b in cfg.backends:
-        if force and b.name != force:
-            continue
-        if not force:
-            existing = load_defaults(b.name)
-            if existing is not None and "instructions" in existing:
-                continue
+
+    async def one(b: Backend) -> None:
         try:
             save_defaults(await capture_defaults(b))
             # stamp the #43 throttle: a just-captured baseline is fresh, the
@@ -223,6 +222,16 @@ async def ensure_defaults(cfg: GatewayConfig, log, force: str | None = None) -> 
             log.info("defaults_captured", backend=b.name)
         except Exception as exc:  # noqa: BLE001
             log.warning("defaults_capture_failed", backend=b.name, error=str(exc))
+
+    def needs(b: Backend) -> bool:
+        if force:
+            return b.name == force
+        existing = load_defaults(b.name)
+        return existing is None or "instructions" not in existing
+
+    targets = [b for b in cfg.backends if needs(b)]
+    if targets:
+        await asyncio.gather(*(one(b) for b in targets))
 
 
 async def refresh_defaults(

@@ -1398,3 +1398,39 @@ def test_uniquify_dodges_disabled_entries_too(defaults_dir):
         {"tool_original": "cc", "on_collision": "uniquify", "override": {"name": "x"}},
     )
     assert final == "x_3"  # skipped enabled "x" AND disabled "x_2"
+
+
+# --- ensure_defaults captures concurrently ------------------------------------
+
+
+def test_ensure_defaults_captures_concurrently(defaults_dir, monkeypatch):
+    # First run / fresh install: N missing backends must cost the slowest
+    # capture, not the sum — two 0.2s captures well under 0.4s wall clock.
+    import time as _time
+
+    async def slow_capture(b):
+        await anyio.sleep(0.2)
+        return {
+            "backend": b.name,
+            "captured_at": 0,
+            "instructions": None,
+            "server_info": None,
+            "capabilities": None,
+            "tools": [],
+        }
+
+    monkeypatch.setattr(admin, "capture_defaults", slow_capture)
+    cfg = cl.GatewayConfig.model_validate(
+        {
+            "backends": [
+                {"name": "b1", "transport": "stdio", "command": "/bin/x"},
+                {"name": "b2", "transport": "stdio", "command": "/bin/y"},
+            ]
+        }
+    )
+    log = structlog.get_logger("test")
+    started = _time.perf_counter()
+    anyio.run(lambda: admin.ensure_defaults(cfg, log))
+    elapsed = _time.perf_counter() - started
+    assert elapsed < 0.38, f"captures serialized: {elapsed:.2f}s"
+    assert admin.load_defaults("b1") and admin.load_defaults("b2")
