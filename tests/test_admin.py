@@ -1400,6 +1400,167 @@ def test_uniquify_dodges_disabled_entries_too(defaults_dir):
     assert final == "x_3"  # skipped enabled "x" AND disabled "x_2"
 
 
+# --- #153: dangling-override detection + one-click migration -----------------
+
+
+def _cfg_migrate_setup(defaults_dir):
+    # captured baseline is the RENAMED tool ("new-tool") with one param "keep";
+    # the stored override still points at the OLD name with tuned text, a pin,
+    # and two params — one that survives the rename ("keep"), one that doesn't.
+    _write_defaults(
+        defaults_dir,
+        "b",
+        "new-tool",
+        desc="new desc",
+        params=[{"original": "keep", "description": "kd", "required": False}],
+    )
+    cfg = _single_cfg()
+    cfg.backends[0].tools = [
+        cl.ToolOverride(
+            original="old-tool",
+            name="shiny",
+            description="tuned desc",
+            always_load=True,
+            params=[
+                cl.ParamOverride(original="keep", description="better"),
+                cl.ParamOverride(original="gone", description="lost"),
+            ],
+        )
+    ]
+    return cfg
+
+
+def test_dangling_overrides_detects_orphaned_entry(defaults_dir):
+    cfg = _cfg_with_dangling(defaults_dir)  # captured "new-tool"; override "old-tool"
+    d = admin.dangling_overrides(cfg, "b")
+    assert len(d) == 1
+    assert d[0] == {
+        "original": "old-tool",
+        "name": "shiny",
+        "has_description": False,
+        "enabled": True,
+    }
+
+
+def test_dangling_overrides_empty_when_all_captured(defaults_dir):
+    _write_defaults(defaults_dir, "b", "t")
+    cfg = _single_cfg()
+    admin.apply_tool_override(
+        cfg, "b", {"tool_original": "t", "override": {"name": "renamed"}}
+    )
+    assert admin.dangling_overrides(cfg, "b") == []
+
+
+def test_build_state_surfaces_dangling(defaults_dir):
+    cfg = _cfg_with_dangling(defaults_dir)
+    bs = admin.build_state(cfg)["backends"][0]
+    assert [d["original"] for d in bs["dangling"]] == ["old-tool"]
+    assert bs["dangling"][0]["name"] == "shiny"
+
+
+def test_migrate_override_carries_fields_and_surviving_params(defaults_dir):
+    cfg = _cfg_migrate_setup(defaults_dir)
+    res = admin.migrate_override(cfg, "b", "old-tool", "new-tool")
+    assert res["carried_params"] == ["keep"]
+    assert res["dropped_params"] == ["gone"]
+    tools = {t.original: t for t in cfg.backends[0].tools}
+    assert "old-tool" not in tools  # old entry gone
+    nt = tools["new-tool"]
+    assert nt.name == "shiny"
+    assert nt.description == "tuned desc"
+    assert nt.always_load is True
+    assert [p.original for p in nt.params] == ["keep"]
+    assert nt.params[0].description == "better"
+
+
+def test_migrate_override_to_unknown_target_raises(defaults_dir):
+    cfg = _cfg_migrate_setup(defaults_dir)
+    with pytest.raises(cl.ConfigError, match="not a captured tool"):
+        admin.migrate_override(cfg, "b", "old-tool", "ghost")
+
+
+def test_migrate_override_to_overridden_target_raises(defaults_dir):
+    _write_defaults(defaults_dir, "b", "new-tool", desc="nd")
+    cfg = _single_cfg()
+    cfg.backends[0].tools = [
+        cl.ToolOverride(original="old-tool", name="shiny"),  # dangling
+        cl.ToolOverride(original="new-tool", description="already"),  # target taken
+    ]
+    with pytest.raises(cl.ConfigError, match="already has a stored override"):
+        admin.migrate_override(cfg, "b", "old-tool", "new-tool")
+
+
+def test_migrate_override_from_not_stored_raises(defaults_dir):
+    _write_defaults(defaults_dir, "b", "new-tool")
+    cfg = _single_cfg()
+    with pytest.raises(cl.ConfigError, match="no stored override"):
+        admin.migrate_override(cfg, "b", "missing", "new-tool")
+
+
+def test_migrate_override_from_live_tool_raises(defaults_dir):
+    # "old-tool" is still captured -> not dangling -> can't be migrated
+    _write_defaults_multi(defaults_dir, "b", [("old-tool", "d1"), ("new-tool", "d2")])
+    cfg = _single_cfg()
+    cfg.backends[0].tools = [cl.ToolOverride(original="old-tool", name="shiny")]
+    with pytest.raises(cl.ConfigError, match="still a live tool"):
+        admin.migrate_override(cfg, "b", "old-tool", "new-tool")
+
+
+# --- #156: sweep orphaned captured-defaults files ----------------------------
+
+
+def test_sweep_orphan_defaults_removes_unconfigured(defaults_dir):
+    _write_defaults(defaults_dir, "keep", "t")
+    _write_defaults(defaults_dir, "off", "t")
+    _write_defaults(defaults_dir, "orphan", "t")
+    cfg = cl.GatewayConfig.model_validate(
+        {
+            "backends": [
+                {"name": "keep", "transport": "stdio", "command": "/bin/x"},
+                {
+                    "name": "off",
+                    "transport": "stdio",
+                    "command": "/bin/x",
+                    "enabled": False,
+                },
+            ]
+        }
+    )
+    removed = admin.sweep_orphan_defaults(cfg, structlog.get_logger("test"))
+    assert removed == ["orphan"]
+    assert (defaults_dir / "keep.json").exists()
+    assert (defaults_dir / "off.json").exists()  # disabled backend is still configured
+    assert not (defaults_dir / "orphan.json").exists()
+
+
+def test_sweep_orphan_defaults_missing_dir_tolerated(tmp_path, monkeypatch):
+    monkeypatch.setattr(admin, "DEFAULTS_DIR", tmp_path / "no-such-dir")
+    cfg = _single_cfg()
+    assert admin.sweep_orphan_defaults(cfg, structlog.get_logger("test")) == []
+
+
+# --- #46: parse `claude mcp list` -> per-backend registration ----------------
+
+
+def test_parse_cc_registrations_from_cli_output():
+    out = (
+        "gateway-alpha: http://h/alpha/mcp (HTTP) - ✓ Connected\n"
+        "gateway-beta: http://h/beta/mcp (HTTP) - ✘ Failed to connect\n"
+    )
+    reg = admin.parse_cc_registrations(out, ["alpha", "beta", "gamma"])
+    # registration, NOT liveness: beta's failed connection still counts registered
+    assert reg == {"alpha": True, "beta": True, "gamma": False}
+
+
+def test_parse_cc_registrations_colon_anchors_prefix_match():
+    # gateway-cc must NOT be read off gateway-cc-docs (the colon anchors it)
+    out = "gateway-cc-docs: http://h/cc-docs/mcp (HTTP) - ✓ Connected\n"
+    assert admin.parse_cc_registrations(out, ["cc", "cc-docs"]) == {
+        "cc": False,
+        "cc-docs": True,
+    }
+
+
 # --- ensure_defaults captures concurrently ------------------------------------
 
 

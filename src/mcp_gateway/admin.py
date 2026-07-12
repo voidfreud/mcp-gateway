@@ -207,6 +207,29 @@ def save_defaults(data: dict) -> None:
     )
 
 
+def sweep_orphan_defaults(cfg: GatewayConfig, log) -> list[str]:
+    """Delete captured-defaults files whose stem is not a configured backend name.
+
+    Such files predate prune-on-remove (#54) — a backend removed before that
+    landed left its ``<name>.json`` behind, and a stale baseline can resurrect a
+    ghost backend's overrides on a re-import. Runs once at boot (#156). Deletes
+    each orphan, logs one line per file, returns the removed stems. A DISABLED
+    backend is still configured (it stays in ``cfg.backends``) so its file is
+    kept; a missing defaults dir is tolerated (nothing to sweep).
+    """
+    if not DEFAULTS_DIR.is_dir():
+        return []
+    configured = {b.name for b in cfg.backends}
+    removed: list[str] = []
+    for p in sorted(DEFAULTS_DIR.glob("*.json")):
+        if p.stem in configured:
+            continue
+        p.unlink(missing_ok=True)
+        removed.append(p.stem)
+        log.info("orphan_defaults_swept", backend=p.stem, file=str(p))
+    return removed
+
+
 async def ensure_defaults(cfg: GatewayConfig, log, force: str | None = None) -> None:
     """Capture defaults for any backend missing them (or *force* one by name).
 
@@ -396,6 +419,33 @@ def effective_tools(cfg: GatewayConfig, backend: str | None = None) -> list[dict
     return out
 
 
+def dangling_overrides(cfg: GatewayConfig, backend: str) -> list[dict]:
+    """Stored overrides whose ``original`` no longer matches a captured tool —
+    the backend renamed the tool upstream and a #43 baseline refresh moved the
+    baseline out from under the override (#153). Their tuned text silently stops
+    applying (reconcile logs ``override_no_match``), yet the entry still occupies
+    a transform target. Surfaced in the UI so it can be migrated or discarded.
+
+    Each entry: the stored ``original``, its ``name`` (effective broadcast name,
+    == original when un-renamed), ``has_description`` (whether tuned description
+    text would be lost), and ``enabled``.
+    """
+    b = next((x for x in cfg.backends if x.name == backend), None)
+    if b is None:
+        return []
+    captured = {t["original"] for t in (load_defaults(backend) or {}).get("tools", [])}
+    return [
+        {
+            "original": ov.original,
+            "name": ov.name or ov.original,
+            "has_description": ov.description is not None,
+            "enabled": ov.enabled,
+        }
+        for ov in b.tools
+        if ov.original not in captured
+    ]
+
+
 def check_no_collision(
     cfg: GatewayConfig, backend: str, original: str, new: ToolOverride
 ) -> None:
@@ -515,6 +565,10 @@ def build_state(cfg: GatewayConfig) -> dict:
                 "default_instructions": (defaults or {}).get("instructions"),
                 "instructions": b.instructions,
                 "server_info": (defaults or {}).get("server_info"),
+                # #153: stored overrides whose original no longer matches a
+                # captured tool (backend renamed it upstream) — the UI flags
+                # these for one-click migrate/discard.
+                "dangling": dangling_overrides(cfg, b.name),
                 "tools": tools_state,
             }
         )
@@ -522,6 +576,10 @@ def build_state(cfg: GatewayConfig) -> dict:
         "host": cfg.host,
         "port": cfg.port,
         "version": gateway_version(),
+        # #155: gateway-wide settings surfaced for the settings card's prefill.
+        # bearer_token is the ${ENV} REF as stored — never the resolved secret.
+        "bearer_token": cfg.bearer_token,
+        "introspect_interval": cfg.introspect_interval,
         # Each backend is its own MCP endpoint with its own instructions now (no
         # single cross-backend "gateway instructions"); the UI shows an endpoints
         # overview + per-backend server-instructions editing.
@@ -766,6 +824,79 @@ def _reject_transform_landmines(cfg: GatewayConfig, b: Backend) -> None:
             f"If the clashing entry is a stale override for a tool the backend "
             f"no longer exposes, reset that tool first."
         ) from None
+
+
+def migrate_override(cfg: GatewayConfig, backend: str, frm: str, to: str) -> dict:
+    """Carry a DANGLING override's tuned text onto the tool's new original (#153).
+
+    *frm* must be a stored override that is dangling (its ``original`` absent
+    from the captured baseline — the backend renamed the tool away). *to* must be
+    a captured tool that has no stored override yet. The override's fields (name,
+    title, description, enabled, pin) move onto *to* through the normal
+    :func:`apply_tool_override` path (so collision + transform validation still
+    run); param overrides survive ONLY where the param's ``original`` still
+    exists in *to*'s captured schema — dropped ones are reported. The old *frm*
+    entry is then removed. Raises :class:`ConfigError` (→ 400) on any bad target.
+
+    Mutates *cfg* in place; the caller commits (backup + save + hot-reload).
+    """
+    b = next((x for x in cfg.backends if x.name == backend), None)
+    if b is None:
+        raise cl.ConfigError(f"unknown backend {backend!r}")
+    captured = {
+        t["original"]: t for t in (load_defaults(backend) or {}).get("tools", [])
+    }
+    if to not in captured:
+        raise cl.ConfigError(
+            f"cannot migrate to {to!r}: it is not a captured tool of backend "
+            f"{backend!r} — re-inspect the backend, or pick its new tool name"
+        )
+    src = next((t for t in b.tools if t.original == frm), None)
+    if src is None:
+        raise cl.ConfigError(f"no stored override for {frm!r} in backend {backend!r}")
+    if frm in captured:
+        raise cl.ConfigError(
+            f"{frm!r} is still a live tool of backend {backend!r}; only a "
+            f"dangling override (its tool renamed away upstream) can be migrated"
+        )
+    if any(t.original == to for t in b.tools):
+        raise cl.ConfigError(
+            f"cannot migrate to {to!r}: it already has a stored override — reset "
+            f"it first"
+        )
+    # Params survive only where the target still has that param (#153).
+    to_params = {p["original"] for p in captured[to].get("params", [])}
+    kept, dropped = [], []
+    for p in src.params:
+        if p.original in to_params:
+            kept.append(
+                {
+                    "original": p.original,
+                    "name": p.name,
+                    "description": p.description,
+                    "hide": p.hide,
+                    "default": p.default,
+                }
+            )
+        else:
+            dropped.append(p.original)
+    override = {
+        "name": src.name,
+        "title": src.title,
+        "description": src.description,
+        "enabled": src.enabled,
+        "always_load": src.always_load,
+        "params": kept,
+    }
+    # Drop the dangling entry BEFORE applying, so its (soon-obsolete) transform
+    # target name can't collide with the migrated name on the target tool.
+    b.tools = [t for t in b.tools if t.original != frm]
+    apply_tool_override(cfg, backend, {"tool_original": to, "override": override})
+    return {
+        "migrated_to": to,
+        "carried_params": [p["original"] for p in kept],
+        "dropped_params": dropped,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1030,6 +1161,25 @@ CLAUDE_SCOPES = ("local", "user", "project")
 # longer hang means a broken install — surface it, don't wait on it.
 CLAUDE_CLI_TIMEOUT = 30
 
+# #46: cache `claude mcp list` output in-process so repeated /admin page loads
+# don't re-shell the CLI on every render; `?fresh=1` busts it after a
+# register/deregister. Module-level (resets on restart, which is fine).
+CC_REG_CACHE_TTL = 60.0
+_cc_reg_cache: dict[str, Any] = {"ts": 0.0, "output": None}
+
+
+def parse_cc_registrations(output: str, backends: list[str]) -> dict[str, bool]:
+    """Map each configured backend to whether it is registered in Claude Code,
+    parsed from ``claude mcp list`` output (#46).
+
+    A backend counts as registered iff the token ``gateway-<name>:`` appears in
+    the output — the colon anchors the match so ``gateway-cc:`` can't be read
+    off ``gateway-cc-docs:``, and the connection-status suffix
+    (``✓ Connected`` / ``✘ Failed``) is deliberately ignored: this reports
+    REGISTRATION, not liveness (that is #23's ``/admin/api/status``).
+    """
+    return {name: f"gateway-{name}:" in output for name in backends}
+
 
 def claude_mcp_command(
     action: str,
@@ -1191,8 +1341,9 @@ def _general_routes(ctx: _AdminCtx) -> list[Route]:
     ]
 
 
-def _settings_routes(ctx: _AdminCtx) -> list[Route]:
-    """Text overrides: tool override, reset, instructions, settings import."""
+def _settings_routes(ctx: _AdminCtx) -> list[Route]:  # noqa: PLR0915 — statement count is the nested handlers; the group is cohesive
+    """Text overrides: tool override, reset, instructions, import, and the #153
+    dangling-override migrate/discard repairs."""
 
     async def put_override(request: Request):
         payload = await request.json()
@@ -1234,6 +1385,37 @@ def _settings_routes(ctx: _AdminCtx) -> list[Route]:
         ctx.commit(cfg, backend)  # set_instructions validated the name
         return JSONResponse({"ok": True})
 
+    async def migrate_override_route(request: Request):
+        """#153: carry a dangling override's tuned text onto the tool's new
+        original, then drop the old entry. Hot-reloads that backend."""
+        name = request.path_params["name"]
+        payload = await request.json()
+        cfg = ctx.load()
+        try:
+            res = migrate_override(cfg, name, payload.get("from"), payload.get("to"))
+        except (cl.ConfigError, KeyError) as exc:
+            return _err(str(exc))
+        ctx.commit(cfg, name)
+        return JSONResponse({"ok": True, "reloaded": "in-process", **res})
+
+    async def discard_override_route(request: Request):
+        """#153: drop a dangling override entry (its tuned text no longer
+        applies). Same removal as /reset — the intent is different (clearing a
+        stale entry, not reverting a live tool)."""
+        name = request.path_params["name"]
+        payload = await request.json()
+        cfg = ctx.load()
+        b = next((x for x in cfg.backends if x.name == name), None)
+        if b is None:
+            return _err("unknown backend")
+        original = payload.get("original")
+        before = len(b.tools)
+        b.tools = [t for t in b.tools if t.original != original]
+        if len(b.tools) == before:
+            return _err(f"no stored override for {original!r}")
+        ctx.commit(cfg, name)
+        return JSONResponse({"ok": True, "reloaded": "in-process"})
+
     async def post_import(request: Request):
         """Atomic settings import (#136): validate the whole bundle against a
         fresh cfg; persist and hot-reload only if EVERY item passes."""
@@ -1268,6 +1450,73 @@ def _settings_routes(ctx: _AdminCtx) -> list[Route]:
             "/admin/api/import",
             _needs_json(ctx.locked(post_import)),
             methods=["POST"],
+        ),
+        Route(
+            "/admin/api/backend/{name}/migrate-override",
+            _needs_json(ctx.locked(migrate_override_route)),
+            methods=["POST"],
+        ),
+        Route(
+            "/admin/api/backend/{name}/discard-override",
+            _needs_json(ctx.locked(discard_override_route)),
+            methods=["POST"],
+        ),
+    ]
+
+
+# ${ENV} reference guard for the bearer token (#155): a stored token must be a
+# reference like ${MCP_GATEWAY_TOKEN}, never a pasted secret value.
+_ENV_REF_RE = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}")
+
+
+def _gateway_settings_routes(ctx: _AdminCtx) -> list[Route]:
+    """#155: read/write the two gateway-wide, boot-time settings — the bearer
+    token (${ENV} ref) and the introspect interval. Both are resolved/read only
+    at startup (token via expand_env in _build_app; interval when the lifespan's
+    #43 sweep is wired), so a change needs a daemon restart to take effect —
+    the PUT returns restart semantics."""
+
+    async def get_settings(_request: Request):
+        cfg = ctx.load()
+        return JSONResponse(
+            {
+                # the ${ENV} REF exactly as stored — never the resolved secret
+                "bearer_token": cfg.bearer_token,
+                "introspect_interval": cfg.introspect_interval,
+            }
+        )
+
+    async def put_settings(request: Request):
+        payload = await request.json()
+        cfg = ctx.load()
+        if "bearer_token" in payload:
+            tok = payload.get("bearer_token")
+            if tok is not None and not isinstance(tok, str):
+                return _err("bearer_token must be a string or null")
+            tok = (tok or "").strip()
+            # Guard against pasting a raw secret: an empty token (no auth) is
+            # fine, otherwise it MUST be a ${ENV} reference (#155/#26).
+            if tok and not _ENV_REF_RE.search(tok):
+                return _err(
+                    "bearer_token must reference an environment variable like "
+                    "${MCP_GATEWAY_TOKEN} — never paste the secret itself"
+                )
+            cfg.bearer_token = tok or None
+        if "introspect_interval" in payload:
+            iv = payload.get("introspect_interval")
+            # bool is an int subclass — reject it explicitly so `true` isn't 1.
+            if isinstance(iv, bool) or not isinstance(iv, int) or iv < 0:
+                return _err("introspect_interval must be an integer >= 0")
+            cfg.introspect_interval = iv
+        ctx.commit(cfg)  # persist only — both settings are read at boot
+        return ctx.restart_response({"changed": "gateway-settings"})
+
+    return [
+        Route("/admin/api/settings", get_settings, methods=["GET"]),
+        Route(
+            "/admin/api/settings",
+            _needs_json(ctx.locked(put_settings)),
+            methods=["PUT"],
         ),
     ]
 
@@ -1304,6 +1553,31 @@ def _backend_routes(ctx: _AdminCtx) -> list[Route]:  # noqa: PLR0915 — stateme
             remove = ctx.hooks.get("remove")
             if remove is not None:
                 remove(b.name)
+
+    async def set_stateless(request: Request):
+        """Toggle a backend's warm/stateless session strategy (#161).
+
+        A warm session (``stateless=false``) reuses one backend connection across
+        calls and auto-recycles if it dies; stateless spins up a fresh session per
+        call. Flipping it is a per-backend topology change, but it needs NO daemon
+        restart: save the new flag, then recycle the backend via the lifespan hook
+        — the runner tears down and re-mounts, reading the fresh config (so the new
+        ``stateless`` value takes effect on the re-mount). If the hook isn't
+        registered (no lifespan, e.g. a unit test), the value is still persisted."""
+        name = request.path_params["name"]
+        payload = await request.json()
+        cfg = ctx.load()
+        b = next((x for x in cfg.backends if x.name == name), None)
+        if b is None:
+            return _err("unknown backend")
+        b.stateless = bool(payload.get("value", False))
+        ctx.commit(cfg)  # persist only — the recycle re-mounts with fresh config
+        recycle = ctx.hooks.get("recycle")
+        if recycle is not None:
+            recycle(name)
+        return JSONResponse(
+            {"ok": True, "reloaded": "recycled", "stateless": b.stateless}
+        )
 
     async def enable_backend(request: Request):
         """Enable/disable a backend (#38). Enable MOUNTS it live; disable UNMOUNTS
@@ -1482,6 +1756,11 @@ def _backend_routes(ctx: _AdminCtx) -> list[Route]:  # noqa: PLR0915 — stateme
             methods=["POST"],
         ),
         Route(
+            "/admin/api/backend/{name}/stateless",
+            _needs_json(ctx.locked(set_stateless)),
+            methods=["POST"],
+        ),
+        Route(
             "/admin/api/enabled", _needs_json(ctx.locked(enable_all)), methods=["POST"]
         ),
         Route(
@@ -1509,14 +1788,16 @@ async def admin_refresh(ctx: _AdminCtx, b: Backend, *, force: bool = False) -> d
     )
 
 
-def _claude_routes(ctx: _AdminCtx) -> list[Route]:
+def _claude_routes(ctx: _AdminCtx) -> list[Route]:  # noqa: PLR0915 — nested handlers; the group is cohesive
     """One-click Claude Code registration (#45): shell out to `claude mcp
     add/remove` for a backend's gateway endpoint (never edit Claude's config
     files by hand). The CLI runs in a thread so the event loop stays free.
     A CLI failure comes back as ``ok: false`` with its output at HTTP 200 (the
     HTTP call itself succeeded); missing binary / bad scope are 400."""
 
-    async def _run_cli(argv: list[str], redact: str | None = None) -> JSONResponse:
+    async def _cli_raw(argv: list[str]) -> tuple[int, str, str]:
+        """Run one `claude` CLI invocation off the event loop; never raises —
+        a spawn failure comes back as ``(-1, "", "<error>")``."""
         try:
             r = await asyncio.to_thread(
                 subprocess.run,
@@ -1526,9 +1807,12 @@ def _claude_routes(ctx: _AdminCtx) -> list[Route]:
                 timeout=CLAUDE_CLI_TIMEOUT,
                 check=False,  # a CLI failure is surfaced as ok:false, not raised
             )
-            rc, stdout, stderr = r.returncode, r.stdout, r.stderr
+            return r.returncode, r.stdout, r.stderr
         except (subprocess.SubprocessError, OSError) as exc:
-            rc, stdout, stderr = -1, "", f"{type(exc).__name__}: {exc}"
+            return -1, "", f"{type(exc).__name__}: {exc}"
+
+    async def _run_cli(argv: list[str], redact: str | None = None) -> JSONResponse:
+        rc, stdout, stderr = await _cli_raw(argv)
 
         def _hide(s: str) -> str:
             # never echo the bearer token (#26) back to the browser
@@ -1595,7 +1879,99 @@ def _claude_routes(ctx: _AdminCtx) -> list[Route]:
             return _err(str(exc))
         return await _run_cli(argv)
 
+    async def cc_registrations(request: Request):
+        """#46: which backends are registered in Claude Code. Runs
+        ``claude mcp list`` ONCE (in a thread), caches the output in-process for
+        ``CC_REG_CACHE_TTL`` so page reloads don't re-shell the CLI; ``?fresh=1``
+        busts the cache (used right after a register/deregister). Returns
+        ``{"available": false}`` when the CLI isn't on PATH, else
+        ``{"available": true, "registered": {backend: bool}}``."""
+        if shutil.which("claude") is None:
+            return JSONResponse({"available": False})
+        fresh = request.query_params.get("fresh") in ("1", "true")
+        now = time.monotonic()
+        output = _cc_reg_cache.get("output")
+        if fresh or output is None or now - _cc_reg_cache["ts"] > CC_REG_CACHE_TTL:
+            try:
+                r = await asyncio.to_thread(
+                    subprocess.run,
+                    ["claude", "mcp", "list"],
+                    capture_output=True,
+                    text=True,
+                    timeout=CLAUDE_CLI_TIMEOUT,
+                    check=False,
+                )
+                output = (r.stdout or "") + (r.stderr or "")
+            except (subprocess.SubprocessError, OSError):
+                output = ""
+            _cc_reg_cache["output"] = output
+            _cc_reg_cache["ts"] = now
+        names = [b.name for b in ctx.load().backends]
+        return JSONResponse(
+            {"available": True, "registered": parse_cc_registrations(output, names)}
+        )
+
+    async def reregister_all(request: Request):
+        """#154: deregister + register EVERY enabled backend in Claude Code, so
+        one click re-points them all at this gateway (e.g. after the bearer token
+        changed — every registration must carry the new header). Sequential;
+        each backend gets a fresh `remove` then `add`. A per-backend failure is
+        recorded and does NOT abort the rest — the summary reports ok/fail each."""
+        payload = await request.json()
+        scope = payload.get("scope") or "local"
+        cfg = ctx.load()
+        missing = _missing_cli()
+        if missing is not None:
+            return missing
+        try:
+            # Resolved once for every registration; redacted from all output.
+            token = cl.expand_env(cfg.bearer_token) if cfg.bearer_token else None
+        except cl.ConfigError as exc:
+            return _err(str(exc))
+
+        def _hide(s: str) -> str:
+            return s.replace(token, "***") if token else s
+
+        results: list[dict] = []
+        for b in cfg.backends:
+            if not b.enabled:
+                continue  # only enabled backends are broadcast, so only they register
+            url = f"http://{cfg.host}:{cfg.port}/{b.name}/mcp"
+            try:
+                rm_argv = claude_mcp_command("remove", b.name, scope=scope)
+                add_argv = claude_mcp_command(
+                    "add", b.name, url=url, scope=scope, bearer_token=token
+                )
+            except cl.ConfigError as exc:
+                results.append({"backend": b.name, "ok": False, "error": str(exc)})
+                continue
+            await _cli_raw(rm_argv)  # best-effort cleanup; a missing reg is fine
+            rc, _out, err = await _cli_raw(add_argv)
+            results.append(
+                {
+                    "backend": b.name,
+                    "ok": rc == 0,
+                    "exit": rc,
+                    "stderr": _hide(err),
+                }
+            )
+        ok_count = sum(1 for r in results if r["ok"])
+        return JSONResponse(
+            {
+                "ok": all(r["ok"] for r in results),
+                "count": len(results),
+                "ok_count": ok_count,
+                "backends": results,
+                "note": "Claude Code may need a reload/restart to pick up the change",
+            }
+        )
+
     return [
+        Route(
+            "/admin/api/cc-reregister-all",
+            _needs_json(reregister_all),
+            methods=["POST"],
+        ),
         Route(
             "/admin/api/backend/{name}/register",
             _needs_json(register_backend),
@@ -1606,10 +1982,11 @@ def _claude_routes(ctx: _AdminCtx) -> list[Route]:
             _needs_json(deregister_backend),
             methods=["POST"],
         ),
+        Route("/admin/api/cc-registrations", cc_registrations, methods=["GET"]),
     ]
 
 
-def _ops_routes(ctx: _AdminCtx) -> list[Route]:
+def _ops_routes(ctx: _AdminCtx) -> list[Route]:  # noqa: PLR0915 — nested handlers; the group is cohesive
     """Operational endpoints: mini-inspector, manual restart, re-introspect,
     liveness status (#23), and the dashboard-load refresh sweep (#43)."""
 
@@ -1703,6 +2080,14 @@ def _ops_routes(ctx: _AdminCtx) -> list[Route]:
                 }
             except Exception as exc:  # noqa: BLE001 — the error IS the status
                 err = f"{type(exc).__name__}: {exc}"
+                # #161: a WARM backend that probes `error` may have a dead session
+                # fastmcp won't heal — recycle it best-effort (cooldown-debounced
+                # in the hook). Stateless backends spin a fresh session per probe,
+                # so there's nothing to recycle.
+                if not b.stateless:
+                    recycle = ctx.hooks.get("recycle")
+                    if recycle is not None:
+                        recycle(b.name)
                 return b.name, {"state": "error", "error": err}
 
         cfg = ctx.load()
@@ -1759,6 +2144,7 @@ def register(  # noqa: PLR0913 — public API; callers pass the lifespan plumbin
         [
             *_general_routes(ctx),
             *_settings_routes(ctx),
+            *_gateway_settings_routes(ctx),
             *_backend_routes(ctx),
             *_claude_routes(ctx),
             *_ops_routes(ctx),

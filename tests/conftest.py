@@ -10,7 +10,7 @@ call time, so patching the module attributes covers every consumer.
 
 import pytest
 
-from mcp_gateway import admin
+from mcp_gateway import admin, server
 
 
 @pytest.fixture(autouse=True)
@@ -22,4 +22,8 @@ def isolated_state_dir(tmp_path, monkeypatch):
     # #43: the auto-refresh throttle is module state — a fresh dict per test so
     # one test's refresh can't throttle another's.
     monkeypatch.setattr(admin, "_last_refresh", {})
+    # #46: the cc-registrations cache is likewise module state — reset per test.
+    monkeypatch.setattr(admin, "_cc_reg_cache", {"ts": 0.0, "output": None})
+    # #161: the warm-session recycle cooldown is module state too — reset per test.
+    monkeypatch.setattr(server, "_last_recycle", {})
     return state

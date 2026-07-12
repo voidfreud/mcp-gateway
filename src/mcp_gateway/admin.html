@@ -4,6 +4,9 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>mcp-gateway · admin</title>
+<!-- #158: inline SVG favicon — a relay/gateway glyph (two nodes bridged) in the
+     UI accent blue. Data URI, so no external fetch. -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cg fill='none' stroke='%234a93ff' stroke-width='2.6' stroke-linecap='round'%3E%3Cline x1='9' y1='16' x2='23' y2='16'/%3E%3C/g%3E%3Cg fill='%234a93ff'%3E%3Ccircle cx='7' cy='16' r='4.5'/%3E%3Ccircle cx='25' cy='16' r='4.5'/%3E%3C/g%3E%3C/svg%3E">
 <style>
   /* Design tokens — #122 redesign (design_handoff_admin_redesign) */
   :root {
@@ -65,6 +68,10 @@
   /* Chip */
   .chip { font: 500 9px var(--mono); padding: 1px 5px; border-radius: 3px;
           border: 1px solid var(--b); color: var(--tm); flex-shrink: 0; }
+  /* #46 — Claude Code registration chip (next to "Register in CC") */
+  .cc-chip { font: 500 10px system-ui; text-transform: none; letter-spacing: 0; }
+  .cc-chip.cc-yes { color: var(--gn); border-color: rgba(72,204,136,.3); background: rgba(72,204,136,.09); }
+  .cc-chip.cc-no { color: var(--td); }
 
   /* Connection-status dots (#23) — painted async from /admin/api/status */
   .st-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--td);
@@ -119,6 +126,16 @@
   /* Cards (instructions, sections) */
   .card { border: 1px solid var(--b); border-radius: 10px; background: var(--s1);
           padding: 13px 14px; margin-bottom: 14px; }
+  /* #153 — stale (dangling) overrides warning banner */
+  .dg-banner { border-color: rgba(231,165,58,.4); background: rgba(231,165,58,.06); }
+  .dg-banner .c-title { color: var(--am); }
+  .dg-banner .dg-lead { font: 11px system-ui; color: var(--tm); margin-bottom: 8px; }
+  .dg-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; row-gap: 6px;
+            padding: 8px 0; border-top: 1px solid var(--b); }
+  .dg-row .dg-orig { font: 11.5px var(--mono); color: var(--t); }
+  .dg-row .dg-meta { font: 11px system-ui; color: var(--tm); }
+  .dg-row .spacer { flex: 1; }
+  .dg-row select { width: auto; padding: 4px 7px; font-size: 11px; }
   .card .c-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 8px; }
   .card .c-title { font: 600 12.5px system-ui; color: var(--t); }
   .card .c-meta { font: 11px var(--mono); color: var(--tm); }
@@ -366,7 +383,16 @@ const $ = (s, r=document) => r.querySelector(s);
 const GATEWAY = '__gateway__';  // sentinel for the gateway pseudo-item
 let STATE = null, SELECTED = null;
 let STATUS = null;  // #23: backend name -> {state, ms, tools, error}, async
+let CC_REG = null;  // #46: {available, registered:{backend:bool}}, async
 const timers = {};
+
+// A captured tool carries a stored override iff any editable field differs from
+// its default — the same test used for the "overridden" badge (#153 reuses it
+// to find migration targets: captured tools with NO stored override).
+function toolIsOverridden(t) {
+  return !!(t.name || t.title || t.description || !t.enabled
+    || t.params.some(p => p.name || p.description || p.hide || p.default != null));
+}
 
 // #26: with a bearer_token configured, the admin API is challenged too — the
 // page shell loads open, then the first 401 prompts once and the token lives
@@ -451,6 +477,25 @@ async function refreshStatus() {
   try { STATUS = (await api('GET', '/admin/api/status')).backends; paintStatus(); }
   catch {}
 }
+// #46 — Claude Code registration indicator. Fetched once per page load (cached
+// server-side 60s); re-fetched fresh after a register/deregister. Non-blocking:
+// the chip stays hidden until the fetch resolves, and nothing if the CLI is
+// unavailable.
+async function refreshCCReg(fresh) {
+  try { CC_REG = await api('GET', '/admin/api/cc-registrations' + (fresh ? '?fresh=1' : '')); }
+  catch { CC_REG = null; }
+  paintCCReg();
+}
+function paintCCReg() {
+  const avail = CC_REG && CC_REG.available;
+  document.querySelectorAll('.cc-chip[data-b]').forEach(el => {
+    if (!avail) { el.style.display = 'none'; return; }
+    const reg = !!(CC_REG.registered && CC_REG.registered[el.dataset.b]);
+    el.style.display = '';
+    el.textContent = reg ? 'registered in CC' : 'not registered';
+    el.className = 'chip cc-chip ' + (reg ? 'cc-yes' : 'cc-no');
+  });
+}
 let REFRESHED_ONCE = false;
 async function refreshBackends() {  // #43: on-dashboard-load re-introspect
   if (REFRESHED_ONCE) return;       // once per page load; the server throttles too
@@ -499,6 +544,7 @@ function renderList() {
         </span>
         <span class="st-dot st-unk" data-b="${esc(b.name)}"></span>
         <div class="nm" title="${esc(b.name)}">${label}</div>
+        ${(b.dangling && b.dangling.length) ? `<span class="warn" title="${b.dangling.length} stale override(s) — tuned text no longer applies">⚠</span>` : ''}
         <span class="chip">${chipT(b.transport)}</span>
       </div>
       <div class="b-sub">
@@ -546,6 +592,9 @@ function renderDetail(name) {
       <label class="lbl" title="pin ALL this backend's tools to load upfront (eager)">
         <input type="checkbox" class="tgl" id="b-pin" ${b.always_load ? 'checked' : ''}> 📌 all tools</label>
       <span class="div"></span>
+      <label class="lbl" title="warm session: reuse ONE backend session across calls (auto-recycled if it dies). Off = a fresh session per call (stateless).">
+        <input type="checkbox" class="tgl" id="b-warm" ${b.stateless ? '' : 'checked'}> Warm session</label>
+      <span class="div"></span>
       <label class="lbl" title="cosmetic label for the sidebar + header; does not change routing" style="cursor:default">
         Display name <input type="text" class="f-display mono" value="${esc(b.display_name || '')}"
           placeholder="${esc(b.name)}" style="width:130px;padding:3px 7px;font-size:11px"></label>
@@ -559,15 +608,20 @@ function renderDetail(name) {
         </select>
         <button class="btn" style="font-size:11px" onclick="registerCC('${escJS(b.name)}')"
           title="run claude mcp add for this backend's endpoint (gateway-${esc(b.name)})">Register in CC</button>
+        <span class="chip cc-chip" data-b="${esc(b.name)}" style="display:none"
+          title="whether gateway-${esc(b.name)} is registered in Claude Code (claude mcp list)"></span>
       </span>
       <span class="spacer"></span>
       <button class="btn" style="font-size:11px" onclick="loadSnapshot('${escJS(b.name)}')"
         title="restore this backend's field values from a saved JSON file">Load fields</button>
     </div>
+    ${danglingBanner(b)}
     ${backendInstrSection(b)}
     <div id="tools"></div>`;
   $('#b-bcast', m).addEventListener('change', e => enableBackend(b.name, e.target.checked));
   $('#b-pin', m).addEventListener('change', e => pinBackend(b.name, e.target.checked));
+  // #161: warm toggle checked = warm session; stateless = !warm.
+  $('#b-warm', m).addEventListener('change', e => setStateless(b.name, !e.target.checked));
   // Display name saves on blur/Enter (#42); reload refreshes header + sidebar label.
   const dn = $('.f-display', m);
   const saveDn = () => { if ((dn.value.trim() || null) !== (b.display_name || null)) setDisplayName(b.name, dn.value.trim()); };
@@ -577,7 +631,8 @@ function renderDetail(name) {
   wireInstr(m, b.name, b.default_instructions);
   wireCaps(m);
   wireGrow(m);
-  paintStatus();  // #23: live state for the header dot + status line
+  paintStatus();   // #23: live state for the header dot + status line
+  paintCCReg();    // #46: live CC-registration chip (async; no-op until fetched)
   const tw = $('#tools', m);
   if (!b.introspected) { tw.innerHTML = '<div class="empty">Backend not introspected yet — click Re-inspect.</div>'; return; }
   // Order: pinned first, switched-off last; among equals, overridden above.
@@ -604,6 +659,40 @@ function backendInstrSection(b) {
     <textarea class="f-instr grow" data-cap="2048" data-default="${esc(b.default_instructions ?? '')}"
       placeholder="${has ? '' : '(this server sends no instructions — type to add your own)'}">${esc(eff)}</textarea>
     <div class="hint">Empty = inherit the server's original${has ? '' : ' (none)'}. Edits reload live.</div>
+  </div>`;
+}
+
+// #153 — amber banner listing dangling overrides (tuned text whose tool the
+// backend renamed away, so it silently stopped applying). Each row offers a
+// one-click migrate to a captured tool that has no override yet, or a discard.
+function danglingBanner(b) {
+  const dangling = b.dangling || [];
+  if (!dangling.length) return '';
+  // migration targets: captured tools with NO stored override yet (a tool that
+  // already has one can't receive the migrated text — reset it first).
+  const targets = b.tools.filter(t => !toolIsOverridden(t)).map(t => t.original);
+  const opts = '<option value="">migrate to…</option>'
+    + targets.map(o => `<option value="${esc(o)}">${esc(o)}</option>`).join('');
+  const rows = dangling.map(d => {
+    const renamed = d.name !== d.original ? ` → ${esc(d.name)}` : '';
+    const bits = [];
+    if (d.has_description) bits.push('tuned description');
+    if (d.name !== d.original) bits.push('renamed');
+    if (!d.enabled) bits.push('disabled');
+    const meta = bits.length ? bits.join(' · ') : 'stored override';
+    return `<div class="dg-row">
+      <span class="dg-orig">${esc(d.original)}${renamed}</span>
+      <span class="dg-meta">${meta}</span>
+      <span class="spacer"></span>
+      <select class="dg-to"${targets.length ? '' : ' disabled'}>${opts}</select>
+      <button class="btn" onclick="migrateOverride('${escJS(b.name)}','${escJS(d.original)}', this)">Apply</button>
+      <button class="btn btn-danger" onclick="discardOverride('${escJS(b.name)}','${escJS(d.original)}')">Discard</button>
+    </div>`;
+  }).join('');
+  return `<div class="card dg-banner">
+    <div class="c-head"><span class="c-title">⚠ ${dangling.length} stale override${dangling.length > 1 ? 's' : ''} — this tuned text no longer applies</span></div>
+    <div class="dg-lead">The backend renamed these tools upstream, so their captured baseline moved out from under the stored overrides. Migrate each to its new tool name, or discard it.</div>
+    ${rows}
   </div>`;
 }
 
@@ -760,6 +849,8 @@ function renderGateway() {
         title="download the complete stored settings as one JSON bundle">Export</button>
       <button class="btn" style="font-size:11px" onclick="importSettings()"
         title="restore settings from an exported bundle (or a legacy field snapshot)">Import</button>
+      <button class="btn" style="font-size:11px" onclick="reregisterAll()"
+        title="deregister + re-register every enabled backend in Claude Code (e.g. after the bearer token changed)">Re-register all in CC</button>
       <button class="btn btn-danger" style="font-size:11px" onclick="restartGateway()">Restart</button>
     </div>
     <div class="stat-grid">
@@ -798,7 +889,31 @@ function renderGateway() {
         <span class="fs"><span class="sw" style="background:var(--s3)"></span>Deferred <b>${kb(deferTot)} KB</b></span>
       </div>
     </div>
-    <div class="ep-grid">${epCards}</div>`;
+    <div class="ep-grid">${epCards}</div>
+    <div class="card" id="gwSettings">
+      <div class="c-head"><span class="c-title">Gateway settings</span>
+        <span class="si">applied at boot — saving restarts the daemon</span></div>
+      <div class="row2" style="margin-bottom:4px">
+        <div>
+          <span class="flabel">Bearer token</span>
+          <input type="text" class="mono" id="set_bearer" value="${esc(STATE.bearer_token || '')}"
+            placeholder="\${MCP_GATEWAY_TOKEN}" autocomplete="off" autocorrect="off"
+            autocapitalize="off" spellcheck="false">
+          <div class="hint">Reference an environment variable like <code>\${MCP_GATEWAY_TOKEN}</code>;
+            never paste the secret itself. Empty = open on loopback (no token).</div>
+        </div>
+        <div>
+          <span class="flabel">Introspect interval (s)</span>
+          <input type="number" min="0" step="1" id="set_interval" value="${Number(STATE.introspect_interval) || 0}">
+          <div class="hint">Scheduled re-introspection sweep. <code>0</code> = off
+            (event-driven refresh still runs).</div>
+        </div>
+      </div>
+      <div style="margin-top:10px;display:flex;align-items:center;gap:10px">
+        <button class="btn-pri" style="font-size:11px" onclick="saveSettings()">Save settings</button>
+        <span class="si">not auto-saved — a restart is deliberate</span>
+      </div>
+    </div>`;
   const mt = $('#masterTgl');
   if (mt) {
     mt.checked = total > 0 && on === total;
@@ -1033,6 +1148,37 @@ function importSettings() {
     } catch (e) { toast('import failed: ' + e.message, 4000); }
   };
   inp.click();
+}
+
+// ---- #155 gateway settings card + #154 re-register-all --------------------
+// Explicit save (never auto-save — it restarts the daemon). After a bearer-token
+// CHANGE, offer to re-register every backend so their Claude Code registrations
+// carry the new token (#154).
+async function saveSettings() {
+  const bearer = $('#set_bearer').value.trim();
+  const ivRaw = $('#set_interval').value.trim();
+  const iv = ivRaw === '' ? 0 : parseInt(ivRaw, 10);
+  if (isNaN(iv) || iv < 0) { toast('introspect interval must be an integer ≥ 0'); return; }
+  const prevBearer = STATE.bearer_token || '';
+  try {
+    const r = await api('PUT', '/admin/api/settings', { bearer_token: bearer, introspect_interval: iv });
+    const tokenChanged = bearer !== prevBearer;
+    afterRestart(r, 'settings saved');
+    if (tokenChanged && confirm('The bearer token changed — existing Claude Code registrations must carry the new token. Re-register all enabled backends now?'))
+      await reregisterAll('local');
+  } catch (e) { toast('save failed: ' + e.message, 5000); }
+}
+// #154 — deregister + re-register every enabled backend in Claude Code.
+async function reregisterAll(scope) {
+  scope = scope || 'local';
+  const enabled = (STATE.backends || []).filter(b => b.enabled);
+  if (!enabled.length) { toast('no enabled backends to register'); return; }
+  if (!confirm(`Re-register all ${enabled.length} enabled backend(s) in Claude Code (scope ${scope})? This deregisters then re-adds each.`)) return;
+  try {
+    const r = await api('POST', '/admin/api/cc-reregister-all', { scope });
+    if (r.ok) toast(`re-registered ${r.ok_count}/${r.count} backend(s) — reload Claude Code`, 5000);
+    else toast(`re-registered ${r.ok_count}/${r.count}; some failed — check logs`, 6000);
+  } catch (e) { toast('re-register failed: ' + e.message, 5000); }
 }
 
 function loadSnapshot(scope) {
@@ -1275,6 +1421,27 @@ async function resetTool(backend, original) {
   try { await api('POST', '/admin/api/reset', { backend, tool_original: original }); await load(); toast('reset to default'); }
   catch (e) { toast('reset failed: ' + e.message); }
 }
+// #153 — carry a dangling override's tuned text onto the tool's new name.
+async function migrateOverride(backend, from, btn) {
+  const sel = btn.parentElement.querySelector('.dg-to');
+  const to = sel && sel.value;
+  if (!to) { toast('pick the tool to migrate this override to'); return; }
+  try {
+    const r = await api('POST', '/admin/api/backend/' + encodeURIComponent(backend) + '/migrate-override', { from, to });
+    await load();
+    const dropped = r.dropped_params || [];
+    toast(`migrated ${from} → ${to}` + (dropped.length ? ` · dropped params: ${dropped.join(', ')}` : ''), 5000);
+  } catch (e) { toast('migrate failed: ' + e.message, 5000); }
+}
+// #153 — drop a dangling override outright (its tuned text is gone).
+async function discardOverride(backend, original) {
+  if (!confirm(`Discard the stale override for "${original}"? Its tuned text is removed.`)) return;
+  try {
+    await api('POST', '/admin/api/backend/' + encodeURIComponent(backend) + '/discard-override', { original });
+    await load();
+    toast('discarded stale override ' + original);
+  } catch (e) { toast('discard failed: ' + e.message); }
+}
 async function reintrospect(name) {
   try {
     const r = await api('POST', '/admin/api/introspect/' + encodeURIComponent(name));
@@ -1287,6 +1454,15 @@ async function reintrospect(name) {
 async function pinBackend(name, value) {
   try { await api('POST', '/admin/api/backend/' + encodeURIComponent(name) + '/pin', { value }); await load(); toast(value ? 'pinned all tools (eager)' : 'unpinned'); }
   catch (e) { toast('pin failed: ' + e.message); await load(); }
+}
+// #161 — warm vs stateless session strategy. Persists + recycles the backend
+// (unmount+remount picks up the new flag) — no daemon restart.
+async function setStateless(name, value) {
+  try {
+    await api('POST', '/admin/api/backend/' + encodeURIComponent(name) + '/stateless', { value });
+    await load();
+    toast(value ? 'stateless — a fresh session per call' : 'warm session — reused, auto-recycled on failure');
+  } catch (e) { toast('toggle failed: ' + e.message); await load(); }
 }
 // #38 — enable/disable one backend's broadcast (hot-reload).
 async function enableBackend(name, value) {
@@ -1346,6 +1522,7 @@ async function reRegisterCC(oldName, newName) {
     const rr = await api('POST', '/admin/api/backend/' + encodeURIComponent(newName) + '/register', { scope: 'local' });
     if (rr.ok) toast(`registered gateway-${newName} in Claude Code (old gateway-${oldName} ${dr.ok ? 'removed' : 'NOT removed — remove it manually'}) — reload Claude Code if it doesn't appear`, 7000);
     else toast('claude mcp add failed: ' + (rr.stderr || rr.stdout || 'exit ' + rr.exit), 8000);
+    refreshCCReg(true);  // #46
   } catch (e) { toast('Claude Code re-register failed: ' + e.message, 6000); }
 }
 // #45 — one-click `claude mcp add` for this backend's gateway endpoint.
@@ -1355,6 +1532,7 @@ async function registerCC(name, scope) {
     const r = await api('POST', '/admin/api/backend/' + encodeURIComponent(name) + '/register', { scope });
     if (r.ok) toast(`registered gateway-${name} (scope ${scope}) — reload Claude Code if it doesn't appear`, 5000);
     else toast('claude mcp add failed: ' + (r.stderr || r.stdout || 'exit ' + r.exit), 8000);
+    refreshCCReg(true);  // #46: reflect the new registration state immediately
   } catch (e) { toast('register failed: ' + e.message, 5000); }
 }
 async function delBackend(name) {
@@ -1421,8 +1599,10 @@ function importTransportChange() {
 async function doImport() {
   const t = $('#im_transport').value;
   const stdio = t === 'stdio';
+  // #161: import warm by default for EVERY transport — a dead warm session now
+  // auto-recycles, so http backends no longer need the per-call stateless spin.
   const body = { name: $('#im_name').value.trim(), transport: t,
-    stateless: !stdio };
+    stateless: false };
   if (!stdio) {
     body.url = $('#im_url').value.trim(); body.auth_header = $('#im_ah').value.trim(); body.auth_value = $('#im_av').value.trim();
     const hdrs = {};
@@ -1473,7 +1653,7 @@ function escJS(s) { return esc(String(s ?? '').replace(/\\/g, '\\\\').replace(/'
 
 // Boot: paint from cached state immediately, then (async, non-blocking) probe
 // liveness (#23) and run the throttled on-open re-introspect sweep (#43).
-load().then(() => { refreshStatus(); refreshBackends(); });
+load().then(() => { refreshStatus(); refreshBackends(); refreshCCReg(); });
 </script>
 </body>
 </html>
