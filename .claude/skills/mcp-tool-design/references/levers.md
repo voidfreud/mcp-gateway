@@ -35,6 +35,7 @@ Not levers: schemas (types/enums/required), annotations, response shapes — tho
 - Overrides are stored as diffs against captured defaults — saving the default value stores nothing.
 - Hiding a param the backend marks *required* needs an injected `default` on that param (#35); without one the save is a 400. Non-required params hide freely.
 - All admin writes are lock-wrapped and the config save is atomic; edit through the API, not by hand-editing `config.toml` under a running daemon.
+- If the gateway has a `bearer_token` configured (#26), every `/admin/api/*` call in this pipeline needs `-H "Authorization: Bearer <token>"` — a 401 means the token, not the payload.
 
 ## The verify loop (not optional)
 

@@ -319,9 +319,11 @@ tool name. On startup the gateway lists each backend's live tools and logs an
   against curious or compromised local processes hitting the loopback port: set
   `bearer_token = "${MCP_GATEWAY_TOKEN}"` in `config.toml` (an `${ENV}` ref like
   every secret, resolved once at startup) and every backend MCP endpoint requires
-  `Authorization: Bearer <token>` — anything else gets a 401. `/admin`, `/health`
-  and `/ready` stay open (the admin UI is a same-origin browser fetch; loopback
-  trust for those is the status quo). Register each backend with the header:
+  `Authorization: Bearer <token>` — anything else gets a 401. The **admin API is
+  gated too** (an open one would hand the same local process config writes and
+  tool execution via `/admin/api/run`); only `/health`, `/ready` and the bare
+  `GET /admin` page shell stay open — the UI prompts for the token on first 401
+  and keeps it in localStorage. Register each backend with the header:
 
   ```bash
   claude mcp add --transport http --header "Authorization: Bearer ${MCP_GATEWAY_TOKEN}" gateway-<name> http://127.0.0.1:9100/<name>/mcp

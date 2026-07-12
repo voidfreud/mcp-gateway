@@ -13,7 +13,8 @@ log_file = "~/.local/state/mcp-gateway/gateway.log"
 #                           # hot-swaps tools silently (#43).
 
 # Optional defense-in-depth (#26): require this bearer token on every backend
-# MCP endpoint (/admin, /health, /ready stay open). The bind is loopback-only
+# MCP endpoint AND the admin API (/health, /ready and the bare GET /admin page
+# stay open; the UI prompts once and keeps the token in localStorage). The bind is loopback-only
 # already; this additionally shuts out curious local processes. ${ENV} ref,
 # resolved once at startup. Claude Code passes it at registration:
 #   claude mcp add --transport http --header "Authorization: Bearer ${MCP_GATEWAY_TOKEN}" gateway-<name> http://127.0.0.1:9100/<name>/mcp
