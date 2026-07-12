@@ -19,4 +19,7 @@ def isolated_state_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(admin, "STATE_DIR", state)
     monkeypatch.setattr(admin, "DEFAULTS_DIR", state / "defaults")
     monkeypatch.setattr(admin, "BACKUP_DIR", state / "backups")
+    # #43: the auto-refresh throttle is module state — a fresh dict per test so
+    # one test's refresh can't throttle another's.
+    monkeypatch.setattr(admin, "_last_refresh", {})
     return state

@@ -21,3 +21,6 @@ claude-design/
 
 # macOS noise
 .DS_Store
+
+# Agent worktrees (Claude Code isolation)
+.claude/worktrees/

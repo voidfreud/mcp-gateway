@@ -66,6 +66,16 @@
   .chip { font: 500 9px var(--mono); padding: 1px 5px; border-radius: 3px;
           border: 1px solid var(--b); color: var(--tm); flex-shrink: 0; }
 
+  /* Connection-status dots (#23) — painted async from /admin/api/status */
+  .st-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--td);
+            flex-shrink: 0; display: inline-block; }
+  .st-dot.st-ok  { background: var(--gn); box-shadow: 0 0 6px rgba(72,204,136,.45); }
+  .st-dot.st-err { background: var(--rd); box-shadow: 0 0 6px rgba(255,103,103,.45); }
+  .st-dot.st-off { background: var(--td); }
+  .st-dot.st-unk { background: var(--td); animation: glow 1.6s infinite; }
+  .st-line.st-ok-t  { color: var(--gn); }
+  .st-line.st-err-t { color: var(--rd); }
+
   /* Layout */
   .wrap { flex: 1; display: flex; min-height: 0; }
   aside { width: 248px; background: var(--s1); border-right: 1px solid var(--b);
@@ -89,16 +99,18 @@
   .b-item .b-sub .warn { font: 11px system-ui; color: var(--am); }
 
   /* Detail — backend header */
-  .b-head { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+  .b-head { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; flex-wrap: wrap; row-gap: 6px; }
   .b-head h2 { font: 600 15px system-ui; color: var(--t); margin: 0; }
-  .b-head .url { font: 10.5px var(--mono); color: var(--td); }
+  .b-head .url { font: 10.5px var(--mono); color: var(--td); max-width: 280px;
+                 overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .b-head .spacer { flex: 1; }
   .b-sub-line { font: 11px system-ui; color: var(--td); margin-bottom: 14px; }
   .b-sub-line code { background: var(--s2); padding: 1px 5px; border-radius: 3px;
                      color: var(--tm); font: 10.5px var(--mono); }
 
-  /* Controls bar */
-  .ctrl-bar { display: flex; align-items: center; gap: 12px; margin-bottom: 14px;
+  /* Controls bar — wraps instead of overflowing as controls accumulate */
+  .ctrl-bar { display: flex; align-items: center; gap: 12px; row-gap: 8px; flex-wrap: wrap;
+              margin-bottom: 14px;
               padding: 9px 13px; background: var(--s1); border: 1px solid var(--b); border-radius: 8px; }
   .ctrl-bar .lbl { font: 12px system-ui; color: var(--tm); display: flex; align-items: center; gap: 7px; cursor: pointer; }
   .ctrl-bar .div { width: 1px; height: 14px; background: var(--b2); }
@@ -172,13 +184,20 @@
   .req-badge { font: 10px system-ui; color: var(--am); background: rgba(231,165,58,.09);
                padding: 1px 6px; border-radius: 3px; }
   .param-row textarea { min-height: 54px; padding: 6px 8px; }
+  /* #35 — injected param default + hide pill */
+  .param-row .p-default { width: 150px; padding: 3px 7px; font-size: 11px; flex-shrink: 0; }
+  .param-row .lbl { font: 11px system-ui; color: var(--tm); display: flex;
+                    align-items: center; gap: 5px; cursor: pointer; flex-shrink: 0;
+                    text-transform: none; letter-spacing: 0; margin: 0; }
+  .param-row.p-hidden .p-nm { opacity: .55; text-decoration: line-through; }
 
   .preview { background: var(--s0); border: 1px solid var(--b); border-radius: 7px;
              padding: 9px 11px; white-space: pre-wrap; color: var(--tm); font-size: 12px;
              font-family: var(--mono); max-height: 240px; overflow-y: auto; }
 
   /* Gateway overview (screen 2b) */
-  .gw-head { display: flex; align-items: center; gap: 10px; padding: 0 0 14px; margin-bottom: 16px;
+  .gw-head { display: flex; align-items: center; gap: 10px; row-gap: 8px; flex-wrap: wrap;
+             padding: 0 0 14px; margin-bottom: 16px;
              border-bottom: 1px solid var(--b); }
   .gw-head h2 { font: 600 15px system-ui; color: var(--t); margin: 0; }
   .run-badge { display: inline-flex; align-items: center; gap: 5px; font: 11px system-ui;
@@ -300,6 +319,8 @@
       <label>Args (space-separated)</label>
       <input type="text" id="im_args" class="mono" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="serena-mcp" />
     </div>
+    <label class="chk" style="margin-top:14px"><input type="checkbox" class="tgl" id="im_register">
+      also register in Claude Code <span style="color:var(--td)">· claude mcp add, scope local</span></label>
     <div class="err" id="im_err"></div>
     <div class="foot">
       <button onclick="closeImport()">Cancel</button>
@@ -319,12 +340,32 @@
     </div>
   </div>
 </div>
+<div class="modal-bg" id="renameBg">
+  <div class="modal">
+    <h3>Rename backend <code id="rn_cur" style="font:600 12px var(--mono);color:var(--ac)"></code></h3>
+    <p class="hint" style="margin:0 0 10px">This is a <b>real identity change</b> — unlike the cosmetic display
+      name. The endpoint URL becomes <code>/&lt;new name&gt;/mcp</code>, the gateway <b>restarts</b>, and the
+      Claude Code registration changes from <code>gateway-&lt;old&gt;</code> to <code>gateway-&lt;new&gt;</code> —
+      Claude Code must be re-registered or the server disappears from it.</p>
+    <label>New name</label>
+    <input type="text" id="rn_name" class="mono" placeholder="new-name"
+           autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" />
+    <label class="chk" style="margin-top:14px"><input type="checkbox" class="tgl" id="rn_rereg">
+      re-register in Claude Code afterwards <span style="color:var(--td)">· claude mcp remove old + add new (scope local)</span></label>
+    <div class="err" id="rn_err"></div>
+    <div class="foot">
+      <button onclick="closeRename()">Cancel</button>
+      <button class="btn-pri" id="rn_go" onclick="doRename()">Rename &amp; restart</button>
+    </div>
+  </div>
+</div>
 <div class="toast" id="toast"></div>
 
 <script>
 const $ = (s, r=document) => r.querySelector(s);
 const GATEWAY = '__gateway__';  // sentinel for the gateway pseudo-item
 let STATE = null, SELECTED = null;
+let STATUS = null;  // #23: backend name -> {state, ms, tools, error}, async
 const timers = {};
 
 async function api(method, path, body) {
@@ -337,6 +378,9 @@ async function api(method, path, body) {
 }
 function toast(msg, ms=2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('show'); setTimeout(() => t.classList.remove('show'), ms); }
 function flashSaved() { const s = $('#saved'); s.classList.add('show'); setTimeout(() => s.classList.remove('show'), 1200); }
+// #22 — persistent client-side preference (default off): on a name collision,
+// retry the save once asking the server to auto-suffix (_2, _3, …).
+function autoUniquify() { return localStorage.getItem('autoUniquify') === '1'; }
 
 // short transport label for chips: streamable-http -> shttp
 function chipT(t) { return t === 'streamable-http' ? 'shttp' : t; }
@@ -349,10 +393,72 @@ async function load() {
   else { SELECTED = null; $('#detail').innerHTML = '<div class="empty">Select an MCP on the left.</div>'; }
 }
 
+// --- #23 connection status + #43 dashboard-load refresh -------------------
+// Both are async and non-blocking: the page paints from cached state first,
+// dots/lists update as each probe resolves; a down backend marks itself only.
+function stateOf(name) {
+  const b = STATE && STATE.backends.find(x => x.name === name);
+  if (b && !b.enabled) return 'off';
+  const s = STATUS && STATUS[name];
+  if (!s) return 'unk';
+  return s.state === 'ok' ? 'ok' : (s.state === 'disabled' ? 'off' : 'err');
+}
+function stTitle(name) {
+  const s = STATUS && STATUS[name];
+  const b = STATE && STATE.backends.find(x => x.name === name);
+  if (b && !b.enabled) return 'disabled';
+  if (!s) return 'checking…';
+  if (s.state === 'ok') return `connected · ${s.tools} tools · ${s.ms} ms`;
+  if (s.state === 'unmounted') return 'not mounted — failed to connect (see logs)';
+  if (s.state === 'disabled') return 'disabled';
+  return 'unreachable: ' + (s.error || 'error');
+}
+function paintStatus() {
+  document.querySelectorAll('.st-dot[data-b]').forEach(el => {
+    el.classList.remove('st-ok', 'st-err', 'st-off', 'st-unk');
+    el.classList.add('st-' + stateOf(el.dataset.b));
+    el.title = stTitle(el.dataset.b);
+  });
+  document.querySelectorAll('.st-line[data-b]').forEach(el => {
+    el.textContent = stTitle(el.dataset.b);
+    el.classList.remove('st-ok-t', 'st-err-t');
+    const st = stateOf(el.dataset.b);
+    if (st === 'ok') el.classList.add('st-ok-t');
+    if (st === 'err') el.classList.add('st-err-t');
+  });
+  const sum = $('[data-stsum]');
+  if (sum && STATUS && STATE) {
+    const bad = STATE.backends.filter(b => b.enabled && stateOf(b.name) === 'err');
+    const off = STATE.backends.filter(b => !b.enabled).length;
+    sum.textContent = bad.length ? bad.map(b => b.name).join(', ') + ' unreachable'
+      : (off ? off + ' off' : 'all connected');
+    sum.className = 's-sub ' + (bad.length ? 'rd' : (off ? 'rd' : 'gn'));
+  }
+}
+async function refreshStatus() {
+  try { STATUS = (await api('GET', '/admin/api/status')).backends; paintStatus(); }
+  catch {}
+}
+let REFRESHED_ONCE = false;
+async function refreshBackends() {  // #43: on-dashboard-load re-introspect
+  if (REFRESHED_ONCE) return;       // once per page load; the server throttles too
+  REFRESHED_ONCE = true;
+  try {
+    const j = await api('POST', '/admin/api/refresh');
+    const changed = Object.entries(j.backends || {})
+      .filter(([, r]) => r.status === 'refreshed' && r.changed);
+    if (changed.length) {
+      await load();
+      toast('tool lists refreshed: ' + changed.map(([n, r]) =>
+        `${n} +${(r.added || []).length}/−${(r.removed || []).length}`).join(' · '), 5000);
+    }
+  } catch {}
+}
+
 // how many of a backend's tools carry any override
 function overriddenCount(b) {
   return b.tools.filter(t => t.name || t.title || t.description || !t.enabled
-    || t.params.some(p => p.name || p.description || p.hide)).length;
+    || t.params.some(p => p.name || p.description || p.hide || p.default != null)).length;
 }
 
 // Sidebar — screen 2a's sidebar is the one true sidebar for BOTH screens
@@ -379,6 +485,7 @@ function renderList() {
                  title="${b.enabled ? 'broadcasting — click to disable' : 'disabled — click to enable'}">
           ${b.always_load ? '<button class="b-pin-ind" title="whole server pinned — click to unpin">📌</button>' : ''}
         </span>
+        <span class="st-dot st-unk" data-b="${esc(b.name)}"></span>
         <div class="nm" title="${esc(b.name)}">${label}</div>
         <span class="chip">${chipT(b.transport)}</span>
       </div>
@@ -394,6 +501,7 @@ function renderList() {
     if (bp) bp.addEventListener('click', e => { e.stopPropagation(); pinBackend(b.name, false); });
     el.appendChild(d);
   });
+  paintStatus();  // re-apply live connection states to the fresh dots (#23)
 }
 
 function renderDetail(name) {
@@ -405,11 +513,15 @@ function renderDetail(name) {
     : esc(b.url || '');
   m.innerHTML = `
     <div class="b-head">
+      <span class="st-dot st-unk" data-b="${esc(b.name)}"></span>
       <h2>${esc(b.display_name || b.name)}</h2>
       <span class="chip">${chipT(b.transport)}</span>
       <span class="url">${conn}</span>
+      <span class="si st-line" data-b="${esc(b.name)}"></span>
       <span class="spacer"></span>
       <button class="btn" style="font-size:11px" onclick="reintrospect('${escJS(b.name)}')">Re-inspect</button>
+      <button class="btn" style="font-size:11px" onclick="openRename('${escJS(b.name)}')"
+        title="hard-rename: changes the endpoint URL + Claude Code registration (restart)">Rename…</button>
       <button class="btn btn-danger" style="font-size:11px" onclick="delBackend('${escJS(b.name)}')">Remove</button>
     </div>
     <div class="b-sub-line">MCP endpoint <code>http://${esc(STATE.host)}:${STATE.port}${esc(b.endpoint || '')}</code>
@@ -425,6 +537,17 @@ function renderDetail(name) {
       <label class="lbl" title="cosmetic label for the sidebar + header; does not change routing" style="cursor:default">
         Display name <input type="text" class="f-display mono" value="${esc(b.display_name || '')}"
           placeholder="${esc(b.name)}" style="width:130px;padding:3px 7px;font-size:11px"></label>
+      <span class="div"></span>
+      <span class="lbl" style="cursor:default">
+        <select id="b-ccscope" title="claude mcp add scope"
+          style="width:auto;padding:3px 7px;font-size:11px">
+          <option value="local">local</option>
+          <option value="user">user</option>
+          <option value="project">project</option>
+        </select>
+        <button class="btn" style="font-size:11px" onclick="registerCC('${escJS(b.name)}')"
+          title="run claude mcp add for this backend's endpoint (gateway-${esc(b.name)})">Register in CC</button>
+      </span>
       <span class="spacer"></span>
       <button class="btn" style="font-size:11px" onclick="loadSnapshot('${escJS(b.name)}')"
         title="restore this backend's field values from a saved JSON file">Load fields</button>
@@ -442,12 +565,13 @@ function renderDetail(name) {
   wireInstr(m, b.name, b.default_instructions);
   wireCaps(m);
   wireGrow(m);
+  paintStatus();  // #23: live state for the header dot + status line
   const tw = $('#tools', m);
   if (!b.introspected) { tw.innerHTML = '<div class="empty">Backend not introspected yet — click Re-inspect.</div>'; return; }
   // Order: pinned first, switched-off last; among equals, overridden above.
   const grpOf = t => !t.enabled ? 2 : (t.always_load || b.always_load ? 0 : 1);
   const ovrOf = t => (t.name || t.title || t.description
-    || t.params.some(p => p.name || p.description || p.hide)) ? 0 : 1;
+    || t.params.some(p => p.name || p.description || p.hide || p.default != null)) ? 0 : 1;
   [...b.tools].sort((a, z) => grpOf(a) - grpOf(z) || ovrOf(a) - ovrOf(z))
     .forEach(t => tw.appendChild(toolCard(b, t)));
   wireGrow(m);
@@ -581,7 +705,7 @@ function renderGateway() {
     const pct = Math.min(100, Math.round(100 * instr / 2048));
     const near = pct >= 80;
     return `<div class="ep${near ? ' near' : ''}">
-      <div class="e-top"><span class="dot5${b.enabled ? '' : ' off'}"></span>
+      <div class="e-top"><span class="st-dot st-unk" data-b="${esc(b.name)}"></span>
         <span class="e-nm">${esc(b.display_name || b.name)}</span><span class="chip">${chipT(b.transport)}</span></div>
       <span class="e-url">${esc(base + (b.endpoint || ''))}</span>
       <div class="e-counts"><span>${b.tools.length} tools</span>
@@ -617,6 +741,9 @@ function renderGateway() {
       <span class="meta">v${esc(STATE.version || '?')}</span>
       <span class="meta">${base}</span>
       <span class="spacer" style="flex:1"></span>
+      <label style="display:flex;align-items:center;gap:6px;font:11px system-ui;color:var(--tm);cursor:pointer"
+        title="on a broadcast-name collision, retry the save once with an auto-suffixed name (_2, _3, …) instead of failing (#22)">
+        <input type="checkbox" class="tgl" id="autoUniq"> auto-uniquify name collisions</label>
       <button class="btn" style="font-size:11px" onclick="exportSettings()"
         title="download the complete stored settings as one JSON bundle">Export</button>
       <button class="btn" style="font-size:11px" onclick="importSettings()"
@@ -628,7 +755,7 @@ function renderGateway() {
         <div class="s-val" style="display:flex;align-items:center;gap:10px">${on}/${total}
           <input type="checkbox" class="tgl" id="masterTgl"
             title="broadcast all backends on/off"></div>
-        <div class="s-sub ${on === total ? 'gn' : 'rd'}">${on === total ? 'all connected' : (total - on) + ' off'}</div></div>
+        <div class="s-sub ${on === total ? 'gn' : 'rd'}" data-stsum>${on === total ? 'all connected' : (total - on) + ' off'}</div></div>
       <div class="stat"><div class="s-lbl">Tools</div>
         <div class="s-val">${toolTot}</div>
         <div class="s-sub ac">${ovrTot} overridden</div></div>
@@ -666,13 +793,18 @@ function renderGateway() {
     mt.indeterminate = on > 0 && on < total;
     mt.addEventListener('change', () => enableAll(mt.checked));
   }
+  // #22 — the preference lives client-side only (localStorage, default off).
+  const au = $('#autoUniq');
+  au.checked = autoUniquify();
+  au.addEventListener('change', () => localStorage.setItem('autoUniquify', au.checked ? '1' : '0'));
+  paintStatus();  // #23
 }
 
 // Tool card — editable fields prefilled with effective values (#62 semantics).
 function toolCard(b, t) {
   const card = document.createElement('div');
   const isOvr = !!(t.name || t.title || t.description
-    || t.params.some(p => p.name || p.description || p.hide));
+    || t.params.some(p => p.name || p.description || p.hide || p.default != null));
   card.className = 'tool' + (t.enabled ? '' : ' disabled') + (isOvr ? ' ovr' : '');
   card.dataset.original = t.original;
   card.dataset.defaultName = t.default_name;
@@ -741,16 +873,28 @@ function toolCard(b, t) {
 }
 
 function paramRow(p) {
-  // #128: param names are read-only, no per-param hide affordance. Stored
-  // name/hide overrides pass through untouched via data attributes.
+  // #128: param names are read-only. #35: an "injected default" input per
+  // param; setting one unlocks the hide pill (a hidden param's value is
+  // injected by the gateway on every call, so hiding is safe — even for a
+  // required param). Without a default, hide stays affordance-less as #128
+  // decided (a stored legacy hide still shows so it can be switched off).
   const desc = p.description || p.default_description || '';
   const req = p.required ? ' <span class="req-badge">required</span>' : '';
   const renamed = p.name && p.name !== p.default_name
     ? ` <span class="si" title="legacy broadcast rename (read-only)">→ ${esc(p.name)}</span>` : '';
-  const hidden = p.hide ? ' <span class="si" title="hidden from broadcast (stored override)">hidden</span>' : '';
   const dot = p.description ? ' <span class="ovd" style="color:var(--ac)">·</span>' : '';
-  return `<div class="param-row" data-original="${esc(p.original)}" data-name="${esc(p.name||'')}" data-hide="${p.hide?'1':''}">
-    <div class="p-top"><span class="p-nm" title="parameter name (not editable)">${esc(p.original)}</span>${req}${renamed}${hidden}${dot}</div>
+  const defVal = p.default == null ? ''
+    : (typeof p.default === 'string' ? p.default : JSON.stringify(p.default));
+  const showHide = p.hide || defVal !== '';
+  return `<div class="param-row${p.hide ? ' p-hidden' : ''}" data-original="${esc(p.original)}" data-name="${esc(p.name||'')}" data-required="${p.required ? '1' : ''}">
+    <div class="p-top"><span class="p-nm" title="parameter name (not editable)">${esc(p.original)}</span>${req}${renamed}${dot}
+      <span style="flex:1"></span>
+      <input type="text" class="p-default mono${defVal !== '' ? ' ov' : ''}" value="${esc(defVal)}"
+        placeholder="inject value…" autocomplete="off" spellcheck="false"
+        title="fixed value the gateway injects on every call (JSON or plain text) — setting one allows hiding this param">
+      <label class="lbl p-hide-w" style="${showHide ? '' : 'display:none'}" title="hide from Claude's broadcast; the injected value is still sent to the backend">
+        <input type="checkbox" class="tgl p-hide" ${p.hide ? 'checked' : ''}> hidden</label>
+    </div>
     <div style="margin-top:7px;"><textarea class="p-desc grow${p.description ? ' ov' : ''}" data-default="${esc(p.default_description||'')}">${esc(desc)}</textarea></div>
     </div>`;
 }
@@ -789,6 +933,30 @@ function wireCard(backend, original, card) {
       flushSave(backend, original, card);
     });
   });
+  // #35: the injected-default input unlocks the hide pill; clearing the value
+  // re-locks it (and un-hides a required param, which can't stay hidden
+  // without an injected value — mirrors the server guard).
+  card.querySelectorAll('.param-row').forEach(pe => {
+    const def = $('.p-default', pe), pillWrap = $('.p-hide-w', pe), pill = $('.p-hide', pe);
+    if (!def || !pill) return;
+    const sync = () => {
+      if (def.value.trim() === '' && pe.dataset.required === '1' && pill.checked)
+        pill.checked = false;
+      pillWrap.style.display = (def.value.trim() !== '' || pill.checked) ? '' : 'none';
+      pe.classList.toggle('p-hidden', pill.checked);
+    };
+    def.addEventListener('input', sync);
+    pill.addEventListener('change', sync);
+  });
+}
+
+// #35: JSON-parseable defaults are sent typed (numbers, booleans); anything
+// else goes as a raw string; empty means "no injection". Non-scalar JSON
+// (arrays/objects) is sent as-parsed so the server rejects it with a clear 400.
+function paramDefaultValue(raw) {
+  const v = raw.trim();
+  if (v === '') return '';
+  try { return JSON.parse(v); } catch { return v; }
 }
 
 function gather(card) {
@@ -796,7 +964,8 @@ function gather(card) {
     original: pe.dataset.original,
     name: pe.dataset.name,           // #128: read-only pass-through
     description: $('.p-desc', pe).value,
-    hide: pe.dataset.hide === '1',   // #128: pass-through, no UI affordance
+    hide: $('.p-hide', pe).checked,  // #35: unlocked by an injected default
+    default: paramDefaultValue($('.p-default', pe).value),
   }));
   return {
     name: $('.f-name', card).value,
@@ -902,7 +1071,7 @@ async function applySnapshot(scope, snap) {
           override: {
             name: st.name || '', title: st.title || '', description: st.description || '',
             enabled: st.enabled !== false, always_load: !!st.always_load,
-            params: (st.params || []).map(p => ({ original: p.original, name: p.name || '', description: p.description || '', hide: !!p.hide })),
+            params: (st.params || []).map(p => ({ original: p.original, name: p.name || '', description: p.description || '', hide: !!p.hide, default: p.default ?? '' })),
           },
         });
       }
@@ -947,12 +1116,24 @@ async function doSave(backend, original, card, keepalive = false) {
   if (!namesValid(card)) return;  // #41
   const key = backend + '::' + original;
   clearTimeout(timers[key]); delete timers[key]; delete pending[key];
-  const body = JSON.stringify({ backend, tool_original: original, override: gather(card) });
+  const put = payload => fetch('/admin/api/override',
+    { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload), keepalive });
+  const payload = { backend, tool_original: original, override: gather(card) };
   try {
-    const r = await fetch('/admin/api/override',
-      { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body, keepalive });
-    const j = await r.json().catch(() => ({}));
+    let r = await put(payload);
+    let j = await r.json().catch(() => ({}));
+    // #22 — opted-in auto-fix: on a name collision, retry ONCE with the server
+    // suffixing the name (_2, _3, …) into uniqueness. Default off; never silent.
+    if (!r.ok && autoUniquify() && /already used by tool/.test(j.error || '')) {
+      r = await put({ ...payload, on_collision: 'uniquify' });
+      j = await r.json().catch(() => ({}));
+    }
     if (!r.ok) { toast('save failed: ' + (j.error || ('HTTP ' + r.status))); pending[key] = { backend, original, card }; return; }
+    if (j.uniquified && j.name) {  // reflect the final stored name in the card
+      $('.f-name', card).value = j.name;
+      $('.newname', card).textContent = j.name;
+      toast(`name taken — saved as "${j.name}"`);
+    }
     patchToolState(backend, original, gather(card));
     flashSaved();
   } catch (e) { toast('save failed: ' + e.message); pending[key] = { backend, original, card }; }
@@ -980,6 +1161,8 @@ function patchToolState(backend, original, o) {
     p.name = ovVal(op.name, p.default_name);
     p.description = ovVal(op.description, p.default_description);
     p.hide = op.hide;
+    p.default = typeof op.default === 'string'
+      ? (op.default.trim() || null) : (op.default ?? null);
   });
 }
 
@@ -1081,7 +1264,12 @@ async function resetTool(backend, original) {
   catch (e) { toast('reset failed: ' + e.message); }
 }
 async function reintrospect(name) {
-  try { await api('POST', '/admin/api/introspect/' + encodeURIComponent(name)); await load(); toast('re-inspected ' + name); }
+  try {
+    const r = await api('POST', '/admin/api/introspect/' + encodeURIComponent(name));
+    await load();
+    const a = (r.added || []).length, d = (r.removed || []).length;
+    toast('re-inspected ' + name + (a || d ? ` — +${a}/−${d} tools` : ' — no changes'));
+  }
   catch (e) { toast('inspect failed: ' + e.message); }
 }
 async function pinBackend(name, value) {
@@ -1103,8 +1291,68 @@ async function setDisplayName(name, value) {
   try { await api('POST', '/admin/api/backend/' + encodeURIComponent(name) + '/display-name', { value }); await load(); }
   catch (e) { toast('rename failed: ' + e.message); }
 }
+// #44 — hard-rename modal: a REAL identity change (endpoint + registration),
+// unlike the cosmetic display name.
+let RENAME_FROM = null;
+function openRename(name) {
+  RENAME_FROM = name;
+  $('#rn_cur').textContent = name;
+  $('#rn_name').value = '';
+  $('#rn_name').classList.remove('bad');
+  $('#rn_rereg').checked = false;
+  $('#rn_err').textContent = '';
+  $('#renameBg').classList.add('show');
+  $('#rn_name').focus();
+}
+function closeRename() { $('#renameBg').classList.remove('show'); }
+async function doRename() {
+  const oldName = RENAME_FROM, newName = $('#rn_name').value.trim();
+  if (!NAME_RE.test(newName)) {  // client mirror of the server's _NAME_RE (#41)
+    $('#rn_name').classList.add('bad');
+    $('#rn_err').textContent = "invalid name: letters, digits, '_' or '-' only, max 64 chars";
+    return;
+  }
+  $('#rn_name').classList.remove('bad');
+  const rereg = $('#rn_rereg').checked;
+  $('#rn_go').disabled = true; $('#rn_err').textContent = 'renaming…';
+  try {
+    const r = await api('POST', '/admin/api/backend/' + encodeURIComponent(oldName) + '/rename', { value: newName });
+    closeRename();
+    SELECTED = newName;
+    toast(`renamed — new endpoint ${r.new_endpoint} · re-register in Claude Code as ${r.new_registration}`, 6000);
+    if (r.reloaded === 'restarting') await waitReload();  // poll /health, then reload state
+    else { await load(); toast('renamed (dev: no launchd restart — endpoint moves on next manual restart)'); }
+    if (rereg) await reRegisterCC(oldName, newName);
+  } catch (e) { $('#rn_err').textContent = e.message; }
+  finally { $('#rn_go').disabled = false; }
+}
+// after a rename: swap the Claude Code registration old -> new (scope local).
+async function reRegisterCC(oldName, newName) {
+  try {
+    const dr = await api('POST', '/admin/api/backend/' + encodeURIComponent(oldName) + '/deregister', { scope: 'local' });
+    if (!dr.ok) console.warn('claude mcp remove gateway-' + oldName + ' failed:', dr.stderr || dr.stdout);
+    const rr = await api('POST', '/admin/api/backend/' + encodeURIComponent(newName) + '/register', { scope: 'local' });
+    if (rr.ok) toast(`registered gateway-${newName} in Claude Code (old gateway-${oldName} ${dr.ok ? 'removed' : 'NOT removed — remove it manually'}) — reload Claude Code if it doesn't appear`, 7000);
+    else toast('claude mcp add failed: ' + (rr.stderr || rr.stdout || 'exit ' + rr.exit), 8000);
+  } catch (e) { toast('Claude Code re-register failed: ' + e.message, 6000); }
+}
+// #45 — one-click `claude mcp add` for this backend's gateway endpoint.
+async function registerCC(name, scope) {
+  scope = scope || ($('#b-ccscope') ? $('#b-ccscope').value : 'local');
+  try {
+    const r = await api('POST', '/admin/api/backend/' + encodeURIComponent(name) + '/register', { scope });
+    if (r.ok) toast(`registered gateway-${name} (scope ${scope}) — reload Claude Code if it doesn't appear`, 5000);
+    else toast('claude mcp add failed: ' + (r.stderr || r.stdout || 'exit ' + r.exit), 8000);
+  } catch (e) { toast('register failed: ' + e.message, 5000); }
+}
 async function delBackend(name) {
   if (!confirm('Remove backend "' + name + '"? This restarts the gateway.')) return;
+  // best-effort: drop the Claude Code registration first (the backend is about
+  // to disappear from config, but deregister works regardless — cleanup path).
+  try {
+    const d = await api('POST', '/admin/api/backend/' + encodeURIComponent(name) + '/deregister', { scope: 'local' });
+    if (!d.ok) console.warn('claude mcp remove gateway-' + name + ' failed:', d.stderr || d.stdout);
+  } catch (e) { console.warn('deregister skipped: ' + e.message); }
   try { const r = await api('DELETE', '/admin/api/backend/' + encodeURIComponent(name)); SELECTED = null; afterRestart(r, 'removed'); }
   catch (e) { toast('remove failed: ' + e.message); }
 }
@@ -1146,6 +1394,7 @@ function openImport() {
   for (const id of ['im_name','im_url','im_ah','im_av','im_headers','im_hh','im_cmd','im_args'])
     $('#'+id).value = '';
   $('#im_oauth').checked = false;
+  $('#im_register').checked = false;
   $('#im_transport').value = 'http';
   importTransportChange();
   $('#im_err').textContent = '';
@@ -1174,10 +1423,26 @@ async function doImport() {
     if ($('#im_oauth').checked) body.auth = 'oauth';
   }
   else { body.command = $('#im_cmd').value.trim(); body.args = $('#im_args').value.trim() ? $('#im_args').value.trim().split(/\s+/) : []; }
+  const alsoRegister = $('#im_register').checked;  // #45: register after import
   $('#im_go').disabled = true; $('#im_err').textContent = 'connecting…';
-  try { const r = await api('POST', '/admin/api/backend', body); closeImport(); SELECTED = r.backend; afterRestart(r, 'imported'); }
+  try {
+    const r = await api('POST', '/admin/api/backend', body);
+    closeImport(); SELECTED = r.backend; afterRestart(r, 'imported');
+    if (alsoRegister && r.backend) {
+      // hot-add path: the endpoint is live now, so the registration is real.
+      if (r.reloaded === 'restarting') toast('register skipped — gateway restarting; use "Register in CC" afterwards', 5000);
+      else await registerCC(r.backend, 'local');
+    }
+  }
   catch (e) { $('#im_err').textContent = e.message; }
   finally { $('#im_go').disabled = false; }
+}
+
+// Backdrop click closes the stateless modals (import + rename). The restart
+// modal is excluded — its countdown needs the explicit Cancel.
+for (const id of ['importBg', 'renameBg']) {
+  const bg = document.getElementById(id);
+  bg.addEventListener('click', e => { if (e.target === bg) bg.classList.remove('show'); });
 }
 
 // after a restart-triggering change, poll until the gateway is back, then reload
@@ -1194,7 +1459,9 @@ function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;',
 // JS-escape then HTML-escape for inline on*="fn('…')" handlers (issue #51).
 function escJS(s) { return esc(String(s ?? '').replace(/\\/g, '\\\\').replace(/'/g, "\\'")); }
 
-load();
+// Boot: paint from cached state immediately, then (async, non-blocking) probe
+// liveness (#23) and run the throttled on-open re-introspect sweep (#43).
+load().then(() => { refreshStatus(); refreshBackends(); });
 </script>
 </body>
 </html>

@@ -6,7 +6,12 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import plistlib
 import re
+import shutil
+import subprocess
+import tempfile
 import time
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -99,6 +104,112 @@ def test_body_limit_ignores_non_admin_paths():
 
 
 # ---------------------------------------------------------------------------
+# #26 — optional bearer token on backend endpoints (defense-in-depth)
+# ---------------------------------------------------------------------------
+
+
+def _bearer_app(token):
+    async def ping(request):
+        return JSONResponse({"ok": True})
+
+    return Starlette(
+        routes=[
+            Route("/b/mcp", ping, methods=["GET"]),
+            Route("/health", ping, methods=["GET"]),
+            Route("/ready", ping, methods=["GET"]),
+            Route("/admin/api/state", ping, methods=["GET"]),
+        ],
+        middleware=[Middleware(server.BearerAuthMiddleware, token=token)],
+    )
+
+
+def test_bearer_no_token_is_passthrough():
+    # token unset/empty -> pure passthrough, no header required anywhere
+    for token in (None, ""):
+        r = TestClient(_bearer_app(token)).get("/b/mcp")
+        assert r.status_code == 200
+
+
+def test_bearer_missing_header_is_401_with_challenge():
+    r = TestClient(_bearer_app("sekret")).get("/b/mcp")
+    assert r.status_code == 401
+    assert r.headers["WWW-Authenticate"] == "Bearer"
+    assert r.json() == {"ok": False, "error": "missing or invalid bearer token"}
+
+
+def test_bearer_wrong_token_is_401():
+    client = TestClient(_bearer_app("sekret"))
+    for bad in ("Bearer wrong", "Bearer sekret2", "sekret", "Basic sekret"):
+        r = client.get("/b/mcp", headers={"Authorization": bad})
+        assert r.status_code == 401
+        assert r.headers["WWW-Authenticate"] == "Bearer"
+
+
+def test_bearer_correct_token_passes():
+    r = TestClient(_bearer_app("sekret")).get(
+        "/b/mcp", headers={"Authorization": "Bearer sekret"}
+    )
+    assert r.status_code == 200
+
+
+def test_bearer_exempts_admin_health_ready():
+    # same-origin admin UI fetches carry no header; liveness probes neither —
+    # loopback trust for those paths is the status quo.
+    client = TestClient(_bearer_app("sekret"))
+    for path in ("/health", "/ready", "/admin/api/state"):
+        assert client.get(path).status_code == 200
+
+
+def test_build_app_missing_bearer_env_fails_loudly(tmp_path, monkeypatch):
+    # a ${ENV} bearer_token whose var is unset must raise ConfigError at BUILD
+    # time (startup), never surface per request.
+    monkeypatch.delenv("NO_SUCH_GW_TOKEN", raising=False)
+    monkeypatch.setenv("MCP_GATEWAY_SECRETS", str(tmp_path / "absent.env"))
+    cfg = cl.GatewayConfig.model_validate(
+        {
+            "bearer_token": "${NO_SUCH_GW_TOKEN}",
+            "backends": [{"name": "b", "transport": "stdio", "command": "/bin/x"}],
+        }
+    )
+    with pytest.raises(cl.ConfigError):
+        server._build_app(
+            cfg,
+            structlog.get_logger("test"),
+            {},
+            {},
+            {},
+            config_path=str(tmp_path / "config.toml"),
+        )
+
+
+def test_build_app_wires_bearer_auth(tmp_path, monkeypatch):
+    # end-to-end wiring: token resolved from the env once, backend paths gated,
+    # admin/health/ready exempt.
+    monkeypatch.setenv("GW_TOKEN_26", "sekret")
+    cfg = cl.GatewayConfig.model_validate(
+        {
+            "bearer_token": "${GW_TOKEN_26}",
+            "backends": [{"name": "b", "transport": "stdio", "command": "/bin/x"}],
+        }
+    )
+    path = tmp_path / "config.toml"
+    cl.save(cfg, str(path))
+    app = server._build_app(
+        cfg, structlog.get_logger("test"), {}, {}, {}, config_path=str(path)
+    )
+    with TestClient(app) as client:
+        assert client.get("/health").status_code == 200  # exempt
+        assert client.get("/ready").status_code == 503  # exempt (degraded, not 401)
+        assert client.get("/admin/api/state").status_code == 200  # exempt
+        r = client.get("/b/mcp")
+        assert r.status_code == 401
+        assert r.headers["WWW-Authenticate"] == "Bearer"
+        # correct token passes the gate (404: the /bin/x backend never mounts)
+        ok = client.get("/b/mcp", headers={"Authorization": "Bearer sekret"})
+        assert ok.status_code != 401
+
+
+# ---------------------------------------------------------------------------
 # #50 — gateway.log is a rotating handler, JSON format unchanged
 # ---------------------------------------------------------------------------
 
@@ -173,6 +284,18 @@ def test_health_reports_version():
     # still starts with "ok" so existing liveness checks pass; version is visible
     assert r.text.startswith("ok")
     assert admin.gateway_version() in r.text
+
+
+def test_health_reports_resolved_code_path():
+    # #149: /health names the daemon's REAL resolved code path, so a ghost
+    # process running from a deleted/moved clone is visible to a one-line curl
+    # (the path won't match where the repo lives now).
+    client = TestClient(
+        Starlette(routes=[Route("/health", server._health, methods=["GET"])])
+    )
+    r = client.get("/health")
+    assert r.text.startswith("ok")
+    assert f" @ {Path(server.__file__).resolve().parent}" in r.text
 
 
 # ---------------------------------------------------------------------------
@@ -370,7 +493,7 @@ def test_slow_backend_does_not_block_boot_or_others(tmp_path, monkeypatch):
     started, mounted = [], []
 
     async def fake_mount(
-        app, stack, b, cfg, all_tools, meta, captured, _reg, _hold, log
+        app, stack, b, cfg, all_tools, meta, captured, _reg, _hold, log, *extra
     ):
         started.append(b.name)
         if b.name == "slow":
@@ -509,6 +632,65 @@ def test_add_backend_duplicate_after_probe_is_400(tmp_path, monkeypatch):
     assert [b.name for b in cl.load(cfg_path).backends] == ["b", "new"]
 
 
+def test_override_route_uniquify_returns_final_name(tmp_path):
+    # #22 — the PUT override route: strict reject by default; with the opt-in
+    # flag it stores the suffixed name and reports it back to the UI.
+    admin.DEFAULTS_DIR.mkdir(parents=True, exist_ok=True)  # conftest-isolated
+    (admin.DEFAULTS_DIR / "b.json").write_text(
+        json.dumps(
+            {
+                "backend": "b",
+                "tools": [
+                    {
+                        "original": "t1",
+                        "title": None,
+                        "description": "d1",
+                        "params": [],
+                    },
+                    {
+                        "original": "t2",
+                        "title": None,
+                        "description": "d2",
+                        "params": [],
+                    },
+                ],
+            }
+        )
+    )
+    client = TestClient(_admin_app(tmp_path))
+    # default (no flag) stays exactly today's strict reject
+    strict = client.put(
+        "/admin/api/override",
+        json={"backend": "b", "tool_original": "t1", "override": {"name": "t2"}},
+    )
+    assert strict.status_code == 400
+    assert "already used" in strict.json()["error"]
+    # opt-in flag -> 200 with the final stored name surfaced
+    r = client.put(
+        "/admin/api/override",
+        json={
+            "backend": "b",
+            "tool_original": "t1",
+            "on_collision": "uniquify",
+            "override": {"name": "t2"},
+        },
+    )
+    assert r.status_code == 200
+    assert r.json() == {
+        "ok": True,
+        "reloaded": "in-process",
+        "name": "t2_2",
+        "uniquified": True,
+    }
+    assert cl.load(_cfg_path(tmp_path)).backends[0].tools[0].name == "t2_2"
+    # a save that needed no uniquify keeps today's response shape
+    r2 = client.put(
+        "/admin/api/override",
+        json={"backend": "b", "tool_original": "t1", "override": {"name": "fresh"}},
+    )
+    assert r2.json() == {"ok": True, "reloaded": "in-process"}
+
+
 def test_display_name_route_sets_and_clears(tmp_path):
     client = TestClient(_admin_app(tmp_path))
     r1 = client.post("/admin/api/backend/b/display-name", json={"value": "Nice Label"})
@@ -518,6 +700,248 @@ def test_display_name_route_sets_and_clears(tmp_path):
     r2 = client.post("/admin/api/backend/b/display-name", json={"value": "   "})
     assert r2.status_code == 200
     assert cl.load(_cfg_path(tmp_path)).backends[0].display_name is None
+
+
+# ---------------------------------------------------------------------------
+# #44 — hard-rename a backend (real identity change, unlike display_name #42)
+# ---------------------------------------------------------------------------
+
+
+def _cfg_app(tmp_path, cfg_dict) -> Starlette:
+    """Admin app over an arbitrary config dict (rename needs tools/multiple
+    backends, which _admin_app's fixed single-backend config can't express)."""
+    cfg = cl.GatewayConfig.model_validate(cfg_dict)
+    path = tmp_path / "config.toml"
+    cl.save(cfg, str(path))
+    app = Starlette()
+    admin.register(app, str(path), structlog.get_logger("test"), {}, {})
+    return app
+
+
+def _write_defaults(name, tools=("t",)):
+    """Captured-defaults stub (same shape as test_admin's _write_defaults);
+    conftest already points admin.DEFAULTS_DIR at a throwaway dir."""
+    d = admin.DEFAULTS_DIR
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"{name}.json").write_text(
+        json.dumps(
+            {
+                "backend": name,
+                "instructions": None,
+                "tools": [
+                    {"original": t, "title": None, "description": "d", "params": []}
+                    for t in tools
+                ],
+            }
+        )
+    )
+
+
+def test_rename_backend_renames_config_and_migrates_defaults(tmp_path):
+    app = _cfg_app(
+        tmp_path,
+        {
+            "backends": [
+                {
+                    "name": "b",
+                    "transport": "stdio",
+                    "command": "/bin/x",
+                    "display_name": "Nice Label",
+                    "tools": [{"original": "t", "name": "renamed_tool"}],
+                }
+            ]
+        },
+    )
+    _write_defaults("b")
+    r = TestClient(app).post("/admin/api/backend/b/rename", json={"value": "nb"})
+    assert r.status_code == 200
+    j = r.json()
+    assert j["ok"] is True
+    # the UI needs both identities to tell the user what to reconfigure
+    assert j["old_endpoint"] == "http://127.0.0.1:9100/b/mcp"
+    assert j["new_endpoint"] == "http://127.0.0.1:9100/nb/mcp"
+    assert j["old_registration"] == "gateway-b"
+    assert j["new_registration"] == "gateway-nb"
+    after = cl.load(str(tmp_path / "config.toml"))
+    assert [x.name for x in after.backends] == ["nb"]  # config key renamed
+    b = after.backends[0]
+    assert b.display_name == "Nice Label"  # cosmetic label rides along
+    assert [t.original for t in b.tools] == ["t"]  # overrides survive intact
+    assert b.tools[0].name == "renamed_tool"
+    # captured-defaults baseline migrated old -> new (backend key updated too)
+    assert not (admin.DEFAULTS_DIR / "b.json").exists()
+    migrated = json.loads((admin.DEFAULTS_DIR / "nb.json").read_text())
+    assert migrated["backend"] == "nb"
+    assert [t["original"] for t in migrated["tools"]] == ["t"]
+
+
+def test_rename_backend_without_defaults_file_still_renames(tmp_path):
+    # never-introspected backend: no defaults file to migrate — tolerated
+    r = TestClient(_admin_app(tmp_path)).post(
+        "/admin/api/backend/b/rename", json={"value": "nb"}
+    )
+    assert r.status_code == 200
+    assert [x.name for x in cl.load(_cfg_path(tmp_path)).backends] == ["nb"]
+
+
+@pytest.mark.parametrize("bad", ["has space", "dot.name", "", "a" * 65, 7])
+def test_rename_backend_invalid_name_is_400(tmp_path, bad):
+    r = TestClient(_admin_app(tmp_path)).post(
+        "/admin/api/backend/b/rename", json={"value": bad}
+    )
+    assert r.status_code == 400
+    assert [x.name for x in cl.load(_cfg_path(tmp_path)).backends] == ["b"]
+
+
+def test_rename_backend_duplicate_name_is_400(tmp_path):
+    app = _cfg_app(
+        tmp_path,
+        {
+            "backends": [
+                {"name": "b", "transport": "stdio", "command": "/bin/x"},
+                {"name": "c", "transport": "stdio", "command": "/bin/x"},
+            ]
+        },
+    )
+    r = TestClient(app).post("/admin/api/backend/b/rename", json={"value": "c"})
+    assert r.status_code == 400
+    assert "already exists" in r.json()["error"]
+    names = [x.name for x in cl.load(str(tmp_path / "config.toml")).backends]
+    assert names == ["b", "c"]  # nothing changed
+
+
+def test_rename_backend_unknown_is_400(tmp_path):
+    r = TestClient(_admin_app(tmp_path)).post(
+        "/admin/api/backend/nope/rename", json={"value": "nb"}
+    )
+    assert r.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# #45 — one-click Claude Code registration via the `claude` CLI
+# ---------------------------------------------------------------------------
+
+
+def _fake_claude_cli(monkeypatch, calls, rc=0, stdout="", stderr=""):
+    """Pretend `claude` is on PATH and capture the exact argv it's run with."""
+    monkeypatch.setattr(admin.shutil, "which", lambda _cmd: "/usr/bin/claude")
+
+    def fake_run(argv, **_kwargs):
+        calls.append(list(argv))
+        return subprocess.CompletedProcess(argv, rc, stdout=stdout, stderr=stderr)
+
+    monkeypatch.setattr(admin.subprocess, "run", fake_run)
+
+
+def test_register_backend_runs_claude_mcp_add(tmp_path, monkeypatch):
+    calls = []
+    _fake_claude_cli(monkeypatch, calls, stdout="added")
+    r = TestClient(_admin_app(tmp_path)).post(
+        "/admin/api/backend/b/register", json={"scope": "user"}
+    )
+    assert r.status_code == 200
+    j = r.json()
+    assert j["ok"] is True and j["exit"] == 0 and j["stdout"] == "added"
+    # exact argv: gateway-<name> convention + the real endpoint URL
+    assert calls == [
+        [
+            "claude",
+            "mcp",
+            "add",
+            "--transport",
+            "http",
+            "--scope",
+            "user",
+            "gateway-b",
+            "http://127.0.0.1:9100/b/mcp",
+        ]
+    ]
+    assert j["command"] == " ".join(calls[0])
+    assert "reload" in j["note"] or "restart" in j["note"]
+
+
+def test_register_backend_defaults_to_local_scope(tmp_path, monkeypatch):
+    calls = []
+    _fake_claude_cli(monkeypatch, calls)
+    r = TestClient(_admin_app(tmp_path)).post("/admin/api/backend/b/register", json={})
+    assert r.status_code == 200
+    argv = calls[0]
+    assert argv[argv.index("--scope") + 1] == "local"
+
+
+def test_register_cli_failure_is_ok_false_http_200(tmp_path, monkeypatch):
+    # the HTTP call succeeded; the CLI failed — surface it, don't 4xx/5xx
+    calls = []
+    _fake_claude_cli(monkeypatch, calls, rc=1, stderr="No such command")
+    r = TestClient(_admin_app(tmp_path)).post(
+        "/admin/api/backend/b/register", json={"scope": "local"}
+    )
+    assert r.status_code == 200
+    j = r.json()
+    assert j["ok"] is False and j["exit"] == 1
+    assert j["stderr"] == "No such command"
+
+
+def test_register_missing_claude_cli_is_400(tmp_path, monkeypatch):
+    monkeypatch.setattr(admin.shutil, "which", lambda _cmd: None)
+    r = TestClient(_admin_app(tmp_path)).post(
+        "/admin/api/backend/b/register", json={"scope": "local"}
+    )
+    assert r.status_code == 400
+    assert "claude CLI not found" in r.json()["error"]
+
+
+def test_register_bad_scope_is_400(tmp_path, monkeypatch):
+    calls = []
+    _fake_claude_cli(monkeypatch, calls)
+    r = TestClient(_admin_app(tmp_path)).post(
+        "/admin/api/backend/b/register", json={"scope": "global"}
+    )
+    assert r.status_code == 400
+    assert calls == []  # rejected before any CLI run
+
+
+def test_register_unknown_backend_is_400(tmp_path, monkeypatch):
+    # register requires the backend to exist so the registered URL is real
+    calls = []
+    _fake_claude_cli(monkeypatch, calls)
+    r = TestClient(_admin_app(tmp_path)).post(
+        "/admin/api/backend/ghost/register", json={"scope": "local"}
+    )
+    assert r.status_code == 400
+    assert calls == []
+
+
+def test_deregister_runs_claude_mcp_remove(tmp_path, monkeypatch):
+    calls = []
+    _fake_claude_cli(monkeypatch, calls)
+    r = TestClient(_admin_app(tmp_path)).post(
+        "/admin/api/backend/b/deregister", json={"scope": "project"}
+    )
+    assert r.status_code == 200 and r.json()["ok"] is True
+    assert calls == [["claude", "mcp", "remove", "--scope", "project", "gateway-b"]]
+
+
+def test_deregister_of_removed_backend_still_runs(tmp_path, monkeypatch):
+    # the remove/rename cleanup path: the backend is already gone from config,
+    # but its stale Claude Code registration must still be removable
+    calls = []
+    _fake_claude_cli(monkeypatch, calls)
+    r = TestClient(_admin_app(tmp_path)).post(
+        "/admin/api/backend/gone/deregister", json={"scope": "local"}
+    )
+    assert r.status_code == 200 and r.json()["ok"] is True
+    assert calls == [["claude", "mcp", "remove", "--scope", "local", "gateway-gone"]]
+
+
+def test_deregister_bad_scope_is_400(tmp_path, monkeypatch):
+    calls = []
+    _fake_claude_cli(monkeypatch, calls)
+    r = TestClient(_admin_app(tmp_path)).post(
+        "/admin/api/backend/b/deregister", json={"scope": "everywhere"}
+    )
+    assert r.status_code == 400
+    assert calls == []
 
 
 # ---------------------------------------------------------------------------
@@ -667,7 +1091,7 @@ def test_boot_skips_disabled_backends(tmp_path, monkeypatch):
     mounted = []
 
     async def fake_mount(
-        app, stack, b, cfg, all_tools, meta, captured, reg, _hold, log
+        app, stack, b, cfg, all_tools, meta, captured, reg, _hold, log, *extra
     ):
         mounted.append(b.name)
         reg[b.name] = object()
@@ -715,3 +1139,360 @@ def test_unmount_drops_route_and_registry():
     paths = [getattr(r, "path", None) for r in app.router.routes]
     assert "/b" not in paths  # backend mount removed
     assert "/health" in paths  # other routes untouched
+
+
+# ---------------------------------------------------------------------------
+# #35 — a hidden param's injected default reaches the backend
+# ---------------------------------------------------------------------------
+
+
+def test_hidden_required_param_default_injected():
+    """The whole #35 chain through a REAL FastMCP proxy: the hidden param
+    vanishes from the broadcast schema, and the backend still receives the
+    injected value on every call."""
+    from fastmcp import Client, FastMCP
+    from fastmcp.server import create_proxy
+
+    m = FastMCP("b")
+
+    @m.tool
+    def greet(text: str, mode: str) -> str:
+        """Greet."""
+        return mode + ":" + text
+
+    cfg = cl.GatewayConfig.model_validate(
+        {
+            "backends": [
+                {
+                    "name": "b",
+                    "transport": "stdio",
+                    "command": "/bin/x",  # unused — the proxy wraps m in-process
+                    "tools": [
+                        {
+                            "original": "greet",
+                            "params": [
+                                {"original": "mode", "hide": True, "default": "loud"}
+                            ],
+                        }
+                    ],
+                }
+            ]
+        }
+    )
+    proxy = create_proxy(m, name="mcp-gateway-b")
+    transforms, _ = cl.build_transforms(cfg, cfg.backends[0])
+    proxy.add_transform(transforms)
+
+    async def go():
+        async with Client(proxy) as c:
+            (tool,) = [t for t in await c.list_tools() if t.name == "greet"]
+            props = (tool.inputSchema or {}).get("properties", {})
+            assert "mode" not in props  # hidden from Claude's broadcast
+            assert "mode" not in (tool.inputSchema or {}).get("required", [])
+            return await c.call_tool_mcp("greet", {"text": "hi"})
+
+    res = anyio.run(go)
+    assert res.isError is False
+    texts = [blk.text for blk in res.content if blk.type == "text"]
+    assert texts == ["loud:hi"]  # the injected default reached the backend
+
+
+# ---------------------------------------------------------------------------
+# #23 — /admin/api/status: per-backend liveness, isolated + bounded
+# ---------------------------------------------------------------------------
+
+
+def _status_app(tmp_path, registry, backends=None):
+    cfg = cl.GatewayConfig.model_validate(
+        {
+            "backends": backends
+            or [
+                {"name": "b", "transport": "stdio", "command": "/bin/x"},
+                {"name": "c", "transport": "stdio", "command": "/bin/y"},
+            ]
+        }
+    )
+    path = tmp_path / "config.toml"
+    cl.save(cfg, str(path))
+    app = Starlette()
+    admin.register(app, str(path), structlog.get_logger("test"), registry, {})
+    return app
+
+
+def test_status_ok_unmounted_disabled_error(tmp_path):
+    backends = [
+        {"name": "b", "transport": "stdio", "command": "/bin/x"},  # live
+        {"name": "c", "transport": "stdio", "command": "/bin/y"},  # not mounted
+        {"name": "d", "transport": "stdio", "command": "/bin/z", "enabled": False},
+        {"name": "e", "transport": "stdio", "command": "/bin/w"},  # broken proxy
+    ]
+    registry = {"b": _echo_server(), "e": object()}  # e: Client() will choke
+    client = TestClient(_status_app(tmp_path, registry, backends))
+    r = client.get("/admin/api/status")
+    assert r.status_code == 200
+    s = r.json()["backends"]
+    assert s["b"]["state"] == "ok" and s["b"]["tools"] == 2 and s["b"]["ms"] >= 0
+    assert s["c"]["state"] == "unmounted"
+    assert s["d"]["state"] == "disabled"
+    assert s["e"]["state"] == "error" and s["e"]["error"]
+
+
+# ---------------------------------------------------------------------------
+# #43 — /admin/api/refresh + re-introspect delta + list_changed handler
+# ---------------------------------------------------------------------------
+
+
+def _fake_capture(tools):
+    async def capture(b):
+        return {
+            "backend": b.name,
+            "captured_at": 0,
+            "instructions": None,
+            "server_info": None,
+            "capabilities": None,
+            "tools": [
+                {"original": t, "title": None, "description": "d", "params": []}
+                for t in tools
+            ],
+        }
+
+    return capture
+
+
+def test_refresh_route_refreshes_mounted_skips_rest(tmp_path, monkeypatch):
+    monkeypatch.setattr(admin, "capture_defaults", _fake_capture(["echo", "boom"]))
+    registry = {"b": _echo_server()}
+    client = TestClient(_status_app(tmp_path, registry))
+    r = client.post("/admin/api/refresh")
+    assert r.status_code == 200
+    res = r.json()["backends"]
+    assert res["b"]["status"] == "refreshed"
+    assert sorted(res["b"]["added"]) == ["boom", "echo"]  # no prior baseline
+    assert res["c"]["status"] == "skipped"  # not mounted
+    # the baseline file landed
+    assert {t["original"] for t in admin.load_defaults("b")["tools"]} == {
+        "echo",
+        "boom",
+    }
+
+
+def test_reintrospect_route_reports_delta_and_errors(tmp_path, monkeypatch):
+    monkeypatch.setattr(admin, "capture_defaults", _fake_capture(["echo"]))
+    registry = {"b": _echo_server()}
+    client = TestClient(_status_app(tmp_path, registry))
+    r = client.post("/admin/api/introspect/b")
+    assert r.status_code == 200 and r.json()["added"] == ["echo"]
+
+    assert client.post("/admin/api/introspect/nope").status_code == 400
+
+    async def broken(b):
+        raise RuntimeError("backend down")
+
+    monkeypatch.setattr(admin, "capture_defaults", broken)
+    r = client.post("/admin/api/introspect/b")  # force=True bypasses throttle
+    assert r.status_code == 502
+    assert "backend down" in r.json()["error"]
+
+
+def test_list_changed_handler_enqueues_via_real_dispatch():
+    """Tripwire on FastMCP's MessageHandler dispatch: a wire-shaped
+    ToolListChangedNotification must reach on_tool_list_changed and enqueue the
+    backend; a full queue is swallowed (a refresh is already pending)."""
+    import mcp.types
+
+    b = cl.Backend(name="b", transport="stdio", command="/bin/x")
+    got = []
+    h = server._ListChangedHandler(b, got.append, structlog.get_logger("test"))
+    note = mcp.types.ServerNotification(
+        mcp.types.ToolListChangedNotification(method="notifications/tools/list_changed")
+    )
+    anyio.run(h, note)
+    assert got == [b]
+
+    def full(_):
+        raise anyio.WouldBlock
+
+    h2 = server._ListChangedHandler(b, full, structlog.get_logger("test"))
+    anyio.run(h2, note)  # must not raise
+
+
+def test_post_mount_refresh_trigger_fires(tmp_path, monkeypatch):
+    """#43 trigger 1: a successful mount schedules a background baseline
+    refresh for that backend (throttled inside refresh_defaults)."""
+    refreshed = []
+
+    async def fake_refresh(b, *a, **k):
+        refreshed.append(b.name)
+        return {"status": "refreshed", "changed": False}
+
+    monkeypatch.setattr(admin, "refresh_and_reload", fake_refresh)
+
+    async def fake_mount(app, stack, b, *a, **k):
+        return True
+
+    monkeypatch.setattr(server, "_mount_backend", fake_mount)
+    cfg = cl.GatewayConfig.model_validate(
+        {"backends": [{"name": "b", "transport": "stdio", "command": "/bin/x"}]}
+    )
+    path = tmp_path / "config.toml"
+    cl.save(cfg, str(path))
+    app = server._build_app(
+        cfg, structlog.get_logger("test"), {}, {}, {}, config_path=str(path)
+    )
+    with TestClient(app):
+        for _ in range(100):
+            if refreshed:
+                break
+            time.sleep(0.02)
+    assert refreshed == ["b"]
+
+
+# ---------------------------------------------------------------------------
+# #149 — launchd decoupled from the repo path via the ~/.local/opt symlink
+# ---------------------------------------------------------------------------
+
+REPO_ROOT = Path(server.__file__).resolve().parent
+SYMLINK_PREFIX = "/.local/opt/mcp-gateway"
+
+
+def _plist_strings(node):
+    """Every string value in a parsed plist, recursively."""
+    if isinstance(node, str):
+        yield node
+    elif isinstance(node, dict):
+        for v in node.values():
+            yield from _plist_strings(v)
+    elif isinstance(node, list):
+        for v in node:
+            yield from _plist_strings(v)
+
+
+def test_plist_paths_all_go_through_stable_symlink():
+    # The repo plist must reference the repo ONLY via ~/.local/opt/mcp-gateway
+    # (maintained by install.sh) — a hardcoded clone path is exactly the drift
+    # that #149 made invisible. No string may mention any real clone location.
+    plist = plistlib.loads((REPO_ROOT / "com.void.mcp-gateway.plist").read_bytes())
+    strings = list(_plist_strings(plist))
+    assert strings  # parsed something
+
+    for s in strings:
+        assert "/Developer/projects/" not in s, s
+        assert "/Developer/mine/" not in s, s
+        # Any string that names a repo file/dir must route through the symlink.
+        if "server.py" in s or "config.toml" in s or "/.venv/" in s:
+            assert SYMLINK_PREFIX + "/" in s, s
+
+    # The load-bearing keys specifically:
+    for arg in plist["ProgramArguments"]:
+        assert SYMLINK_PREFIX + "/" in arg, arg
+    assert plist["WorkingDirectory"].endswith(SYMLINK_PREFIX)
+    assert SYMLINK_PREFIX + "/" in plist["EnvironmentVariables"]["MCP_GATEWAY_CONFIG"]
+
+
+def test_install_sh_is_executable_and_parses():
+    # install.sh maintains the symlink + plist; keep it syntactically valid for
+    # macOS's stock /bin/bash 3.2 (bash -n) and executable.
+    script = REPO_ROOT / "install.sh"
+    assert os.access(script, os.X_OK)
+    proc = subprocess.run(
+        ["/bin/bash", "-n", str(script)], capture_output=True, text=True, check=False
+    )
+    assert proc.returncode == 0, proc.stderr
+
+
+def test_register_carries_bearer_header_and_redacts_it(tmp_path, monkeypatch):
+    """#26 x #45: a bearer-protected gateway registers WITH the resolved
+    Authorization header (or every call would 401), and the response never
+    echoes the raw token back to the browser."""
+    monkeypatch.setenv("GW_TOK", "s3cret")
+    calls = []
+    _fake_claude_cli(monkeypatch, calls, stdout="added Bearer s3cret")
+    app = _cfg_app(
+        tmp_path,
+        {
+            "bearer_token": "${GW_TOK}",
+            "backends": [{"name": "b", "transport": "stdio", "command": "/bin/x"}],
+        },
+    )
+    r = TestClient(app).post("/admin/api/backend/b/register", json={})
+    assert r.status_code == 200
+    j = r.json()
+    argv = calls[0]
+    assert argv[argv.index("--header") + 1] == "Authorization: Bearer s3cret"
+    # --header is variadic in the CLI: BEFORE the positionals it would swallow
+    # "<name> <url>" (live-caught in #123) — it must come after them.
+    assert argv.index("--header") > argv.index("gateway-b") > argv.index("--scope")
+    # redaction: neither command nor CLI output may leak the token
+    assert "s3cret" not in j["command"] and "***" in j["command"]
+    assert "s3cret" not in j["stdout"]
+
+
+# ---------------------------------------------------------------------------
+# admin.html integrity — the UI is a single hand-merged file; guard it
+# ---------------------------------------------------------------------------
+
+
+def test_admin_html_has_no_conflict_markers():
+    # A merge conflict in admin.html once shipped committed (the CONFLICT line
+    # scrolled out of a tail'ed merge log) — ruff doesn't lint HTML and no test
+    # parsed the page, so the whole admin UI silently broke. Never again.
+    text = (REPO_ROOT / "admin.html").read_text(encoding="utf-8")
+    for marker in ("<" * 7, "=" * 7 + "\n", ">" * 7):
+        assert marker not in text, f"merge-conflict marker {marker[:7]!r} in admin.html"
+
+
+def test_admin_html_inline_script_parses():
+    # `node --check` the inline <script> so a syntax error (stray backtick,
+    # bad template literal, conflict remnant) fails the gate, not the browser.
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node not available")
+    text = (REPO_ROOT / "admin.html").read_text(encoding="utf-8")
+    start = text.index("<script>") + len("<script>")
+    end = text.index("</script>")
+    with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as fh:
+        fh.write(text[start:end])
+        js_path = fh.name
+    try:
+        proc = subprocess.run(
+            [node, "--check", js_path], capture_output=True, text=True, check=False
+        )
+        assert proc.returncode == 0, proc.stderr
+    finally:
+        os.unlink(js_path)
+
+
+def test_interval_refresh_loop_sweeps_and_stops(tmp_path, monkeypatch):
+    """#43 trigger 4: with an interval set, mounted+enabled backends are swept
+    on the clock; close() ends the loop promptly (no shutdown hang)."""
+    refreshed = []
+
+    async def fake_refresh(b, *a, **k):
+        refreshed.append(b.name)
+        return {"status": "refreshed", "changed": False}
+
+    monkeypatch.setattr(admin, "refresh_and_reload", fake_refresh)
+    cfg = cl.GatewayConfig.model_validate(
+        {
+            "backends": [
+                {"name": "up", "transport": "stdio", "command": "/bin/x"},
+                {"name": "down", "transport": "stdio", "command": "/bin/y"},
+            ]
+        }
+    )
+    path = tmp_path / "config.toml"
+    cl.save(cfg, str(path))
+    log = structlog.get_logger("test")
+
+    async def go():
+        ar = server._AutoRefresh(1, str(path), {"up": object()}, {}, log)
+        ar.interval = 0.05  # fast clock for the test
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(ar.interval_loop)
+            with anyio.fail_after(2):
+                while not refreshed:
+                    await anyio.sleep(0.01)
+            ar.close()  # must end the loop; the task group then drains
+
+    anyio.run(go)
+    assert refreshed and set(refreshed) == {"up"}  # only mounted+enabled swept

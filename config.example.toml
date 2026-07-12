@@ -5,6 +5,19 @@
 host = "127.0.0.1"          # bind loopback only — never 0.0.0.0
 port = 9100
 log_file = "~/.local/state/mcp-gateway/gateway.log"
+# introspect_interval = 900 # seconds between scheduled re-captures of every
+#                           # backend's tool list. 0 / absent = OFF (default):
+#                           # the event-driven refreshes — post-(re)connect,
+#                           # tools/list_changed, admin page load — cover
+#                           # everything but a long-lived remote backend that
+#                           # hot-swaps tools silently (#43).
+
+# Optional defense-in-depth (#26): require this bearer token on every backend
+# MCP endpoint (/admin, /health, /ready stay open). The bind is loopback-only
+# already; this additionally shuts out curious local processes. ${ENV} ref,
+# resolved once at startup. Claude Code passes it at registration:
+#   claude mcp add --transport http --header "Authorization: Bearer ${MCP_GATEWAY_TOKEN}" gateway-<name> http://127.0.0.1:9100/<name>/mcp
+# bearer_token = "${MCP_GATEWAY_TOKEN}"
 
 # ===========================================================================
 # A backend MCP server. Repeat the [[backends]] block per backend.
@@ -12,8 +25,12 @@ log_file = "~/.local/state/mcp-gateway/gateway.log"
 # transport = "stdio" -> needs `command` (+ optional args, env)
 # ===========================================================================
 [[backends]]
-name = "exa"                       # backend id; also the tool-name prefix
-                                   # when >1 backend (exa_web_search, ...)
+name = "exa"                       # routing identity: drives the /exa/mcp
+                                   # endpoint + the gateway-exa Claude Code
+                                   # registration. Renaming it is a topology
+                                   # change (admin "Rename…", #44): restart +
+                                   # CC re-registration. Cosmetic label ->
+                                   # display_name instead (#42).
 transport = "http"
 url = "https://your-exa-endpoint/mcp"
 auth_header = "Authorization"      # optional; set BOTH or NEITHER
@@ -56,6 +73,15 @@ stateless = true                   # parsed; shared-session reuse is a
     [[backends.tools.params]]
     original = "internal_flag"
     hide = true                    # remove this param from the schema
+
+    [[backends.tools.params]]
+    original = "api_mode"
+    hide = true                    # hidden from Claude…
+    default = "strict"             # …but the gateway injects this value on
+                                   # every call (#35). Scalar only (str/int/
+                                   # float/bool). Required params can only be
+                                   # hidden WITH a default; optional params
+                                   # may take a default without hiding.
 
 # A local stdio backend looks like this:
 # [[backends]]

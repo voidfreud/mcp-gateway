@@ -4,9 +4,12 @@ apply_tool_override (store iff differs), and build_state merge."""
 from __future__ import annotations
 
 import json
+import re
 import string
 
+import anyio
 import pytest
+import structlog
 from hypothesis import given
 from hypothesis import strategies as st
 
@@ -565,6 +568,122 @@ def test_apply_required_param_not_hidden_ok(defaults_dir):
     assert p.name == "repo" and p.hide is False
 
 
+# --- #35: injected param default — hide a required param safely --------------
+
+
+def _param_payload(param="repoName", **fields):
+    return {
+        "tool_original": "t",
+        "override": {
+            "enabled": True,
+            "params": [
+                {"original": param, "name": None, "description": None, **fields}
+            ],
+        },
+    }
+
+
+def test_apply_hide_required_with_default_ok(defaults_dir):
+    _write_defaults(
+        defaults_dir,
+        "b",
+        "t",
+        params=[{"original": "repoName", "description": "d", "required": True}],
+    )
+    cfg = _single_cfg()
+    admin.apply_tool_override(
+        cfg, "b", _param_payload(hide=True, default="acme/widgets")
+    )
+    p = cfg.backends[0].tools[0].params[0]
+    assert p.hide is True and p.default == "acme/widgets"
+
+
+def test_apply_hide_required_without_default_names_the_fix(defaults_dir):
+    _write_defaults(
+        defaults_dir,
+        "b",
+        "t",
+        params=[{"original": "repoName", "description": "d", "required": True}],
+    )
+    cfg = _single_cfg()
+    with pytest.raises(cl.ConfigError, match="injected default"):
+        admin.apply_tool_override(cfg, "b", _param_payload(hide=True))
+
+
+def test_apply_default_alone_is_an_override(defaults_dir):
+    # a default WITHOUT hide is stored too (the param becomes optional for
+    # Claude; the backend gets the value when Claude omits it)
+    _write_defaults(
+        defaults_dir,
+        "b",
+        "t",
+        params=[{"original": "page", "description": "d", "required": False}],
+    )
+    cfg = _single_cfg()
+    admin.apply_tool_override(cfg, "b", _param_payload("page", hide=False, default=3))
+    p = cfg.backends[0].tools[0].params[0]
+    assert p.default == 3 and p.hide is False
+
+
+def test_apply_empty_string_default_stores_nothing(defaults_dir):
+    # the UI's cleared field sends "" -> no injection, no override entry
+    _write_defaults(
+        defaults_dir,
+        "b",
+        "t",
+        params=[{"original": "page", "description": "d", "required": False}],
+    )
+    cfg = _single_cfg()
+    admin.apply_tool_override(cfg, "b", _param_payload("page", hide=False, default=""))
+    assert cfg.backends[0].tools == []
+
+
+def test_apply_non_scalar_default_rejected(defaults_dir):
+    _write_defaults(
+        defaults_dir,
+        "b",
+        "t",
+        params=[{"original": "page", "description": "d", "required": False}],
+    )
+    cfg = _single_cfg()
+    with pytest.raises(cl.ConfigError, match="string, number, or boolean"):
+        admin.apply_tool_override(
+            cfg, "b", _param_payload("page", hide=False, default=[1, 2])
+        )
+    assert cfg.backends[0].tools == []
+
+
+def test_build_state_surfaces_param_default(defaults_dir):
+    _write_defaults(
+        defaults_dir,
+        "b",
+        "t",
+        params=[{"original": "page", "description": "d", "required": False}],
+    )
+    cfg = _single_cfg()
+    admin.apply_tool_override(cfg, "b", _param_payload("page", hide=True, default=7))
+    params = admin.build_state(cfg)["backends"][0]["tools"][0]["params"]
+    assert params[0]["default"] == 7 and params[0]["hide"] is True
+
+
+def test_export_import_round_trips_param_default(defaults_dir):
+    _write_defaults(
+        defaults_dir,
+        "b",
+        "t",
+        params=[{"original": "repoName", "description": "d", "required": True}],
+    )
+    cfg = _single_cfg()
+    admin.apply_tool_override(cfg, "b", _param_payload(hide=True, default=True))
+    bundle = admin.export_settings(cfg)
+    assert bundle["backends"]["b"]["tools"]["t"]["params"][0]["default"] is True
+    cfg2 = _single_cfg()
+    affected, errors = admin.import_settings(cfg2, bundle)
+    assert errors == [] and affected == ["b"]
+    p = cfg2.backends[0].tools[0].params[0]
+    assert p.hide is True and p.default is True
+
+
 # --- read-only schema surface (issue #2) -----------------------------------
 # The wire tools/list carries outputSchema, _meta (FastMCP tags + our
 # anthropic/alwaysLoad pin), and ToolAnnotations. capture_defaults needs a live
@@ -720,6 +839,133 @@ def test_duplicate_description_rejected(defaults_dir):
         )
 
 
+# --- #22 opt-in collision auto-uniquify -------------------------------------
+
+# Full-width name strategy: the whole legal charset up to the 64-char cap, so
+# the property exercises the trim-to-fit branch too.
+name64 = st.text(
+    alphabet=string.ascii_letters + string.digits + "_-", min_size=1, max_size=64
+)
+
+
+def test_uniquify_appends_2_then_3():
+    assert admin.uniquify_name("t", set()) == "t"  # no collision -> untouched
+    assert admin.uniquify_name("t", {"t"}) == "t_2"
+    assert admin.uniquify_name("t", {"t", "t_2"}) == "t_3"
+    assert admin.uniquify_name("t", {"t", "t_2", "t_3"}) == "t_4"
+
+
+def test_uniquify_trims_base_to_keep_64_char_cap():
+    base = "a" * 64
+    assert admin.uniquify_name(base, {base}) == "a" * 62 + "_2"
+    # the trimmed _2 also taken -> rolls to _3, still exactly at the cap
+    assert admin.uniquify_name(base, {base, "a" * 62 + "_2"}) == "a" * 62 + "_3"
+
+
+@given(base=name64, taken=st.sets(name64, max_size=20))
+def test_uniquify_unique_valid_deterministic(base, taken):
+    out = admin.uniquify_name(base, taken)
+    assert out not in taken
+    assert re.fullmatch(r"[A-Za-z0-9_-]{1,64}", out)  # the _NAME_RE rule holds
+    assert out == admin.uniquify_name(base, taken)  # deterministic
+    if base not in taken:
+        assert out == base  # never renames a non-colliding name
+
+
+def test_apply_uniquify_flag_stores_suffixed_name(defaults_dir):
+    _write_defaults_multi(defaults_dir, "b", [("t1", "d1"), ("t2", "d2")])
+    cfg = _single_cfg()
+    final = admin.apply_tool_override(
+        cfg,
+        "b",
+        {
+            "tool_original": "t1",
+            "on_collision": "uniquify",
+            "override": {"name": "t2", "enabled": True, "params": []},
+        },
+    )
+    assert final == "t2_2"
+    assert cfg.backends[0].tools[0].name == "t2_2"
+
+
+def test_apply_uniquify_flag_no_collision_returns_none(defaults_dir):
+    # flag present but nothing collides -> stored verbatim, no uniquified name
+    _write_defaults_multi(defaults_dir, "b", [("t1", "d1"), ("t2", "d2")])
+    cfg = _single_cfg()
+    final = admin.apply_tool_override(
+        cfg,
+        "b",
+        {
+            "tool_original": "t1",
+            "on_collision": "uniquify",
+            "override": {"name": "fresh", "enabled": True, "params": []},
+        },
+    )
+    assert final is None
+    assert cfg.backends[0].tools[0].name == "fresh"
+
+
+def test_apply_without_flag_still_rejects_collision(defaults_dir):
+    # the default (no on_collision key) stays exactly today's strict reject
+    _write_defaults_multi(defaults_dir, "b", [("t1", "d1"), ("t2", "d2")])
+    cfg = _single_cfg()
+    with pytest.raises(cl.ConfigError, match="already used"):
+        admin.apply_tool_override(
+            cfg,
+            "b",
+            {
+                "tool_original": "t1",
+                "override": {"name": "t2", "enabled": True, "params": []},
+            },
+        )
+
+
+def test_apply_uniquify_flag_keeps_description_collision_rejected(defaults_dir):
+    # uniquifying a DESCRIPTION makes no sense — it rejects even with the flag
+    _write_defaults_multi(defaults_dir, "b", [("t1", "d1"), ("t2", "SHARED DESC")])
+    cfg = _single_cfg()
+    with pytest.raises(cl.ConfigError, match="identical"):
+        admin.apply_tool_override(
+            cfg,
+            "b",
+            {
+                "tool_original": "t1",
+                "on_collision": "uniquify",
+                "override": {
+                    "description": "SHARED DESC",
+                    "enabled": True,
+                    "params": [],
+                },
+            },
+        )
+
+
+def test_apply_uniquify_skips_names_of_other_overrides(defaults_dir):
+    # taken = EFFECTIVE names: t2 already renamed to "x", so t1 -> "x" lands "x_2"
+    _write_defaults_multi(defaults_dir, "b", [("t1", "d1"), ("t2", "d2")])
+    cfg = _single_cfg()
+    admin.apply_tool_override(
+        cfg,
+        "b",
+        {
+            "tool_original": "t2",
+            "override": {"name": "x", "enabled": True, "params": []},
+        },
+    )
+    final = admin.apply_tool_override(
+        cfg,
+        "b",
+        {
+            "tool_original": "t1",
+            "on_collision": "uniquify",
+            "override": {"name": "x", "enabled": True, "params": []},
+        },
+    )
+    assert final == "x_2"
+    t1 = next(t for t in cfg.backends[0].tools if t.original == "t1")
+    assert t1.name == "x_2"
+
+
 def test_cross_backend_same_broadcast_name_ok(defaults_dir):
     # Two backends, each its own endpoint/MCP server now: renaming one backend's
     # tool to match a tool name in ANOTHER backend must NOT collide.
@@ -847,6 +1093,59 @@ def test_build_state_includes_endpoint(defaults_dir):
 # --- #79 effective_tools scoping (per-backend collision check) --------------
 
 
+# --- #45 claude_mcp_command (pure argv builder) ------------------------------
+
+
+@pytest.mark.parametrize("scope", ["local", "user", "project"])
+def test_claude_mcp_command_add_argv(scope):
+    url = "http://127.0.0.1:9100/b/mcp"
+    assert admin.claude_mcp_command("add", "b", url=url, scope=scope) == [
+        "claude",
+        "mcp",
+        "add",
+        "--transport",
+        "http",
+        "--scope",
+        scope,
+        "gateway-b",
+        url,
+    ]
+
+
+@pytest.mark.parametrize("scope", ["local", "user", "project"])
+def test_claude_mcp_command_remove_argv(scope):
+    # remove takes no url — it only needs the registration name
+    assert admin.claude_mcp_command("remove", "b", scope=scope) == [
+        "claude",
+        "mcp",
+        "remove",
+        "--scope",
+        scope,
+        "gateway-b",
+    ]
+
+
+def test_claude_mcp_command_default_scope_is_local():
+    argv = admin.claude_mcp_command("remove", "b")
+    assert argv[argv.index("--scope") + 1] == "local"
+
+
+@pytest.mark.parametrize("bad", ["global", "LOCAL", "", "workspace"])
+def test_claude_mcp_command_rejects_bad_scope(bad):
+    with pytest.raises(cl.ConfigError, match="scope"):
+        admin.claude_mcp_command("add", "b", url="http://h/mcp", scope=bad)
+
+
+def test_claude_mcp_command_rejects_unknown_action():
+    with pytest.raises(cl.ConfigError, match="action"):
+        admin.claude_mcp_command("list", "b")
+
+
+def test_claude_mcp_command_add_requires_url():
+    with pytest.raises(cl.ConfigError, match="url"):
+        admin.claude_mcp_command("add", "b")
+
+
 def test_effective_tools_scopes_to_one_backend(defaults_dir):
     _write_defaults(defaults_dir, "b1", "t1")
     _write_defaults(defaults_dir, "b2", "t2")
@@ -860,3 +1159,126 @@ def test_effective_tools_scopes_to_one_backend(defaults_dir):
     )
     assert {t["backend"] for t in admin.effective_tools(cfg, "b1")} == {"b1"}
     assert {t["backend"] for t in admin.effective_tools(cfg)} == {"b1", "b2"}
+
+
+# --- #43: throttled baseline refresh -----------------------------------------
+
+
+def _fake_capture(tools=("t1",), instructions=None):
+    async def capture(b):
+        return {
+            "backend": b.name,
+            "captured_at": 0,
+            "instructions": instructions,
+            "server_info": None,
+            "capabilities": None,
+            "tools": [
+                {"original": t, "title": None, "description": "d", "params": []}
+                for t in tools
+            ],
+        }
+
+    return capture
+
+
+def _b(name="b"):
+    return cl.Backend(name=name, transport="stdio", command="/bin/x")
+
+
+def test_refresh_defaults_captures_and_reports_delta(defaults_dir, monkeypatch):
+    _write_defaults(defaults_dir, "b", "t1")
+    monkeypatch.setattr(admin, "capture_defaults", _fake_capture(("t1", "t2")))
+    log = structlog.get_logger("test")
+    res = anyio.run(lambda: admin.refresh_defaults(_b(), log))
+    assert res["status"] == "refreshed"
+    assert res["added"] == ["t2"] and res["removed"] == []
+    assert res["changed"] is True
+    # the baseline file was rewritten
+    assert {t["original"] for t in admin.load_defaults("b")["tools"]} == {"t1", "t2"}
+
+
+def test_refresh_defaults_unchanged_is_not_changed(defaults_dir, monkeypatch):
+    _write_defaults(defaults_dir, "b", "t1")
+    monkeypatch.setattr(admin, "capture_defaults", _fake_capture(("t1",)))
+    log = structlog.get_logger("test")
+    res = anyio.run(lambda: admin.refresh_defaults(_b(), log))
+    assert res["status"] == "refreshed" and res["changed"] is False
+
+
+def test_refresh_defaults_throttles_second_call(defaults_dir, monkeypatch):
+    _write_defaults(defaults_dir, "b", "t1")
+    calls = []
+
+    async def capture(b):
+        calls.append(b.name)
+        return await _fake_capture(("t1",))(b)
+
+    monkeypatch.setattr(admin, "capture_defaults", capture)
+    log = structlog.get_logger("test")
+
+    async def go():
+        first = await admin.refresh_defaults(_b(), log)
+        second = await admin.refresh_defaults(_b(), log)
+        forced = await admin.refresh_defaults(_b(), log, force=True)
+        return first, second, forced
+
+    first, second, forced = anyio.run(go)
+    assert first["status"] == "refreshed"
+    assert second["status"] == "throttled"
+    assert forced["status"] == "refreshed"  # manual Re-inspect bypasses
+    assert calls == ["b", "b"]
+
+
+def test_refresh_defaults_error_keeps_throttle(defaults_dir, monkeypatch):
+    # a down backend is retried at the throttle cadence, not on every trigger
+    async def capture(b):
+        raise RuntimeError("down")
+
+    monkeypatch.setattr(admin, "capture_defaults", capture)
+    log = structlog.get_logger("test")
+
+    async def go():
+        return (
+            await admin.refresh_defaults(_b(), log),
+            await admin.refresh_defaults(_b(), log),
+        )
+
+    first, second = anyio.run(go)
+    assert first["status"] == "error" and "down" in first["error"]
+    assert second["status"] == "throttled"
+
+
+def test_refresh_and_reload_hot_reloads_only_on_change(
+    defaults_dir, tmp_path, monkeypatch
+):
+    _write_defaults(defaults_dir, "b", "t1")
+    cfg = _single_cfg()
+    path = tmp_path / "config.toml"
+    cl.save(cfg, str(path))
+    reloads = []
+    monkeypatch.setattr(admin, "hot_reload", lambda *a, **k: reloads.append(a[3]))
+    log = structlog.get_logger("test")
+
+    monkeypatch.setattr(admin, "capture_defaults", _fake_capture(("t1",)))
+    res = anyio.run(
+        lambda: admin.refresh_and_reload(_b(), str(path), {}, {}, log, force=True)
+    )
+    assert res["changed"] is False and reloads == []
+
+    monkeypatch.setattr(admin, "capture_defaults", _fake_capture(("t1", "t2")))
+    res = anyio.run(
+        lambda: admin.refresh_and_reload(_b(), str(path), {}, {}, log, force=True)
+    )
+    assert res["changed"] is True and reloads == ["b"]
+
+
+def test_refresh_defaults_instructions_change_counts_as_changed(
+    defaults_dir, monkeypatch
+):
+    _write_defaults(defaults_dir, "b", "t1")  # stub has no "instructions" key
+    monkeypatch.setattr(
+        admin, "capture_defaults", _fake_capture(("t1",), instructions="new blurb")
+    )
+    log = structlog.get_logger("test")
+    res = anyio.run(lambda: admin.refresh_defaults(_b(), log))
+    assert res["changed"] is True

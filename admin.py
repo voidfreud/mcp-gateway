@@ -19,6 +19,7 @@ import importlib.metadata
 import json
 import os
 import re
+import shutil
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -44,6 +45,21 @@ LAUNCHD_LABEL = "com.void.mcp-gateway"
 # A hung/slow backend must not block daemon startup or an admin import (#85).
 # Generous enough for a cold stdio backend (e.g. gitnexus' ~13s re-index).
 CAPTURE_TIMEOUT = 30.0
+
+# #43: minimum gap between automatic re-introspections of one backend, so
+# reconnect storms / rapid dashboard reloads can't hammer a backend. Manual
+# Re-inspect (force=True) bypasses it; a tools/list_changed push uses a short
+# floor instead (LIST_CHANGED_THROTTLE) since the backend itself asked.
+REFRESH_THROTTLE = 300.0
+LIST_CHANGED_THROTTLE = 2.0
+
+# #23: upper bound on one backend's liveness probe for /admin/api/status.
+STATUS_TIMEOUT = 5.0
+
+# #43: per-backend timestamp of the last (attempted) auto-refresh. In-process
+# only — resets on restart, which is exactly right: a fresh daemon means fresh
+# backend connections, whose baselines should re-capture once.
+_last_refresh: dict[str, float] = {}
 
 
 @functools.cache
@@ -201,9 +217,64 @@ async def ensure_defaults(cfg: GatewayConfig, log, force: str | None = None) -> 
                 continue
         try:
             save_defaults(await capture_defaults(b))
+            # stamp the #43 throttle: a just-captured baseline is fresh, the
+            # post-mount auto-refresh shouldn't immediately re-capture it
+            _last_refresh[b.name] = time.monotonic()
             log.info("defaults_captured", backend=b.name)
         except Exception as exc:  # noqa: BLE001
             log.warning("defaults_capture_failed", backend=b.name, error=str(exc))
+
+
+async def refresh_defaults(
+    b: Backend, log, *, force: bool = False, throttle: float = REFRESH_THROTTLE
+) -> dict:
+    """Re-capture ONE backend's baseline, throttled (#43). Returns a result
+    dict: ``{"status": "refreshed"|"throttled"|"error", ...}``; on refresh it
+    carries ``added``/``removed`` (original tool names vs the previous baseline)
+    and ``changed`` (tools OR server instructions differ).
+
+    Override safety: this only rewrites the immutable baseline; user overrides
+    are stored separately as diffs and merged by original name, so a refresh
+    never clobbers edits — new tools appear un-overridden, removed tools drop.
+
+    The throttle stamp is set BEFORE the capture await (storms coalesce) and
+    kept on failure (a down backend is retried at the throttle cadence, not on
+    every trigger).
+    """
+    now = time.monotonic()
+    last = _last_refresh.get(b.name)
+    if not force and last is not None and now - last < throttle:
+        return {"status": "throttled"}
+    _last_refresh[b.name] = now
+    old = load_defaults(b.name)
+    try:
+        data = await capture_defaults(b)
+    except Exception as exc:  # noqa: BLE001 — a down backend is a result, not a crash
+        log.warning("defaults_refresh_failed", backend=b.name, error=str(exc))
+        return {"status": "error", "error": str(exc)}
+    save_defaults(data)
+    old_names = {t["original"] for t in (old or {}).get("tools", [])}
+    new_names = {t["original"] for t in data.get("tools", [])}
+    added = sorted(new_names - old_names)
+    removed = sorted(old_names - new_names)
+    changed = bool(
+        added or removed or (old or {}).get("instructions") != data.get("instructions")
+    )
+    if changed:
+        log.info(
+            "defaults_refreshed",
+            backend=b.name,
+            tools=len(new_names),
+            added=added,
+            removed=removed,
+        )
+    return {
+        "status": "refreshed",
+        "added": added,
+        "removed": removed,
+        "changed": changed,
+        "tools": len(new_names),
+    }
 
 
 def backup_config(config_path: str) -> None:
@@ -323,6 +394,23 @@ def check_no_collision(
             )
 
 
+def uniquify_name(base: str, taken: set[str]) -> str:
+    """Deterministically suffix *base* (``_2``, then ``_3``, …) until it is not
+    in *taken* (#22). The result always satisfies the ``[A-Za-z0-9_-]{1,64}``
+    name rule: when appending the suffix would overflow 64 chars, the base is
+    trimmed so the suffix fits. Returns *base* unchanged when it doesn't
+    collide."""
+    if base not in taken:
+        return base
+    n = 2
+    while True:
+        suffix = f"_{n}"
+        candidate = base[: 64 - len(suffix)] + suffix
+        if candidate not in taken:
+            return candidate
+        n += 1
+
+
 def build_state(cfg: GatewayConfig) -> dict:
     backends = []
     for b in cfg.backends:
@@ -348,6 +436,8 @@ def build_state(cfg: GatewayConfig) -> dict:
                         "name": p.name if p else None,
                         "description": p.description if p else None,
                         "hide": p.hide if p else False,
+                        # injected fixed value (#35) — None = no injection
+                        "default": p.default if p else None,
                     }
                 )
             tools_state.append(
@@ -437,6 +527,23 @@ def _clean(v):
     return v
 
 
+def _clean_param_default(v, param: str):
+    """Validate an injected param default (#35): scalars only, mirroring
+    FastMCP ``ArgTransformConfig.default`` (str | int | float | bool). An empty
+    string means "no default" (the UI's cleared field); anything non-scalar is
+    a clean 400 instead of a pydantic 500 downstream."""
+    if v is None:
+        return None
+    if isinstance(v, str):
+        return _clean(v)
+    if isinstance(v, (int, float, bool)):
+        return v
+    raise cl.ConfigError(
+        f"parameter {param!r}: injected default must be a string, number, or "
+        f"boolean (got {type(v).__name__})"
+    )
+
+
 _NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 # Claude Code truncates each MCP server's `instructions` at ~2KB (issue #29). The
@@ -471,7 +578,7 @@ def _override_vs_default(value, default) -> str | None:
     return v
 
 
-def apply_tool_override(cfg: GatewayConfig, backend: str, payload: dict) -> None:
+def apply_tool_override(cfg: GatewayConfig, backend: str, payload: dict) -> str | None:
     """Upsert one tool's override from a UI payload, diffing against defaults.
 
     Every editable field arrives prefilled with its effective value; we only
@@ -482,6 +589,10 @@ def apply_tool_override(cfg: GatewayConfig, backend: str, payload: dict) -> None
     partial PUT (e.g. description only) can't silently resurrect a tool the UI
     disabled. The UI always sends every field, so it is unaffected; to reset a
     field explicitly, send its default value.
+
+    Returns the final broadcast name when the opt-in ``"on_collision":
+    "uniquify"`` flag (payload top level, #22) auto-suffixed a colliding
+    rename, else None (the strict-reject default behaviour is unchanged).
     """
     b = next((x for x in cfg.backends if x.name == backend), None)
     if b is None:
@@ -527,17 +638,26 @@ def apply_tool_override(cfg: GatewayConfig, backend: str, payload: dict) -> None
         pdesc = _override_vs_default(p.get("description"), dp.get("description"))
         _validate_name(pname, "parameter name")
         hide = bool(p.get("hide", False))
+        default = _clean_param_default(p.get("default"), po)
         # Correctness guardrail (alongside check_no_collision): a param the
-        # backend marks required can't be hidden — Claude could never supply it,
-        # so every call would break. (No param-default injection exists yet.)
-        if hide and dp.get("required", False):
+        # backend marks required can't be hidden UNLESS a fixed default is
+        # injected (#35) — without one Claude could never supply it, so every
+        # call would break.
+        if hide and dp.get("required", False) and default is None:
             raise cl.ConfigError(
                 f"parameter {po!r} is required by the backend — hiding it "
-                f"would break the tool"
+                f"would break the tool; set an injected default value to hide "
+                f"it safely"
             )
-        if pname or pdesc or hide:
+        if pname or pdesc or hide or default is not None:
             params.append(
-                ParamOverride(original=po, name=pname, description=pdesc, hide=hide)
+                ParamOverride(
+                    original=po,
+                    name=pname,
+                    description=pdesc,
+                    hide=hide,
+                    default=default,
+                )
             )
 
     if "params" not in ov and prev is not None:
@@ -559,14 +679,32 @@ def apply_tool_override(cfg: GatewayConfig, backend: str, payload: dict) -> None
         always_load=always_load,
         params=params,
     )
+    # Opt-in escape hatch (#22): `"on_collision": "uniquify"` at the payload
+    # top level suffixes a colliding broadcast NAME (_2, _3, …) into uniqueness
+    # instead of rejecting. Description collisions still reject below — a
+    # duplicated description can't be "uniquified" into something meaningful.
+    uniquified: str | None = None
+    if payload.get("on_collision") == "uniquify" and new.enabled:
+        eff_name = new.name or original
+        taken = {
+            t["name"]
+            for t in effective_tools(cfg, backend)
+            if t["original"] != original
+        }
+        if eff_name in taken:
+            final = uniquify_name(eff_name, taken)
+            # equal-to-default still inherits (config stays minimal)
+            new.name = final if final != default_name else None
+            uniquified = final
     has_override = bool(
-        name or title or description or not enabled or always_load or params
+        new.name or title or description or not enabled or always_load or params
     )
     # Reject a rename/description that would collide with another broadcast tool.
     check_no_collision(cfg, backend, original, new)
     b.tools = [t for t in b.tools if t.original != original]
     if has_override:
         b.tools.append(new)
+    return uniquified
 
 
 # ---------------------------------------------------------------------------
@@ -611,6 +749,7 @@ def export_settings(  # noqa: PLR0912 — one branch per serialized override fie
                         **({"name": p.name} if p.name else {}),
                         **({"description": p.description} if p.description else {}),
                         **({"hide": True} if p.hide else {}),
+                        **({"default": p.default} if p.default is not None else {}),
                     }
                     for p in t.params
                 ]
@@ -749,6 +888,27 @@ def hot_reload(
     log.info("hot_reload", backend=backend)
 
 
+async def refresh_and_reload(  # noqa: PLR0913 — mirrors hot_reload's plumbing args
+    b: Backend,
+    config_path: str,
+    registry: dict,
+    holders: dict,
+    log,
+    *,
+    force: bool = False,
+    throttle: float = REFRESH_THROTTLE,
+) -> dict:
+    """Re-capture one backend's baseline and, if it changed, hot-reload its
+    live transforms + instructions so pins/enabled reconcile with the fresh
+    tool list (#43). The shared tail of every auto-refresh trigger (post-mount,
+    tools/list_changed, dashboard load, interval, manual Re-inspect)."""
+    res = await refresh_defaults(b, log, force=force, throttle=throttle)
+    if res.get("changed"):
+        cfg = cl.load(config_path)
+        hot_reload(registry, holders, cfg, b.name, log)
+    return res
+
+
 def under_launchd() -> bool:
     """True iff *this* process is the one launchd manages, i.e. a kickstart would
     actually restart us. We ask launchctl for the loaded job's pid and compare it
@@ -797,6 +957,67 @@ def restart_daemon(log) -> None:
             log.info("restart_done", target=target)
     except Exception as exc:  # noqa: BLE001
         log.warning("restart_error", error=str(exc))
+
+
+# ---------------------------------------------------------------------------
+# Claude Code registration (#45) — via the `claude` CLI, never its config files
+# ---------------------------------------------------------------------------
+
+# `claude mcp add/remove` scopes (see `claude mcp add --help`).
+CLAUDE_SCOPES = ("local", "user", "project")
+# Upper bound on one CLI invocation; `claude mcp` is local bookkeeping, so a
+# longer hang means a broken install — surface it, don't wait on it.
+CLAUDE_CLI_TIMEOUT = 30
+
+
+def claude_mcp_command(
+    action: str,
+    name: str,
+    url: str | None = None,
+    scope: str = "local",
+    bearer_token: str | None = None,
+) -> list[str]:
+    """Argv to register/deregister ONE backend in Claude Code via the CLI.
+
+    Registration name convention: ``gateway-<backend name>``; the endpoint is
+    the backend's own gateway mount (``http://host:port/<name>/mcp``). Pure —
+    builds the argv only (the route runs it), so the exact command is testable
+    and surfaceable to the UI.
+
+    *bearer_token* (#26 × #45): when the gateway requires a bearer token, a
+    registration without it would 401 on every call — so `add` carries it via
+    ``--header``, RESOLVED (the CLI stores the literal header in Claude's
+    config; the route redacts it from anything echoed back to the browser).
+    """
+    if scope not in CLAUDE_SCOPES:
+        raise cl.ConfigError(
+            f"invalid scope {scope!r}: use one of {', '.join(CLAUDE_SCOPES)}"
+        )
+    registration = f"gateway-{name}"
+    if action == "add":
+        if not url:
+            raise cl.ConfigError("register needs the backend's endpoint url")
+        argv = [
+            "claude",
+            "mcp",
+            "add",
+            "--transport",
+            "http",
+            "--scope",
+            scope,
+            registration,
+            url,
+        ]
+        # --header is a VARIADIC option (like -e/--env): placed before the
+        # positionals it swallows <name> <url> and the CLI errors with
+        # "missing required argument 'name'" — found live (#123). The CLI's
+        # own --help example puts --header last; do the same.
+        if bearer_token:
+            argv += ["--header", f"Authorization: Bearer {bearer_token}"]
+        return argv
+    if action == "remove":
+        return ["claude", "mcp", "remove", "--scope", scope, registration]
+    raise cl.ConfigError(f"unknown action {action!r} (use add or remove)")
 
 
 # ---------------------------------------------------------------------------
@@ -916,11 +1137,16 @@ def _settings_routes(ctx: _AdminCtx) -> list[Route]:
         payload = await request.json()
         cfg = ctx.load()
         try:
-            apply_tool_override(cfg, payload["backend"], payload)
+            uniquified = apply_tool_override(cfg, payload["backend"], payload)
         except (cl.ConfigError, KeyError) as exc:
             return _err(str(exc))
         ctx.commit(cfg, payload["backend"])
-        return JSONResponse({"ok": True, "reloaded": "in-process"})
+        out: dict = {"ok": True, "reloaded": "in-process"}
+        if uniquified is not None:
+            # #22: the opt-in uniquify stored a suffixed name — hand the final
+            # name back so the UI can reflect what actually shipped.
+            out.update({"name": uniquified, "uniquified": True})
+        return JSONResponse(out)
 
     async def reset_tool(request: Request):
         """Clear all overrides for one tool (revert to the backend default)."""
@@ -986,7 +1212,8 @@ def _settings_routes(ctx: _AdminCtx) -> list[Route]:
 
 
 def _backend_routes(ctx: _AdminCtx) -> list[Route]:  # noqa: PLR0915 — statement count is the nested handlers; the group is cohesive
-    """Per-backend flags and topology: pin, enable, display name, add, remove."""
+    """Per-backend flags and topology: pin, enable, display name, rename,
+    add, remove."""
 
     async def pin_backend(request: Request):
         """Toggle per-backend always_load (pin all its tools upfront). Hot-reload —
@@ -1063,6 +1290,55 @@ def _backend_routes(ctx: _AdminCtx) -> list[Route]:  # noqa: PLR0915 — stateme
         ctx.commit(cfg)
         return JSONResponse({"ok": True})
 
+    async def rename_backend(request: Request):
+        """Hard-rename a backend (#44) — a REAL identity change, unlike the
+        cosmetic display_name (#42). ``name`` drives the endpoint mount
+        (``/{name}/mcp``), the Claude Code registration (``gateway-{name}``),
+        the config key, and the captured-defaults file — all move together.
+        Topology change → restart; the response carries old/new endpoint and
+        registration so the UI can say exactly what to reconfigure in
+        Claude Code."""
+        name = request.path_params["name"]
+        payload = await request.json()
+        value = payload.get("value")
+        new_name = value.strip() if isinstance(value, str) else ""
+        if not _NAME_RE.match(new_name):
+            return _err(
+                f"invalid backend name {new_name!r}: use only letters, digits, "
+                f"'_' or '-' (max 64 chars)"
+            )
+        cfg = ctx.load()
+        b = next((x for x in cfg.backends if x.name == name), None)
+        if b is None:
+            return _err("unknown backend")
+        if any(x.name == new_name for x in cfg.backends):
+            return _err(
+                f"backend name {new_name!r} already exists — pick a different one"
+            )
+        b.name = new_name  # display_name, tools, params — everything else rides
+        # Topology change: commit WITHOUT a hot-reload arg (the endpoint itself
+        # moves; the restart below rebuilds the mounts under the new name).
+        ctx.commit(cfg)
+        # Migrate the captured defaults (the immutable baseline) old → new so
+        # overrides keep diffing against it; tolerate a never-introspected
+        # backend (no file — the restart re-captures under the new name).
+        old_defaults = DEFAULTS_DIR / f"{name}.json"
+        if old_defaults.is_file():
+            data = json.loads(old_defaults.read_text(encoding="utf-8"))
+            data["backend"] = new_name
+            save_defaults(data)
+            old_defaults.unlink(missing_ok=True)
+        base = f"http://{cfg.host}:{cfg.port}"
+        return ctx.restart_response(
+            {
+                "backend": new_name,
+                "old_endpoint": f"{base}/{name}/mcp",
+                "new_endpoint": f"{base}/{new_name}/mcp",
+                "old_registration": f"gateway-{name}",
+                "new_registration": f"gateway-{new_name}",
+            }
+        )
+
     async def add_backend(request: Request):  # noqa: PLR0911 — one early return per validation/probe/mount outcome
         """Import a new backend MCP. Validates + introspects, then restarts."""
         payload = await request.json()
@@ -1090,6 +1366,7 @@ def _backend_routes(ctx: _AdminCtx) -> list[Route]:  # noqa: PLR0915 — stateme
         # taking config_lock, so a slow backend can't block other admin edits.
         try:
             save_defaults(await capture_defaults(b))
+            _last_refresh[b.name] = time.monotonic()  # fresh — see #43 throttle
         except Exception as exc:  # noqa: BLE001
             return JSONResponse(
                 {"ok": False, "error": f"could not connect to backend: {exc}"},
@@ -1151,6 +1428,11 @@ def _backend_routes(ctx: _AdminCtx) -> list[Route]:  # noqa: PLR0915 — stateme
             _needs_json(ctx.locked(set_display_name)),
             methods=["POST"],
         ),
+        Route(
+            "/admin/api/backend/{name}/rename",
+            _needs_json(ctx.locked(rename_backend)),
+            methods=["POST"],
+        ),
         # add_backend takes ctx.lock itself (probe stays outside the lock)
         Route("/admin/api/backend", _needs_json(add_backend), methods=["POST"]),
         Route(
@@ -1159,8 +1441,116 @@ def _backend_routes(ctx: _AdminCtx) -> list[Route]:  # noqa: PLR0915 — stateme
     ]
 
 
+async def admin_refresh(ctx: _AdminCtx, b: Backend, *, force: bool = False) -> dict:
+    """ctx-bound :func:`refresh_and_reload` (#43) for the admin routes."""
+    return await refresh_and_reload(
+        b, ctx.config_path, ctx.registry, ctx.holders, ctx.log, force=force
+    )
+
+
+def _claude_routes(ctx: _AdminCtx) -> list[Route]:
+    """One-click Claude Code registration (#45): shell out to `claude mcp
+    add/remove` for a backend's gateway endpoint (never edit Claude's config
+    files by hand). The CLI runs in a thread so the event loop stays free.
+    A CLI failure comes back as ``ok: false`` with its output at HTTP 200 (the
+    HTTP call itself succeeded); missing binary / bad scope are 400."""
+
+    async def _run_cli(argv: list[str], redact: str | None = None) -> JSONResponse:
+        try:
+            r = await asyncio.to_thread(
+                subprocess.run,
+                argv,
+                capture_output=True,
+                text=True,
+                timeout=CLAUDE_CLI_TIMEOUT,
+                check=False,  # a CLI failure is surfaced as ok:false, not raised
+            )
+            rc, stdout, stderr = r.returncode, r.stdout, r.stderr
+        except (subprocess.SubprocessError, OSError) as exc:
+            rc, stdout, stderr = -1, "", f"{type(exc).__name__}: {exc}"
+
+        def _hide(s: str) -> str:
+            # never echo the bearer token (#26) back to the browser
+            return s.replace(redact, "***") if redact else s
+
+        return JSONResponse(
+            {
+                "ok": rc == 0,
+                "exit": rc,
+                "stdout": _hide(stdout),
+                "stderr": _hide(stderr),
+                "command": _hide(" ".join(argv)),
+                "note": "Claude Code may need a reload/restart to pick up the change",
+            }
+        )
+
+    def _missing_cli() -> JSONResponse | None:
+        if shutil.which("claude") is None:
+            return _err(
+                "claude CLI not found on the daemon's PATH — install Claude "
+                "Code (or expose `claude` to the daemon's environment), then "
+                "retry"
+            )
+        return None
+
+    async def register_backend(request: Request):
+        """``claude mcp add`` for one backend as ``gateway-<name>``. Requires
+        the backend to exist in config so the registered URL is real."""
+        name = request.path_params["name"]
+        payload = await request.json()
+        scope = payload.get("scope") or "local"
+        cfg = ctx.load()
+        if not any(x.name == name for x in cfg.backends):
+            return _err("unknown backend")
+        missing = _missing_cli()
+        if missing is not None:
+            return missing
+        url = f"http://{cfg.host}:{cfg.port}/{name}/mcp"
+        try:
+            # #26 × #45: a bearer-protected gateway needs the header in the
+            # registration or every call would 401. Resolved once, redacted
+            # from the response.
+            token = cl.expand_env(cfg.bearer_token) if cfg.bearer_token else None
+            argv = claude_mcp_command(
+                "add", name, url=url, scope=scope, bearer_token=token
+            )
+        except cl.ConfigError as exc:
+            return _err(str(exc))
+        return await _run_cli(argv, redact=token)
+
+    async def deregister_backend(request: Request):
+        """``claude mcp remove`` for ``gateway-<name>``. Deliberately does NOT
+        require the backend to exist in config — this is the cleanup path after
+        a remove/rename, when the backend is already gone."""
+        name = request.path_params["name"]
+        payload = await request.json()
+        scope = payload.get("scope") or "local"
+        missing = _missing_cli()
+        if missing is not None:
+            return missing
+        try:
+            argv = claude_mcp_command("remove", name, scope=scope)
+        except cl.ConfigError as exc:
+            return _err(str(exc))
+        return await _run_cli(argv)
+
+    return [
+        Route(
+            "/admin/api/backend/{name}/register",
+            _needs_json(register_backend),
+            methods=["POST"],
+        ),
+        Route(
+            "/admin/api/backend/{name}/deregister",
+            _needs_json(deregister_backend),
+            methods=["POST"],
+        ),
+    ]
+
+
 def _ops_routes(ctx: _AdminCtx) -> list[Route]:
-    """Operational endpoints: mini-inspector, manual restart, re-introspect."""
+    """Operational endpoints: mini-inspector, manual restart, re-introspect,
+    liveness status (#23), and the dashboard-load refresh sweep (#43)."""
 
     async def restart_gateway(_request: Request):
         """Manual on-demand restart of the daemon (#56). Same launchd-gated
@@ -1215,15 +1605,69 @@ def _ops_routes(ctx: _AdminCtx) -> list[Route]:
         )
 
     async def reintrospect(request: Request):
+        """Manual Re-inspect: force a re-capture (bypasses the #43 throttle)
+        and hot-reload so pins/enabled reconcile with the fresh tool list.
+        Unlike the auto triggers, a failure here is surfaced (502), not just
+        logged — the user explicitly asked and deserves the answer."""
         name = request.path_params["name"]
         cfg = ctx.load()
-        await ensure_defaults(cfg, ctx.log, force=name)
-        return JSONResponse({"ok": True})
+        b = next((x for x in cfg.backends if x.name == name), None)
+        if b is None:
+            return _err("unknown backend")
+        res = await admin_refresh(ctx, b, force=True)
+        if res["status"] == "error":
+            return _err(f"introspection failed: {res['error']}", status=502)
+        return JSONResponse({"ok": True, **res})
+
+    async def get_status(_request: Request):
+        """#23: per-backend liveness — one concurrent probe per backend through
+        its LIVE mounted proxy (the same path Claude's list_tools takes), each
+        bounded by STATUS_TIMEOUT so a hung backend marks itself, not the UI."""
+
+        async def one(b: Backend) -> tuple[str, dict]:
+            if not b.enabled:
+                return b.name, {"state": "disabled"}
+            proxy = ctx.registry.get(b.name)
+            if proxy is None:
+                return b.name, {"state": "unmounted"}
+            started = time.perf_counter()
+            try:
+                async with asyncio.timeout(STATUS_TIMEOUT):
+                    async with Client(proxy) as c:
+                        tools = await c.list_tools()
+                return b.name, {
+                    "state": "ok",
+                    "ms": round((time.perf_counter() - started) * 1000, 1),
+                    "tools": len(tools),
+                }
+            except Exception as exc:  # noqa: BLE001 — the error IS the status
+                err = f"{type(exc).__name__}: {exc}"
+                return b.name, {"state": "error", "error": err}
+
+        cfg = ctx.load()
+        results = await asyncio.gather(*(one(b) for b in cfg.backends))
+        return JSONResponse({"backends": dict(results)})
+
+    async def refresh_all(_request: Request):
+        """#43 dashboard-load trigger: throttled re-introspect of every
+        enabled+mounted backend, concurrently and per-backend isolated — a
+        down/slow backend reports itself and never stalls the others."""
+
+        async def one(b: Backend) -> tuple[str, dict]:
+            if not b.enabled or b.name not in ctx.registry:
+                return b.name, {"status": "skipped"}
+            return b.name, await admin_refresh(ctx, b)
+
+        cfg = ctx.load()
+        results = await asyncio.gather(*(one(b) for b in cfg.backends))
+        return JSONResponse({"ok": True, "backends": dict(results)})
 
     return [
         Route("/admin/api/run", _needs_json(run_tool), methods=["POST"]),
         Route("/admin/api/restart", restart_gateway, methods=["POST"]),
         Route("/admin/api/introspect/{name}", reintrospect, methods=["POST"]),
+        Route("/admin/api/status", get_status, methods=["GET"]),
+        Route("/admin/api/refresh", refresh_all, methods=["POST"]),
     ]
 
 
@@ -1255,6 +1699,7 @@ def register(  # noqa: PLR0913 — public API; callers pass the lifespan plumbin
             *_general_routes(ctx),
             *_settings_routes(ctx),
             *_backend_routes(ctx),
+            *_claude_routes(ctx),
             *_ops_routes(ctx),
         ]
     )

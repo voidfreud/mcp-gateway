@@ -12,24 +12,27 @@ The gateway rewrites broadcast text and forwards calls untouched. Every lever, i
 | Pin tool upfront | `ToolOverride.always_load` | same `override` payload | hot-reload (meta only) |
 | Pin whole backend | `Backend.always_load` | `POST /admin/api/backend/{name}/pin` `{value}` | hot-reload |
 | Param description / hide / name | `ToolOverride.params[]` (`original`, `description`, `hide`, `name`) | inside the `override` payload | hot-reload |
+| Injected param default (#35) | `ToolOverride.params[].default` (scalar: str/int/float/bool) — the gateway injects it on every call; setting one is the ONLY way to hide a *required* param (hide without a default is rejected for required params) | same `params[]` entry (`{original, hide, default}`) | hot-reload |
 | Backend on/off | `Backend.enabled` | `POST /admin/api/backend/{name}/enabled` `{value}` | mounts/unmounts live |
 | Reset a tool to captured defaults | — | `POST /admin/api/reset` `{backend, tool_original}` | hot-reload |
 
 Deprecation heads-up: **param renaming (`params[].name`) is scheduled to stop being editable.** Don't build tuning on param renames — carry the fix in the param description instead. Tool broadcast names stay editable.
 
-Not levers: schemas (types/enums/required), annotations, response shapes — those are the backend's. When their text under-informs, compensate in the descriptions we do own.
+Not levers: schemas (types/enums/required), annotations, response shapes — those are the backend's. When their text under-informs, compensate in the descriptions we do own. Also not a tuning lever: hard-renaming a backend (#44, `POST /admin/api/backend/{name}/rename` `{value}`) is a topology op — the endpoint URL and the `gateway-<name>` Claude Code registration both change, the gateway restarts, and Claude Code must be re-registered (distinct from the cosmetic `display_name`, #42).
 
 ## Reading state
 
 - Effective surface + byte budgets: `surface.py` (see SKILL.md step 1).
-- Raw captured text as the backend shipped it: `~/.local/state/mcp-gateway/defaults/<backend>.json` (also `server_info`, `capabilities`).
+- Raw captured text as the backend shipped it: `~/.local/state/mcp-gateway/defaults/<backend>.json` (also `server_info`, `capabilities`). The baseline auto-refreshes (#43: post-(re)connect, backend `tools/list_changed`, admin page load, optional interval) — overrides are diffs by original name, so a refresh never clobbers edits; new tools appear un-overridden.
+- Per-backend liveness: `GET /admin/api/status` (#23) — `ok`/`error`/`unmounted`/`disabled` + latency, probed through the live proxy.
 - Everything at once, as the admin UI sees it: `GET http://127.0.0.1:9100/admin/api/state`.
 - Live probe of a real tool through the gateway (research use, respect read-onlyness): `POST /admin/api/run` `{backend, tool, args}`.
 
 ## Guardrails the app enforces
 
-- Broadcast names: `[A-Za-z0-9_-]`, unique per backend (each backend is its own endpoint — cross-backend name reuse is fine). Collision-checked on save; a deliberately-set description identical to a sibling's is also rejected.
+- Broadcast names: `[A-Za-z0-9_-]`, unique per backend (each backend is its own endpoint — cross-backend name reuse is fine). Collision-checked on save; opt-in escape hatch per save (#22): `"on_collision": "uniquify"` at the top level of the `PUT /admin/api/override` payload auto-suffixes a colliding name (`_2`, `_3`, …) instead of rejecting, and the response then carries the final `name` + `uniquified: true`. A deliberately-set description identical to a sibling's is always rejected (no uniquify for descriptions).
 - Overrides are stored as diffs against captured defaults — saving the default value stores nothing.
+- Hiding a param the backend marks *required* needs an injected `default` on that param (#35); without one the save is a 400. Non-required params hide freely.
 - All admin writes are lock-wrapped and the config save is atomic; edit through the API, not by hand-editing `config.toml` under a running daemon.
 
 ## The verify loop (not optional)

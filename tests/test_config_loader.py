@@ -84,6 +84,8 @@ def gw_config_dict(draw) -> dict:
         "log_file": "~/x.log",
         "backends": backends,
     }
+    if draw(st.booleans()):  # optional gateway bearer token (#26), stored as a ref
+        out["bearer_token"] = "${GW_TOKEN}"
     return out
 
 
@@ -426,6 +428,31 @@ def test_backend_instructions_survive_toml_roundtrip():
     assert reparsed.backends[0].instructions == cfg.backends[0].instructions
 
 
+# --- gateway bearer token (#26) ---------------------------------------------
+# The stored VALUE is a ${ENV} ref (like every secret); server._build_app
+# resolves it once at startup via expand_env — see tests/test_server.py.
+
+
+def test_bearer_token_roundtrips_toml():
+    cfg = cl.GatewayConfig.model_validate(
+        {
+            "bearer_token": "${MCP_GATEWAY_TOKEN}",
+            "backends": [{"name": "b", "transport": "stdio", "command": "/bin/x"}],
+        }
+    )
+    assert cl.to_raw(cfg)["bearer_token"] == "${MCP_GATEWAY_TOKEN}"
+    reparsed = cl.GatewayConfig.model_validate(tomllib.loads(cl.dump_toml(cfg)))
+    assert reparsed.bearer_token == "${MCP_GATEWAY_TOKEN}"
+
+
+def test_bearer_token_omitted_when_unset():
+    # default None -> the key never lands in config.toml (config stays minimal)
+    cfg = _one_backend()
+    assert cfg.bearer_token is None
+    assert "bearer_token" not in cl.to_raw(cfg)
+    assert "bearer_token" not in cl.dump_toml(cfg)
+
+
 # --- durable save ----------------------------------------------------------
 
 
@@ -699,3 +726,85 @@ def test_disabled_backend_broadcasts_no_instructions():
     assert cl.backend_instructions(b, {"b": "captured blurb"}) is None
     b.enabled = True
     assert cl.backend_instructions(b, {"b": "captured blurb"}) == "my override"
+
+
+# --- #35: injected param default -> ArgTransformConfig.default ---------------
+
+
+def _cfg_with_param(param: dict) -> cl.GatewayConfig:
+    return cl.GatewayConfig.model_validate(
+        {
+            "backends": [
+                {
+                    "name": "b",
+                    "transport": "stdio",
+                    "command": "/bin/x",
+                    "tools": [{"original": "t", "params": [param]}],
+                }
+            ]
+        }
+    )
+
+
+def test_param_default_maps_to_arg_transform():
+    cfg = _cfg_with_param({"original": "mode", "hide": True, "default": "loud"})
+    tr, _ = cl.build_transforms(cfg, cfg.backends[0])
+    arg = tr._transforms["t"].arguments["mode"]
+    assert arg.hide is True and arg.default == "loud"
+
+
+def test_param_without_default_leaves_arg_transform_unset():
+    # `default` must be ABSENT (exclude_unset) — an explicit None would differ
+    # from never-set in FastMCP's to_arg_transform.
+    cfg = _cfg_with_param({"original": "mode", "hide": True})
+    tr, _ = cl.build_transforms(cfg, cfg.backends[0])
+    arg = tr._transforms["t"].arguments["mode"]
+    assert "default" not in arg.model_dump(exclude_unset=True)
+
+
+def test_param_default_survives_toml_roundtrip():
+    for value in ("v", 3, 2.5, True):
+        cfg = _cfg_with_param({"original": "p", "default": value})
+        reparsed = cl.GatewayConfig.model_validate(tomllib.loads(cl.dump_toml(cfg)))
+        p = reparsed.backends[0].tools[0].params[0]
+        assert p.default == value and type(p.default) is type(value)
+
+
+def test_param_no_default_omitted_from_toml():
+    cfg = _cfg_with_param({"original": "p", "hide": True})
+    raw = cl.to_raw(cfg)
+    assert "default" not in raw["backends"][0]["tools"][0]["params"][0]
+
+
+# --- #43: introspect_interval knob -------------------------------------------
+
+
+def test_introspect_interval_default_off_and_omitted():
+    cfg = cl.GatewayConfig.model_validate(
+        {"backends": [{"name": "b", "transport": "stdio", "command": "/bin/x"}]}
+    )
+    assert cfg.introspect_interval == 0
+    assert "introspect_interval" not in cl.to_raw(cfg)
+
+
+def test_introspect_interval_roundtrips():
+    cfg = cl.GatewayConfig.model_validate(
+        {
+            "introspect_interval": 900,
+            "backends": [{"name": "b", "transport": "stdio", "command": "/bin/x"}],
+        }
+    )
+    reparsed = cl.GatewayConfig.model_validate(tomllib.loads(cl.dump_toml(cfg)))
+    assert reparsed.introspect_interval == 900
+
+
+def test_introspect_interval_rejects_negative():
+    import pydantic
+
+    with pytest.raises((cl.ConfigError, pydantic.ValidationError)):
+        cl.GatewayConfig.model_validate(
+            {
+                "introspect_interval": -5,
+                "backends": [{"name": "b", "transport": "stdio", "command": "/bin/x"}],
+            }
+        )

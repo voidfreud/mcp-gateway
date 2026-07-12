@@ -57,8 +57,8 @@ Python 3.12 · FastMCP 3.x · Pydantic · structlog · `uv`.
 ## Install
 
 ```bash
-cd ~/Developer/mine/mcp-gateway
-uv sync     # create .venv from uv.lock
+cd /path/to/mcp-gateway   # wherever the clone lives — install.sh handles the rest
+uv sync                   # create .venv from uv.lock
 ```
 
 On first run the server **auto-seeds `config.toml`** from the committed
@@ -75,16 +75,36 @@ Foreground (dev):
 uv run server.py              # serves /admin, /health, and one /<backend>/mcp endpoint per backend
 ```
 
-At login (the intended mode) — a launchd LaunchAgent:
-
-> **Machine-specific paths:** `com.void.mcp-gateway.plist` and
-> `deploy/newsyslog-mcp-gateway.conf` hardcode this machine's absolute paths
-> (home dir, repo location, venv). launchd needs absolute paths, so on another
-> machine/account edit those files to match before installing.
+At login (the intended mode) — a launchd LaunchAgent, installed via one script:
 
 ```bash
-cp com.void.mcp-gateway.plist ~/Library/LaunchAgents/
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.void.mcp-gateway.plist
+just install        # or: ./install.sh   (preview with ./install.sh --dry-run)
+```
+
+launchd needs absolute paths, and hardcoding the clone's location in the plist
+meant a repo move silently orphaned the LaunchAgent while a ghost process kept
+`/health` green ([#149](https://github.com/voidfreud/mcp-gateway/issues/149)).
+So the plist points every path through **one stable symlink**,
+`~/.local/opt/mcp-gateway` → the repo, and `install.sh` maintains it: it
+repoints the symlink at wherever the repo actually lives, copies the plist to
+`~/Library/LaunchAgents/`, and (re)loads the agent.
+
+- **First time:** `uv sync`, then `just install`.
+- **After moving the repo:** re-run `just install` from the new location —
+  that's the only step.
+- **Drift check:** `curl -s http://127.0.0.1:9100/health` names the daemon's
+  *resolved* code path (`ok mcp-gateway <version> @ /path/to/repo`) — if it
+  doesn't match where the repo lives now, you're talking to a ghost from the
+  old clone.
+
+> **Machine-specific paths:** the plist's symlink paths still embed this
+> machine's home dir (launchd resolves no `~`), and
+> `deploy/newsyslog-mcp-gateway.conf` hardcodes absolute paths too — on
+> another machine/account edit those to match before installing.
+
+Day-to-day launchctl, when you need it by hand:
+
+```bash
 launchctl print     gui/$(id -u)/com.void.mcp-gateway     # status
 launchctl kickstart -k gui/$(id -u)/com.void.mcp-gateway  # restart
 launchctl bootout   gui/$(id -u)/com.void.mcp-gateway     # stop + unload
@@ -111,6 +131,15 @@ Any prefix works (`gateway-` keeps them grouped). Tools then resolve as
 `mcp__gateway-deepwiki__ask_question`, etc. Stored in `~/.claude.json`, active
 across all projects; reversible with `claude mcp remove gateway-<backend>`.
 
+Or skip the terminal entirely: each backend's admin page has a **Register in
+CC** button (scope selectable) that runs the same `claude mcp add` for you
+([#45](https://github.com/voidfreud/mcp-gateway/issues/45)) — also offered as
+a checkbox when importing a new backend, and re-offered after a hard rename.
+Removing a backend best-effort runs `claude mcp remove` first. (Claude Code
+sometimes needs a reload to notice either direction.) If a `bearer_token` is
+configured (see Safety), the registration automatically carries the
+`Authorization` header.
+
 > **Heads-up on duplicates.** The gateway *proxies* backends. If a backend (e.g.
 > `gitnexus`, `deepwiki`) is also registered directly with Claude Code, Claude
 > sees both the direct tools and the gateway's rewritten versions. The intended
@@ -121,14 +150,40 @@ across all projects; reversible with `claude mcp remove gateway-<backend>`.
 ## Admin UI
 
 A built-in web admin is served by the same daemon at **`http://127.0.0.1:9100/admin`**
-(loopback only). It shows every backend in a left pane, an **Import MCP** button,
+(loopback only). It shows every backend in a left pane — each with a live
+**connection-status dot** ([#23](https://github.com/voidfreud/mcp-gateway/issues/23):
+probed asynchronously through the live proxy, so a down backend marks itself
+red without stalling the page) — an **Import MCP** button,
 and per-tool editing of **everything Claude Code sees** — broadcast name, title,
 description, each parameter's description, disable a tool. Parameter *names* are
-shown read-only and carry no per-param hide button in the UI
+shown read-only and carry no blanket per-param hide button in the UI
 ([#128](https://github.com/voidfreud/mcp-gateway/issues/128); the `hide`/rename
 levers still exist in config and pass through untouched). The backend's *real,
 provider-facing* names (the original tool + parameter names the gateway forwards
 to) are likewise **read-only** — those can't change.
+
+**Injected param defaults ([#35](https://github.com/voidfreud/mcp-gateway/issues/35)).**
+Each parameter row has an **inject value** field: a fixed scalar the gateway
+sends to the backend on every call. Setting one unlocks a **hidden** pill —
+with an injected value, hiding is safe even for a *required* param (Claude
+never sees it; the backend always receives the value). Hiding a required param
+*without* a default stays rejected.
+
+**Tool lists stay fresh ([#43](https://github.com/voidfreud/mcp-gateway/issues/43)).**
+The captured baseline auto-refreshes, event-driven: after every (re)connect
+(daemon boot, hot-add, re-enable — catches backend upgrades), on a backend's
+`tools/list_changed` push, and on opening the admin page (throttled, ~5 min).
+A scheduled sweep exists but is off by default (`introspect_interval = 0`).
+Overrides are stored as diffs by original name, so refreshes never clobber
+edits — new tools appear un-overridden, removed ones drop. **Re-inspect**
+forces a refresh and reports the `+N/−N` tool delta.
+
+**Hard rename ([#44](https://github.com/voidfreud/mcp-gateway/issues/44)).**
+**Rename…** in a backend's header changes its *real identity* — endpoint URL,
+config key, defaults file, `gateway-<name>` registration — with a restart and
+an explicit prompt to re-register in Claude Code (one-click, with old-name
+cleanup). For a cosmetic label, use **Display name** instead
+([#42](https://github.com/voidfreud/mcp-gateway/issues/42)).
 
 Every editable field is **prefilled with its effective value** (your override if
 set, else the backend default), so it's never blank — clear it and it falls back
@@ -136,7 +191,10 @@ to the default. Only values that actually differ from the default are stored, so
 `config.toml` stays minimal. Broadcast names are validated as MCP-safe
 identifiers (`[A-Za-z0-9_-]`) **and must be unique** — a rename that would collide
 with another tool's broadcast name (or a description set identical to another's)
-is rejected with a clear error, so two tools can never share a name. Each
+is rejected with a clear error, so two tools can never share a name. (Renaming
+in bulk? An opt-in **auto-uniquify** toggle in the gateway header retries a
+colliding save once with a deterministic `_2`/`_3` suffix and tells you the
+final name — [#22](https://github.com/voidfreud/mcp-gateway/issues/22).) Each
 backend's original broadcast is captured once as a baseline
 (`~/.local/state/mcp-gateway/defaults/<backend>.json`) for **reset to default**;
 `config.toml` is snapshotted to `backups/` on every save.
@@ -256,7 +314,18 @@ tool name. On startup the gateway lists each backend's live tools and logs an
 
 - Binds `127.0.0.1` only — never `0.0.0.0`. Nothing off-machine can reach it.
 - Any local process could hit the port; on a single-user Mac this is a non-issue.
-  > Optional bearer-token requirement on the loopback is tracked at [#26](https://github.com/voidfreud/mcp-gateway/issues/26).
+- **Optional bearer token
+  ([#26](https://github.com/voidfreud/mcp-gateway/issues/26)).** Defense-in-depth
+  against curious or compromised local processes hitting the loopback port: set
+  `bearer_token = "${MCP_GATEWAY_TOKEN}"` in `config.toml` (an `${ENV}` ref like
+  every secret, resolved once at startup) and every backend MCP endpoint requires
+  `Authorization: Bearer <token>` — anything else gets a 401. `/admin`, `/health`
+  and `/ready` stay open (the admin UI is a same-origin browser fetch; loopback
+  trust for those is the status quo). Register each backend with the header:
+
+  ```bash
+  claude mcp add --transport http --header "Authorization: Bearer ${MCP_GATEWAY_TOKEN}" gateway-<name> http://127.0.0.1:9100/<name>/mcp
+  ```
 - Keep dangerous backend tools disabled via `enabled = false`.
 
 ## Operations
@@ -269,7 +338,11 @@ tool name. On startup the gateway lists each backend's live tools and logs an
   `err.log` only ever catch rare pre-init or hard-crash text and stay bounded. For a
   belt-and-suspenders cap on those two, an optional `newsyslog` config ships at
   `deploy/newsyslog-mcp-gateway.conf` (install per the comments in that file).
-- **Health:** `curl -s http://127.0.0.1:9100/health` → `ok`.
+- **Health:** `curl -s http://127.0.0.1:9100/health` →
+  `ok mcp-gateway <version> @ /path/to/repo`. The path is the daemon's
+  *resolved* code location — compare it against where the repo lives to catch
+  a ghost process left over from a repo move
+  ([#149](https://github.com/voidfreud/mcp-gateway/issues/149)).
 - **Restart:** `launchctl kickstart -k gui/$(id -u)/com.void.mcp-gateway`.
 - **Verify rewrites end-to-end:** with the gateway running,
   `uv run verify_rename.py http://127.0.0.1:9100` checks every backend endpoint
