@@ -1789,3 +1789,405 @@ def test_build_app_wires_origin_guard(tmp_path):
         assert client.get("/health").status_code == 200  # no Origin -> open
         r = client.get("/health", headers={"Origin": "http://evil.example"})
         assert r.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# #161 — supervised warm sessions: dead-session detection + automatic recycle
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        anyio.ClosedResourceError(),
+        anyio.BrokenResourceError(),
+        anyio.EndOfStream(),
+        BrokenPipeError("broken pipe"),
+        ConnectionResetError("connection reset by peer"),
+        RuntimeError("Session terminated (HTTP 404)"),
+        RuntimeError("peer closed connection"),
+        Exception("Server disconnected without sending a response"),
+    ],
+)
+def test_is_session_death_matches_transport_signatures(exc):
+    assert server.is_session_death(exc) is True
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        ValueError("kaboom"),  # a normal tool error must NOT look like a dead session
+        RuntimeError("invalid argument: missing field 'query'"),
+        Exception("tool returned an error"),
+        KeyError("nope"),
+    ],
+)
+def test_is_session_death_ignores_ordinary_errors(exc):
+    assert server.is_session_death(exc) is False
+
+
+class _FakeCtx:
+    message = type("M", (), {"name": "sometool"})()
+
+
+def _run_middleware(mw, raised):
+    async def call_next(_ctx):
+        raise raised
+
+    return anyio.run(mw.on_call_tool, _FakeCtx(), call_next)
+
+
+def test_middleware_recycles_on_session_death_and_reraises():
+    fired = []
+    mw = server.CallLogMiddleware(
+        structlog.get_logger("test"), "b", lambda: fired.append(1)
+    )
+    with pytest.raises(anyio.ClosedResourceError):
+        _run_middleware(mw, anyio.ClosedResourceError())
+    assert fired == [1]  # recycle scheduled exactly once, call still failed
+
+
+def test_middleware_does_not_recycle_on_ordinary_error():
+    fired = []
+    mw = server.CallLogMiddleware(
+        structlog.get_logger("test"), "b", lambda: fired.append(1)
+    )
+    with pytest.raises(ValueError):
+        _run_middleware(mw, ValueError("kaboom"))
+    assert fired == []  # a normal tool error is NOT a dead session
+
+
+def test_middleware_stateless_backend_never_recycles():
+    # on_session_death=None (a stateless backend) -> the trigger is never called
+    # even for a genuine session-death exception (there is no warm session to heal).
+    mw = server.CallLogMiddleware(structlog.get_logger("test"), "b", None)
+    with pytest.raises(anyio.ClosedResourceError):
+        _run_middleware(mw, anyio.ClosedResourceError())
+
+
+def _warm_cfg(tmp_path):
+    cfg = cl.GatewayConfig.model_validate(
+        {
+            "backends": [
+                {
+                    "name": "b",
+                    "transport": "stdio",
+                    "command": "/bin/x",
+                    "stateless": False,
+                }
+            ]
+        }
+    )
+    path = tmp_path / "config.toml"
+    cl.save(cfg, str(path))
+    return cfg, str(path)
+
+
+def _recycle_app(tmp_path, monkeypatch, mounts):
+    """A live app whose _mount_backend is faked to just record each mount and
+    register the backend, so recycle (teardown + re-run) is observable without a
+    real backend. refresh is stubbed out (no real capture on the fake command)."""
+
+    async def fake_mount(
+        app, stack, b, cfg, all_tools, meta, captured, reg, hold, log, *extra
+    ):
+        mounts.append(b.name)
+        reg[b.name] = object()
+        return True
+
+    async def fake_refresh(*a, **k):
+        return {"status": "throttled"}
+
+    monkeypatch.setattr(server, "_mount_backend", fake_mount)
+    monkeypatch.setattr(admin, "refresh_and_reload", fake_refresh)
+    cfg, path = _warm_cfg(tmp_path)
+    return server._build_app(
+        cfg, structlog.get_logger("test"), {}, {}, {}, config_path=path
+    ), path
+
+
+def _wait_for(pred, tries=200, delay=0.02):
+    for _ in range(tries):
+        if pred():
+            return True
+        time.sleep(delay)
+    return False
+
+
+def test_stateless_route_persists_and_recycles(tmp_path, monkeypatch):
+    mounts: list[str] = []
+    app, path = _recycle_app(tmp_path, monkeypatch, mounts)
+    with TestClient(app) as client:
+        assert _wait_for(lambda: mounts.count("b") >= 1)  # initial mount
+        r = client.post("/admin/api/backend/b/stateless", json={"value": True})
+        assert r.status_code == 200
+        assert r.json()["reloaded"] == "recycled"
+        # persisted to config
+        assert cl.load(path).backends[0].stateless is True
+        # recycled -> the backend was re-mounted (teardown + fresh re-run)
+        assert _wait_for(lambda: mounts.count("b") >= 2)
+
+
+def test_recycle_cooldown_suppresses_second_recycle(tmp_path, monkeypatch):
+    mounts: list[str] = []
+    app, path = _recycle_app(tmp_path, monkeypatch, mounts)
+    with TestClient(app) as client:
+        assert _wait_for(lambda: mounts.count("b") >= 1)
+        # pre-stamp the cooldown as if a recycle just happened -> the toggle's
+        # recycle is skipped; the config change still persists.
+        server._last_recycle["b"] = time.monotonic()
+        r = client.post("/admin/api/backend/b/stateless", json={"value": True})
+        assert r.status_code == 200
+        assert cl.load(path).backends[0].stateless is True
+        time.sleep(0.3)  # give any (suppressed) recycle a chance to run
+        assert mounts.count("b") == 1  # cooldown suppressed the re-mount
+
+
+def test_stateless_route_persists_without_lifespan_hook(tmp_path):
+    # A bare admin app (no lifespan) has no recycle hook — the value must still
+    # persist and the route must still succeed.
+    r = TestClient(_admin_app(tmp_path)).post(
+        "/admin/api/backend/b/stateless", json={"value": True}
+    )
+    assert r.status_code == 200
+    assert cl.load(_cfg_path(tmp_path)).backends[0].stateless is True
+
+
+def test_stateless_route_unknown_backend_is_400(tmp_path):
+    r = TestClient(_admin_app(tmp_path)).post(
+        "/admin/api/backend/nope/stateless", json={"value": True}
+    )
+    assert r.status_code == 400
+
+
+def test_status_probe_recycles_warm_backend_on_error(tmp_path):
+    # #161: a WARM backend that probes `error` triggers the recycle hook.
+    cfg = cl.GatewayConfig.model_validate(
+        {"backends": [{"name": "b", "transport": "stdio", "command": "/bin/x"}]}
+    )
+    path = tmp_path / "config.toml"
+    cl.save(cfg, str(path))
+    fired: list[str] = []
+    app = Starlette()
+    # a non-proxy object in the registry makes Client(proxy) fail -> error state
+    admin.register(
+        app,
+        str(path),
+        structlog.get_logger("test"),
+        {"b": object()},
+        {},
+        {"recycle": fired.append},
+    )
+    r = TestClient(app).get("/admin/api/status")
+    assert r.status_code == 200
+    assert r.json()["backends"]["b"]["state"] == "error"
+    assert fired == ["b"]
+
+
+def test_import_default_is_warm_in_admin_html():
+    # #161: newly imported backends default to warm (stateless: false) for EVERY
+    # transport now that a dead warm session auto-recycles.
+    html = (REPO_ROOT / "src" / "mcp_gateway" / "admin.html").read_text(
+        encoding="utf-8"
+    )
+    assert "stateless: false" in html
+    assert "stateless: !stdio" not in html  # the old transport-conditional is gone
+
+
+# ---------------------------------------------------------------------------
+# #155 — gateway settings card (bearer token ref + introspect interval)
+# ---------------------------------------------------------------------------
+
+
+def test_settings_get_returns_current(tmp_path, monkeypatch):
+    monkeypatch.setattr(admin, "under_launchd", lambda: False)
+    client = TestClient(_admin_app(tmp_path))
+    j = client.get("/admin/api/settings").json()
+    assert j == {"bearer_token": None, "introspect_interval": 0}
+
+
+def test_settings_put_roundtrips(tmp_path, monkeypatch):
+    monkeypatch.setattr(admin, "under_launchd", lambda: False)
+    client = TestClient(_admin_app(tmp_path))
+    r = client.put(
+        "/admin/api/settings",
+        json={"bearer_token": "${MCP_GATEWAY_TOKEN}", "introspect_interval": 45},
+    )
+    assert r.status_code == 200
+    # persisted
+    cfg = cl.load(_cfg_path(tmp_path))
+    assert cfg.bearer_token == "${MCP_GATEWAY_TOKEN}"
+    assert cfg.introspect_interval == 45
+    # and readable back through GET
+    j = client.get("/admin/api/settings").json()
+    assert j["bearer_token"] == "${MCP_GATEWAY_TOKEN}"
+    assert j["introspect_interval"] == 45
+
+
+def test_settings_put_rejects_raw_secret(tmp_path):
+    r = TestClient(_admin_app(tmp_path)).put(
+        "/admin/api/settings", json={"bearer_token": "sk-live-deadbeef"}
+    )
+    assert r.status_code == 400
+    assert "environment variable" in r.json()["error"]
+
+
+def test_settings_put_empty_token_clears(tmp_path, monkeypatch):
+    monkeypatch.setattr(admin, "under_launchd", lambda: False)
+    client = TestClient(_admin_app(tmp_path))
+    client.put("/admin/api/settings", json={"bearer_token": "${TOK}"})
+    r = client.put("/admin/api/settings", json={"bearer_token": ""})
+    assert r.status_code == 200
+    assert cl.load(_cfg_path(tmp_path)).bearer_token is None
+
+
+@pytest.mark.parametrize("bad", [-1, 1.5, True, "5", None])
+def test_settings_put_rejects_bad_interval(tmp_path, bad):
+    r = TestClient(_admin_app(tmp_path)).put(
+        "/admin/api/settings", json={"introspect_interval": bad}
+    )
+    assert r.status_code == 400
+
+
+def test_settings_put_dev_reports_no_restart(tmp_path, monkeypatch):
+    monkeypatch.setattr(admin, "under_launchd", lambda: False)
+    r = TestClient(_admin_app(tmp_path)).put(
+        "/admin/api/settings", json={"introspect_interval": 5}
+    )
+    assert r.json()["reloaded"] == "dev-no-restart"
+
+
+def test_settings_put_managed_reports_restarting(tmp_path, monkeypatch):
+    monkeypatch.setattr(admin, "under_launchd", lambda: True)
+    monkeypatch.setattr(admin, "restart_daemon", lambda log: None)
+    r = TestClient(_admin_app(tmp_path)).put(
+        "/admin/api/settings", json={"introspect_interval": 5}
+    )
+    assert r.json()["reloaded"] == "restarting"
+
+
+def test_build_state_surfaces_gateway_settings(tmp_path):
+    cfg = cl.GatewayConfig.model_validate(
+        {
+            "bearer_token": "${TOK}",
+            "introspect_interval": 30,
+            "backends": [{"name": "b", "transport": "stdio", "command": "/bin/x"}],
+        }
+    )
+    st = admin.build_state(cfg)
+    assert st["bearer_token"] == "${TOK}"  # the ${ENV} REF, never resolved
+    assert st["introspect_interval"] == 30
+
+
+# ---------------------------------------------------------------------------
+# #154 — re-register all enabled backends in Claude Code
+# ---------------------------------------------------------------------------
+
+
+class _FakeProc:
+    def __init__(self, returncode=0, stdout="", stderr=""):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+def _reregister_app(tmp_path, cfg_dict):
+    cfg = cl.GatewayConfig.model_validate(cfg_dict)
+    path = tmp_path / "config.toml"
+    cl.save(cfg, str(path))
+    app = Starlette()
+    admin.register(app, str(path), structlog.get_logger("test"), {}, {})
+    return app
+
+
+def test_reregister_all_iterates_enabled_only(tmp_path, monkeypatch):
+    monkeypatch.setattr(admin.shutil, "which", lambda _n: "/usr/bin/claude")
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        admin.subprocess, "run", lambda argv, **kw: calls.append(argv) or _FakeProc()
+    )
+    app = _reregister_app(
+        tmp_path,
+        {
+            "backends": [
+                {"name": "on1", "transport": "stdio", "command": "/bin/x"},
+                {
+                    "name": "off1",
+                    "transport": "stdio",
+                    "command": "/bin/y",
+                    "enabled": False,
+                },
+            ]
+        },
+    )
+    r = TestClient(app).post("/admin/api/cc-reregister-all", json={"scope": "local"})
+    assert r.status_code == 200
+    j = r.json()
+    assert j["count"] == 1 and j["ok_count"] == 1 and j["ok"] is True
+    flat = " ".join(" ".join(a) for a in calls)
+    assert "gateway-on1" in flat
+    assert "gateway-off1" not in flat  # the disabled backend is skipped entirely
+
+
+def test_reregister_all_carries_bearer_header(tmp_path, monkeypatch):
+    monkeypatch.setattr(admin.shutil, "which", lambda _n: "/usr/bin/claude")
+    monkeypatch.setenv("RRTOKEN", "s3cr3t")
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        admin.subprocess, "run", lambda argv, **kw: calls.append(argv) or _FakeProc()
+    )
+    app = _reregister_app(
+        tmp_path,
+        {
+            "bearer_token": "${RRTOKEN}",
+            "backends": [{"name": "on1", "transport": "stdio", "command": "/bin/x"}],
+        },
+    )
+    r = TestClient(app).post("/admin/api/cc-reregister-all", json={"scope": "local"})
+    assert r.status_code == 200
+    add = next(a for a in calls if "add" in a)
+    assert "--header" in add
+    assert "Authorization: Bearer s3cr3t" in add
+    # and the resolved secret is redacted from the JSON summary
+    assert "s3cr3t" not in r.text
+
+
+def test_reregister_all_one_failure_does_not_abort_rest(tmp_path, monkeypatch):
+    monkeypatch.setattr(admin.shutil, "which", lambda _n: "/usr/bin/claude")
+    seen: list[str] = []
+
+    def fake_run(argv, **kw):
+        seen.append(" ".join(argv))
+        # the `add` for on1 fails; everything else succeeds
+        if "add" in argv and "gateway-on1" in argv:
+            return _FakeProc(returncode=1, stderr="add failed")
+        return _FakeProc()
+
+    monkeypatch.setattr(admin.subprocess, "run", fake_run)
+    app = _reregister_app(
+        tmp_path,
+        {
+            "backends": [
+                {"name": "on1", "transport": "stdio", "command": "/bin/x"},
+                {"name": "on2", "transport": "stdio", "command": "/bin/y"},
+            ]
+        },
+    )
+    r = TestClient(app).post("/admin/api/cc-reregister-all", json={})
+    assert r.status_code == 200
+    j = r.json()
+    assert j["count"] == 2 and j["ok_count"] == 1 and j["ok"] is False
+    # the SECOND backend was still attempted despite the first's failure
+    assert any("add" in s and "gateway-on2" in s for s in seen)
+    by = {x["backend"]: x["ok"] for x in j["backends"]}
+    assert by == {"on1": False, "on2": True}
+
+
+def test_reregister_all_missing_cli_is_400(tmp_path, monkeypatch):
+    monkeypatch.setattr(admin.shutil, "which", lambda _n: None)
+    app = _reregister_app(
+        tmp_path,
+        {"backends": [{"name": "on1", "transport": "stdio", "command": "/bin/x"}]},
+    )
+    r = TestClient(app).post("/admin/api/cc-reregister-all", json={})
+    assert r.status_code == 400

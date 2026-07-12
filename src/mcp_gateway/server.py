@@ -26,6 +26,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 import anyio
+import httpx
 import structlog
 import uvicorn
 from fastmcp import Client
@@ -66,6 +67,61 @@ ADMIN_BODY_LIMIT = 64 * 1024
 # mid-connect is cancelled (it never reaches stop.wait(), so without this the
 # daemon could hang forever on shutdown). Issue #61.
 SHUTDOWN_GRACE = 5.0
+
+# #161: minimum gap between automatic recycles of ONE warm backend. A hard-down
+# backend would otherwise flap — every failing call and every status probe would
+# fire another teardown+remount. One recycle per backend per this window; a
+# trigger inside the cooldown is skipped with a log line. Module-scoped so it
+# resets on restart (and is patchable/resettable in tests, like admin._last_refresh).
+RECYCLE_COOLDOWN = 30.0
+
+# #161: per-backend monotonic timestamp of the last (attempted) recycle.
+_last_recycle: dict[str, float] = {}
+
+
+# ---------------------------------------------------------------------------
+# Warm-session death detection (#161)
+# ---------------------------------------------------------------------------
+
+# Exception TYPES that mean the underlying MCP transport/session is gone (not a
+# tool-level error). Conservative on purpose (a normal ToolError/ValueError from
+# a backend tool must NOT match) — we key off transport/stream categories, plus
+# the message signatures below.
+_SESSION_DEATH_TYPES: tuple[type[BaseException], ...] = (
+    anyio.ClosedResourceError,
+    anyio.BrokenResourceError,
+    anyio.EndOfStream,
+    BrokenPipeError,
+    ConnectionError,  # incl. ConnectionResetError / ConnectionAbortedError
+    httpx.RemoteProtocolError,  # httpx "server disconnected" mid-stream
+)
+
+# Lowercased substrings that mark a dead session when they appear in the
+# exception's type name or message. Categories, not a blanket match.
+_SESSION_DEATH_SIGNS: tuple[str, ...] = (
+    "closedresourceerror",
+    "brokenresourceerror",
+    "closed stream",
+    "closed resource",
+    "session terminated",
+    "session closed",
+    "session not found",
+    "disconnected",
+    "broken pipe",
+    "connection closed",
+    "connection reset",
+    "peer closed",
+)
+
+
+def is_session_death(exc: BaseException) -> bool:
+    """True iff *exc* looks like a dead warm MCP session (as opposed to a normal
+    tool-level failure). Conservative: matches known transport/stream exception
+    types, then a small set of message signatures — never a blanket Exception."""
+    if isinstance(exc, _SESSION_DEATH_TYPES):
+        return True
+    text = f"{type(exc).__name__}: {exc}".lower()
+    return any(sign in text for sign in _SESSION_DEATH_SIGNS)
 
 
 # ---------------------------------------------------------------------------
@@ -126,11 +182,29 @@ def _configure_logging(log_file: str) -> structlog.BoundLogger:
 
 
 class CallLogMiddleware(Middleware):
-    """Log every tool call and its outcome/latency to the structured log."""
+    """Log every tool call and its outcome/latency to the structured log.
 
-    def __init__(self, log: structlog.BoundLogger, backend: str) -> None:
+    #161: for a WARM backend (persistent session), a call that dies because the
+    remote session went away is the trigger to recycle the backend — fastmcp's
+    shared clients never self-heal. When *on_session_death* is set (warm backends
+    only) and the raised exception matches a session-death signature, we
+    fire-and-forget that callback (it schedules the recycle; we never await it in
+    the call path) and then re-raise as normal. The failing call still fails; the
+    NEXT call finds a freshly re-mounted session. A cooldown in the recycle path
+    keeps a hard-down backend from flapping.
+    """
+
+    def __init__(
+        self,
+        log: structlog.BoundLogger,
+        backend: str,
+        on_session_death=None,
+    ) -> None:
         self._log = log
         self._backend = backend
+        # None for stateless backends (fresh session per call — nothing to
+        # recycle); a zero-arg fire-and-forget trigger for warm backends.
+        self._on_session_death = on_session_death
 
     async def on_call_tool(self, context: MiddlewareContext, call_next):
         msg = getattr(context, "message", None)
@@ -147,6 +221,13 @@ class CallLogMiddleware(Middleware):
                 error_type=type(exc).__name__,
                 ms=round((time.perf_counter() - started) * 1000, 2),
             )
+            # #161: warm session looks dead -> schedule a recycle (never awaited
+            # here), then re-raise so this call still fails as today.
+            if self._on_session_death is not None and is_session_death(exc):
+                self._log.warning(
+                    "warm_session_death", backend=self._backend, tool=tool
+                )
+                self._on_session_death()
             raise
         self._log.info(
             "tool_call",
@@ -525,12 +606,17 @@ async def _mount_backend(  # noqa: PLR0913 — the mount needs the full lifespan
     holders: dict,
     log,
     message_handler: MessageHandler | None = None,
+    on_session_death=None,
 ) -> bool:
     """Build ONE backend's proxy, apply its transforms + instructions, run its
     http lifespan, and mount it at ``/<backend>/mcp``. Returns True on success.
 
     *message_handler* (stateful backends only) subscribes the persistent client
     to backend notifications — the ``tools/list_changed`` trigger of #43.
+
+    *on_session_death* (warm backends only, #161) is a zero-arg fire-and-forget
+    trigger the call-log middleware calls when a live call dies from a dead
+    session, so the runner recycles the backend (fresh session) automatically.
 
     ``stateless=false`` backends are built from a **persistent connected Client**
     (entered on *stack*, so one warm backend session is reused for the daemon's
@@ -554,7 +640,7 @@ async def _mount_backend(  # noqa: PLR0913 — the mount needs the full lifespan
             proxy = create_proxy(config_loader.to_proxy_config_one(b), name=name)
 
         _suppress_list_changed(proxy)  # #90
-        proxy.add_middleware(CallLogMiddleware(log, b.name))
+        proxy.add_middleware(CallLogMiddleware(log, b.name, on_session_death))
         transforms, index = config_loader.build_transforms(
             cfg, b, all_tools, captured_meta
         )
@@ -628,7 +714,7 @@ def _build_app(  # noqa: PLR0913, PLR0915 — composition root; takes what it wi
     hooks: dict = {}  # lifespan installs hooks["add"] (hot-add) for the admin
 
     @asynccontextmanager
-    async def lifespan(app: Starlette):
+    async def lifespan(app: Starlette):  # noqa: PLR0915 — the per-runner lifecycle + #43/#161 plumbing is one cohesive scope
         # One teardown event per backend (#78): setting one unmounts JUST that
         # backend — its runner unwinds its OWN AsyncExitStack (the anyio LIFO rule
         # from #7, killing a warm client / stdio child), then _unmount drops its
@@ -639,6 +725,22 @@ def _build_app(  # noqa: PLR0913, PLR0915 — composition root; takes what it wi
         refresher = _AutoRefresh(
             cfg.introspect_interval, config_path, registry, holders, log
         )
+        # #161: recycle requests (backend name) enqueued from arbitrary tasks —
+        # the call-log middleware, the status probe, the stateless-toggle route.
+        # A single worker task INSIDE this task group drains them, so the actual
+        # teardown+remount always runs in the group that owns the runners (the
+        # same safe pattern as the #43 list_changed stream). Never awaited by the
+        # trigger sites — they only send_nowait.
+        recycle_send, recycle_recv = anyio.create_memory_object_stream(32)
+
+        def fire_recycle(name: str) -> None:
+            """Fire-and-forget: enqueue a recycle of *name*. Swallows a full or
+            closed queue (a recycle for this backend is already pending / we're
+            shutting down)."""
+            try:
+                recycle_send.send_nowait(name)
+            except (anyio.WouldBlock, anyio.ClosedResourceError):
+                pass
 
         async def runner(  # noqa: PLR0913 — mirrors _mount_backend's signature
             b,
@@ -658,6 +760,9 @@ def _build_app(  # noqa: PLR0913, PLR0915 — composition root; takes what it wi
                 if b.stateless
                 else _ListChangedHandler(b, refresher.send.send_nowait, log)
             )
+            # #161: only WARM backends recycle (a stateless backend already uses
+            # a fresh session per call — nothing to heal).
+            on_death = None if b.stateless else (lambda: fire_recycle(b.name))
             try:
                 async with AsyncExitStack() as stack:
                     ok = await _mount_backend(
@@ -672,6 +777,7 @@ def _build_app(  # noqa: PLR0913, PLR0915 — composition root; takes what it wi
                         holders,
                         log,
                         handler,
+                        on_death,
                     )
                     task_status.started(ok)
                     if ok:
@@ -685,8 +791,57 @@ def _build_app(  # noqa: PLR0913, PLR0915 — composition root; takes what it wi
                 stops.pop(b.name, None)
                 _unmount(app, b.name, registry, holders)
 
+        async def hot_recycle(name: str) -> None:
+            """Tear a warm backend's runner down like hot_remove AND immediately
+            re-run it — fresh AsyncExitStack, fresh client, re-mount (#161). This
+            is the automatic heal fastmcp's shared clients don't do: a warm remote
+            session that died is replaced without a daemon restart. Debounced by
+            RECYCLE_COOLDOWN per backend so a hard-down backend can't flap.
+
+            A re-run reads FRESH config, so it also picks up a changed
+            ``stateless`` flag (the stateless-toggle route commits then recycles)."""
+            now = time.monotonic()
+            last = _last_recycle.get(name)
+            if last is not None and now - last < RECYCLE_COOLDOWN:
+                log.info("recycle_skipped", backend=name, reason="cooldown")
+                return
+            _last_recycle[name] = now
+            cfg2 = config_loader.load(config_path)
+            b = next((x for x in cfg2.backends if x.name == name), None)
+            if b is None or not b.enabled:
+                log.info("recycle_skipped", backend=name, reason="absent-or-disabled")
+                return
+            log.info("recycle_start", backend=name)
+            ev = stops.get(name)
+            if ev is not None:
+                ev.set()  # tear the old runner down (unwinds its stack, _unmount)
+                # Wait for the old runner to FULLY unwind before re-running, so the
+                # new mount can't race the old runner's _unmount (which strips every
+                # route on this path). stops.pop happens in the runner's finally,
+                # immediately before _unmount — so `name not in stops` means done.
+                with anyio.move_on_after(SHUTDOWN_GRACE + 2):
+                    while name in stops:
+                        await anyio.sleep(0.02)
+            ok = await tg.start(
+                runner,
+                b,
+                cfg2,
+                admin.all_tools_from_defaults(cfg2),
+                admin.all_meta_from_defaults(cfg2),
+                admin.captured_instructions(cfg2),
+            )
+            log.info("recycle_done", backend=name, ok=ok)
+
+        async def recycle_worker() -> None:
+            async for name in recycle_recv:  # ends when recycle_send closes
+                try:
+                    await hot_recycle(name)
+                except Exception as exc:  # noqa: BLE001 — best-effort background heal
+                    log.warning("recycle_error", backend=name, error=str(exc))
+
         async with anyio.create_task_group() as tg:
             tg.start_soon(refresher.worker)  # #43: list_changed consumer
+            tg.start_soon(recycle_worker)  # #161: warm-session recycle consumer
             if refresher.interval > 0:
                 tg.start_soon(refresher.interval_loop)
             # #61: start every backend's runner CONCURRENTLY and don't block
@@ -721,6 +876,7 @@ def _build_app(  # noqa: PLR0913, PLR0915 — composition root; takes what it wi
 
             hooks["add"] = hot_add
             hooks["remove"] = hot_remove
+            hooks["recycle"] = fire_recycle  # #161
             log.info(
                 "gateway_starting",
                 backends=[b.name for b in cfg.backends],
@@ -734,6 +890,8 @@ def _build_app(  # noqa: PLR0913, PLR0915 — composition root; takes what it wi
             finally:
                 hooks.pop("add", None)
                 hooks.pop("remove", None)
+                hooks.pop("recycle", None)
+                recycle_send.close()  # ends the recycle worker (#161)
                 refresher.close()  # ends the worker + interval loop (#43)
                 for ev in list(stops.values()):
                     ev.set()  # graceful: every runner exits its stack, tg drains

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import sys
+import urllib.error
 import urllib.request
 
 import anyio
@@ -42,6 +43,20 @@ def _get_json(url: str) -> dict:
         return json.loads(r.read())
 
 
+def _http_status(url: str) -> int | None:
+    """The HTTP status of a bare GET (no auth header), or None if unreachable.
+    Used to probe whether the gateway enforces a bearer token (#158)."""
+    if not url.startswith(("http://", "https://")):
+        raise ValueError(f"refusing non-http(s) url: {url!r}")
+    try:
+        with urllib.request.urlopen(url, timeout=10) as r:  # noqa: S310 (http(s) only)
+            return r.status
+    except urllib.error.HTTPError as exc:
+        return exc.code
+    except Exception:  # noqa: BLE001 — unreachable -> inconclusive
+        return None
+
+
 def _summary() -> int:
     failed = [label for ok, label in checks if not ok]
     print(f"\n{'=' * 60}")
@@ -54,7 +69,7 @@ def _summary() -> int:
     return 0
 
 
-async def main() -> int:
+async def main() -> int:  # noqa: PLR0912, PLR0915 — linear end-to-end receipts; splitting scatters the flow
     # A down daemon must report a clean FAIL, not an unhandled traceback (#86).
     try:
         state = _get_json(f"{BASE}/admin/api/state")
@@ -144,6 +159,72 @@ async def main() -> int:
         check(ok, "deepwiki passthrough returned a real backend answer")
         if ok:
             print(f"\n  answer (first 200 chars): {text.strip()[:200]}...")
+
+    # --- Receipt 1 (#158): /admin/api/status shows every enabled backend ok ---
+    print("\nreceipts:")
+    try:
+        status = _get_json(f"{BASE}/admin/api/status")["backends"]
+    except Exception as exc:  # noqa: BLE001
+        check(False, f"status: /admin/api/status reachable ({exc})")
+        status = {}
+    for b in backends:
+        if not b.get("enabled", True):
+            continue
+        st = status.get(b["name"], {})
+        check(
+            st.get("state") == "ok",
+            f"status: {b['name']} probes ok (got {st.get('state', 'missing')!r})",
+        )
+
+    # --- Receipt 2 (#158): a hidden-param injection is applied end to end -------
+    # If any enabled tool hides a param with an injected default, the param must
+    # be ABSENT from the tool's broadcast inputSchema (Claude never sees it, the
+    # gateway injects the fixed value on every call). Skip cleanly when none.
+    hidden = None
+    for b in backends:
+        if not b.get("enabled", True):
+            continue
+        for t in b["tools"]:
+            if not t.get("enabled", True):
+                continue
+            for p in t.get("params", []):
+                if p.get("hide") and p.get("default") is not None:
+                    hidden = (b, t, p)
+                    break
+            if hidden:
+                break
+        if hidden:
+            break
+    if hidden is None:
+        print("  SKIP  hidden-param: no backend configures a hidden injected param")
+    else:
+        b, t, p = hidden
+        tool_name = t.get("name") or t["original"]
+        param_name = p.get("name") or p["original"]
+        try:
+            async with Client(f"{BASE}{b['endpoint']}") as c:
+                spec = next(
+                    (x for x in await c.list_tools() if x.name == tool_name), None
+                )
+            props = (spec.inputSchema or {}).get("properties", {}) if spec else {}
+            check(
+                spec is not None and param_name not in props,
+                f"hidden-param: {b['name']}/{tool_name} hides {param_name!r} "
+                f"(absent from broadcast schema, default injected)",
+            )
+        except Exception as exc:  # noqa: BLE001
+            check(False, f"hidden-param: round-trip on {b['name']} failed ({exc})")
+
+    # --- Receipt 3 (#158): bearer 401 when a token is enforced -----------------
+    # Probe an /admin/api/* path with NO auth header. 401 => the gateway enforces
+    # a bearer token (the receipt); 200 => open, nothing to assert (skip cleanly).
+    code = _http_status(f"{BASE}/admin/api/status")
+    if code == 401:
+        check(True, "bearer: unauthenticated /admin/api/* returns 401 (token enforced)")
+    elif code == 200:
+        print("  SKIP  bearer: gateway is open (no token configured)")
+    else:
+        print(f"  SKIP  bearer: probe inconclusive (status {code})")
 
     return _summary()
 

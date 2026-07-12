@@ -109,6 +109,22 @@ Per-backend liveness: `GET /admin/api/status` (#23).
   `server._mount_backend` and re-set on `admin.hot_reload`; edit via
   `PUT /admin/api/instructions` ({backend, value}). Old defaults files
   (pre-capture) auto-re-introspect on startup.
+- **Warm-session recycle (#161):** warm (`stateless=false`) backends reuse ONE
+  backend session for the daemon's life — but fastmcp's shared clients never
+  self-heal a dead remote session (verified upstream), which is why http backends
+  used to be left stateless. The gateway now supervises them: `server.is_session_death`
+  classifies a dead-session exception (ClosedResourceError / broken pipe / session
+  terminated / disconnected — conservative, never a blanket Exception), the
+  call-log middleware fires the per-backend `recycle` hook fire-and-forget (never
+  awaited in the call path; the failing call still fails, the NEXT finds a fresh
+  session), and the runner tears down + re-mounts (fresh AsyncExitStack → fresh
+  client). The status probe recycles a warm backend that probes `error` too.
+  Cooldown: at most one recycle per backend per 30s (`server.RECYCLE_COOLDOWN`,
+  module-scoped `_last_recycle` — resets on restart), so a hard-down backend can't
+  flap; a recycle inside the window logs `recycle_skipped`. The recycle re-reads
+  fresh config, so `POST /admin/api/backend/{name}/stateless` just saves + recycles
+  (no daemon restart). **Import now defaults new backends to warm for EVERY
+  transport** (`stateless: false` in admin.html `doImport`) now that recycling exists.
 - One resident subprocess per stdio backend — calls do NOT re-spawn it.
 - **Accepted spec gaps (#92):** the proxy does not forward the `completions`
   capability (FastMCP's server side has no completion handler to register —

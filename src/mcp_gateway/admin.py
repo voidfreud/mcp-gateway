@@ -576,6 +576,10 @@ def build_state(cfg: GatewayConfig) -> dict:
         "host": cfg.host,
         "port": cfg.port,
         "version": gateway_version(),
+        # #155: gateway-wide settings surfaced for the settings card's prefill.
+        # bearer_token is the ${ENV} REF as stored — never the resolved secret.
+        "bearer_token": cfg.bearer_token,
+        "introspect_interval": cfg.introspect_interval,
         # Each backend is its own MCP endpoint with its own instructions now (no
         # single cross-backend "gateway instructions"); the UI shows an endpoints
         # overview + per-backend server-instructions editing.
@@ -1460,6 +1464,63 @@ def _settings_routes(ctx: _AdminCtx) -> list[Route]:  # noqa: PLR0915 — statem
     ]
 
 
+# ${ENV} reference guard for the bearer token (#155): a stored token must be a
+# reference like ${MCP_GATEWAY_TOKEN}, never a pasted secret value.
+_ENV_REF_RE = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}")
+
+
+def _gateway_settings_routes(ctx: _AdminCtx) -> list[Route]:
+    """#155: read/write the two gateway-wide, boot-time settings — the bearer
+    token (${ENV} ref) and the introspect interval. Both are resolved/read only
+    at startup (token via expand_env in _build_app; interval when the lifespan's
+    #43 sweep is wired), so a change needs a daemon restart to take effect —
+    the PUT returns restart semantics."""
+
+    async def get_settings(_request: Request):
+        cfg = ctx.load()
+        return JSONResponse(
+            {
+                # the ${ENV} REF exactly as stored — never the resolved secret
+                "bearer_token": cfg.bearer_token,
+                "introspect_interval": cfg.introspect_interval,
+            }
+        )
+
+    async def put_settings(request: Request):
+        payload = await request.json()
+        cfg = ctx.load()
+        if "bearer_token" in payload:
+            tok = payload.get("bearer_token")
+            if tok is not None and not isinstance(tok, str):
+                return _err("bearer_token must be a string or null")
+            tok = (tok or "").strip()
+            # Guard against pasting a raw secret: an empty token (no auth) is
+            # fine, otherwise it MUST be a ${ENV} reference (#155/#26).
+            if tok and not _ENV_REF_RE.search(tok):
+                return _err(
+                    "bearer_token must reference an environment variable like "
+                    "${MCP_GATEWAY_TOKEN} — never paste the secret itself"
+                )
+            cfg.bearer_token = tok or None
+        if "introspect_interval" in payload:
+            iv = payload.get("introspect_interval")
+            # bool is an int subclass — reject it explicitly so `true` isn't 1.
+            if isinstance(iv, bool) or not isinstance(iv, int) or iv < 0:
+                return _err("introspect_interval must be an integer >= 0")
+            cfg.introspect_interval = iv
+        ctx.commit(cfg)  # persist only — both settings are read at boot
+        return ctx.restart_response({"changed": "gateway-settings"})
+
+    return [
+        Route("/admin/api/settings", get_settings, methods=["GET"]),
+        Route(
+            "/admin/api/settings",
+            _needs_json(ctx.locked(put_settings)),
+            methods=["PUT"],
+        ),
+    ]
+
+
 def _backend_routes(ctx: _AdminCtx) -> list[Route]:  # noqa: PLR0915 — statement count is the nested handlers; the group is cohesive
     """Per-backend flags and topology: pin, enable, display name, rename,
     add, remove."""
@@ -1492,6 +1553,31 @@ def _backend_routes(ctx: _AdminCtx) -> list[Route]:  # noqa: PLR0915 — stateme
             remove = ctx.hooks.get("remove")
             if remove is not None:
                 remove(b.name)
+
+    async def set_stateless(request: Request):
+        """Toggle a backend's warm/stateless session strategy (#161).
+
+        A warm session (``stateless=false``) reuses one backend connection across
+        calls and auto-recycles if it dies; stateless spins up a fresh session per
+        call. Flipping it is a per-backend topology change, but it needs NO daemon
+        restart: save the new flag, then recycle the backend via the lifespan hook
+        — the runner tears down and re-mounts, reading the fresh config (so the new
+        ``stateless`` value takes effect on the re-mount). If the hook isn't
+        registered (no lifespan, e.g. a unit test), the value is still persisted."""
+        name = request.path_params["name"]
+        payload = await request.json()
+        cfg = ctx.load()
+        b = next((x for x in cfg.backends if x.name == name), None)
+        if b is None:
+            return _err("unknown backend")
+        b.stateless = bool(payload.get("value", False))
+        ctx.commit(cfg)  # persist only — the recycle re-mounts with fresh config
+        recycle = ctx.hooks.get("recycle")
+        if recycle is not None:
+            recycle(name)
+        return JSONResponse(
+            {"ok": True, "reloaded": "recycled", "stateless": b.stateless}
+        )
 
     async def enable_backend(request: Request):
         """Enable/disable a backend (#38). Enable MOUNTS it live; disable UNMOUNTS
@@ -1670,6 +1756,11 @@ def _backend_routes(ctx: _AdminCtx) -> list[Route]:  # noqa: PLR0915 — stateme
             methods=["POST"],
         ),
         Route(
+            "/admin/api/backend/{name}/stateless",
+            _needs_json(ctx.locked(set_stateless)),
+            methods=["POST"],
+        ),
+        Route(
             "/admin/api/enabled", _needs_json(ctx.locked(enable_all)), methods=["POST"]
         ),
         Route(
@@ -1697,14 +1788,16 @@ async def admin_refresh(ctx: _AdminCtx, b: Backend, *, force: bool = False) -> d
     )
 
 
-def _claude_routes(ctx: _AdminCtx) -> list[Route]:
+def _claude_routes(ctx: _AdminCtx) -> list[Route]:  # noqa: PLR0915 — nested handlers; the group is cohesive
     """One-click Claude Code registration (#45): shell out to `claude mcp
     add/remove` for a backend's gateway endpoint (never edit Claude's config
     files by hand). The CLI runs in a thread so the event loop stays free.
     A CLI failure comes back as ``ok: false`` with its output at HTTP 200 (the
     HTTP call itself succeeded); missing binary / bad scope are 400."""
 
-    async def _run_cli(argv: list[str], redact: str | None = None) -> JSONResponse:
+    async def _cli_raw(argv: list[str]) -> tuple[int, str, str]:
+        """Run one `claude` CLI invocation off the event loop; never raises —
+        a spawn failure comes back as ``(-1, "", "<error>")``."""
         try:
             r = await asyncio.to_thread(
                 subprocess.run,
@@ -1714,9 +1807,12 @@ def _claude_routes(ctx: _AdminCtx) -> list[Route]:
                 timeout=CLAUDE_CLI_TIMEOUT,
                 check=False,  # a CLI failure is surfaced as ok:false, not raised
             )
-            rc, stdout, stderr = r.returncode, r.stdout, r.stderr
+            return r.returncode, r.stdout, r.stderr
         except (subprocess.SubprocessError, OSError) as exc:
-            rc, stdout, stderr = -1, "", f"{type(exc).__name__}: {exc}"
+            return -1, "", f"{type(exc).__name__}: {exc}"
+
+    async def _run_cli(argv: list[str], redact: str | None = None) -> JSONResponse:
+        rc, stdout, stderr = await _cli_raw(argv)
 
         def _hide(s: str) -> str:
             # never echo the bearer token (#26) back to the browser
@@ -1815,7 +1911,67 @@ def _claude_routes(ctx: _AdminCtx) -> list[Route]:
             {"available": True, "registered": parse_cc_registrations(output, names)}
         )
 
+    async def reregister_all(request: Request):
+        """#154: deregister + register EVERY enabled backend in Claude Code, so
+        one click re-points them all at this gateway (e.g. after the bearer token
+        changed — every registration must carry the new header). Sequential;
+        each backend gets a fresh `remove` then `add`. A per-backend failure is
+        recorded and does NOT abort the rest — the summary reports ok/fail each."""
+        payload = await request.json()
+        scope = payload.get("scope") or "local"
+        cfg = ctx.load()
+        missing = _missing_cli()
+        if missing is not None:
+            return missing
+        try:
+            # Resolved once for every registration; redacted from all output.
+            token = cl.expand_env(cfg.bearer_token) if cfg.bearer_token else None
+        except cl.ConfigError as exc:
+            return _err(str(exc))
+
+        def _hide(s: str) -> str:
+            return s.replace(token, "***") if token else s
+
+        results: list[dict] = []
+        for b in cfg.backends:
+            if not b.enabled:
+                continue  # only enabled backends are broadcast, so only they register
+            url = f"http://{cfg.host}:{cfg.port}/{b.name}/mcp"
+            try:
+                rm_argv = claude_mcp_command("remove", b.name, scope=scope)
+                add_argv = claude_mcp_command(
+                    "add", b.name, url=url, scope=scope, bearer_token=token
+                )
+            except cl.ConfigError as exc:
+                results.append({"backend": b.name, "ok": False, "error": str(exc)})
+                continue
+            await _cli_raw(rm_argv)  # best-effort cleanup; a missing reg is fine
+            rc, _out, err = await _cli_raw(add_argv)
+            results.append(
+                {
+                    "backend": b.name,
+                    "ok": rc == 0,
+                    "exit": rc,
+                    "stderr": _hide(err),
+                }
+            )
+        ok_count = sum(1 for r in results if r["ok"])
+        return JSONResponse(
+            {
+                "ok": all(r["ok"] for r in results),
+                "count": len(results),
+                "ok_count": ok_count,
+                "backends": results,
+                "note": "Claude Code may need a reload/restart to pick up the change",
+            }
+        )
+
     return [
+        Route(
+            "/admin/api/cc-reregister-all",
+            _needs_json(reregister_all),
+            methods=["POST"],
+        ),
         Route(
             "/admin/api/backend/{name}/register",
             _needs_json(register_backend),
@@ -1830,7 +1986,7 @@ def _claude_routes(ctx: _AdminCtx) -> list[Route]:
     ]
 
 
-def _ops_routes(ctx: _AdminCtx) -> list[Route]:
+def _ops_routes(ctx: _AdminCtx) -> list[Route]:  # noqa: PLR0915 — nested handlers; the group is cohesive
     """Operational endpoints: mini-inspector, manual restart, re-introspect,
     liveness status (#23), and the dashboard-load refresh sweep (#43)."""
 
@@ -1924,6 +2080,14 @@ def _ops_routes(ctx: _AdminCtx) -> list[Route]:
                 }
             except Exception as exc:  # noqa: BLE001 — the error IS the status
                 err = f"{type(exc).__name__}: {exc}"
+                # #161: a WARM backend that probes `error` may have a dead session
+                # fastmcp won't heal — recycle it best-effort (cooldown-debounced
+                # in the hook). Stateless backends spin a fresh session per probe,
+                # so there's nothing to recycle.
+                if not b.stateless:
+                    recycle = ctx.hooks.get("recycle")
+                    if recycle is not None:
+                        recycle(b.name)
                 return b.name, {"state": "error", "error": err}
 
         cfg = ctx.load()
@@ -1980,6 +2144,7 @@ def register(  # noqa: PLR0913 — public API; callers pass the lifespan plumbin
         [
             *_general_routes(ctx),
             *_settings_routes(ctx),
+            *_gateway_settings_routes(ctx),
             *_backend_routes(ctx),
             *_claude_routes(ctx),
             *_ops_routes(ctx),
