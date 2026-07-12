@@ -69,14 +69,38 @@ run cp "$REPO_ROOT/$LABEL.plist" "$AGENTS_DIR/$LABEL.plist"
 
 # 4. (Re)load: bootout is best-effort (fails harmlessly when not loaded),
 #    bootstrap loads the fresh copy, kickstart -k (re)starts the daemon now.
+#    bootout is ASYNC — bootstrapping immediately after it races the removal
+#    and fails with "Bootstrap failed: 5: Input/output error" (hit live on the
+#    first real install). Poll until the old job is actually gone (bounded),
+#    and retry the bootstrap a few times as a belt-and-suspenders.
 run_launchctl_reload() {
     if [ "$DRY_RUN" -eq 1 ]; then
         echo "[dry-run] launchctl bootout gui/$UID/$LABEL (ignore failure)"
-    else
-        launchctl bootout "gui/$UID/$LABEL" 2>/dev/null || true
+        echo "[dry-run] wait until gui/$UID/$LABEL is unloaded (max ~10s)"
+        echo "[dry-run] launchctl bootstrap gui/$UID $AGENTS_DIR/$LABEL.plist (retried)"
+        echo "[dry-run] launchctl kickstart -k gui/$UID/$LABEL"
+        return 0
     fi
-    run launchctl bootstrap "gui/$UID" "$AGENTS_DIR/$LABEL.plist"
-    run launchctl kickstart -k "gui/$UID/$LABEL"
+    launchctl bootout "gui/$UID/$LABEL" 2>/dev/null || true
+    i=0
+    while launchctl print "gui/$UID/$LABEL" >/dev/null 2>&1; do
+        i=$((i + 1))
+        if [ "$i" -gt 20 ]; then
+            echo "warning: old job still loaded after ~10s; bootstrapping anyway" >&2
+            break
+        fi
+        sleep 0.5
+    done
+    i=0
+    until launchctl bootstrap "gui/$UID" "$AGENTS_DIR/$LABEL.plist"; do
+        i=$((i + 1))
+        if [ "$i" -gt 5 ]; then
+            echo "error: bootstrap kept failing — inspect: launchctl print gui/$UID/$LABEL" >&2
+            exit 1
+        fi
+        sleep 1
+    done
+    launchctl kickstart -k "gui/$UID/$LABEL"
 }
 run_launchctl_reload
 
