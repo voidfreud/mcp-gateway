@@ -102,6 +102,112 @@ def test_body_limit_ignores_non_admin_paths():
 
 
 # ---------------------------------------------------------------------------
+# #26 — optional bearer token on backend endpoints (defense-in-depth)
+# ---------------------------------------------------------------------------
+
+
+def _bearer_app(token):
+    async def ping(request):
+        return JSONResponse({"ok": True})
+
+    return Starlette(
+        routes=[
+            Route("/b/mcp", ping, methods=["GET"]),
+            Route("/health", ping, methods=["GET"]),
+            Route("/ready", ping, methods=["GET"]),
+            Route("/admin/api/state", ping, methods=["GET"]),
+        ],
+        middleware=[Middleware(server.BearerAuthMiddleware, token=token)],
+    )
+
+
+def test_bearer_no_token_is_passthrough():
+    # token unset/empty -> pure passthrough, no header required anywhere
+    for token in (None, ""):
+        r = TestClient(_bearer_app(token)).get("/b/mcp")
+        assert r.status_code == 200
+
+
+def test_bearer_missing_header_is_401_with_challenge():
+    r = TestClient(_bearer_app("sekret")).get("/b/mcp")
+    assert r.status_code == 401
+    assert r.headers["WWW-Authenticate"] == "Bearer"
+    assert r.json() == {"ok": False, "error": "missing or invalid bearer token"}
+
+
+def test_bearer_wrong_token_is_401():
+    client = TestClient(_bearer_app("sekret"))
+    for bad in ("Bearer wrong", "Bearer sekret2", "sekret", "Basic sekret"):
+        r = client.get("/b/mcp", headers={"Authorization": bad})
+        assert r.status_code == 401
+        assert r.headers["WWW-Authenticate"] == "Bearer"
+
+
+def test_bearer_correct_token_passes():
+    r = TestClient(_bearer_app("sekret")).get(
+        "/b/mcp", headers={"Authorization": "Bearer sekret"}
+    )
+    assert r.status_code == 200
+
+
+def test_bearer_exempts_admin_health_ready():
+    # same-origin admin UI fetches carry no header; liveness probes neither —
+    # loopback trust for those paths is the status quo.
+    client = TestClient(_bearer_app("sekret"))
+    for path in ("/health", "/ready", "/admin/api/state"):
+        assert client.get(path).status_code == 200
+
+
+def test_build_app_missing_bearer_env_fails_loudly(tmp_path, monkeypatch):
+    # a ${ENV} bearer_token whose var is unset must raise ConfigError at BUILD
+    # time (startup), never surface per request.
+    monkeypatch.delenv("NO_SUCH_GW_TOKEN", raising=False)
+    monkeypatch.setenv("MCP_GATEWAY_SECRETS", str(tmp_path / "absent.env"))
+    cfg = cl.GatewayConfig.model_validate(
+        {
+            "bearer_token": "${NO_SUCH_GW_TOKEN}",
+            "backends": [{"name": "b", "transport": "stdio", "command": "/bin/x"}],
+        }
+    )
+    with pytest.raises(cl.ConfigError):
+        server._build_app(
+            cfg,
+            structlog.get_logger("test"),
+            {},
+            {},
+            {},
+            config_path=str(tmp_path / "config.toml"),
+        )
+
+
+def test_build_app_wires_bearer_auth(tmp_path, monkeypatch):
+    # end-to-end wiring: token resolved from the env once, backend paths gated,
+    # admin/health/ready exempt.
+    monkeypatch.setenv("GW_TOKEN_26", "sekret")
+    cfg = cl.GatewayConfig.model_validate(
+        {
+            "bearer_token": "${GW_TOKEN_26}",
+            "backends": [{"name": "b", "transport": "stdio", "command": "/bin/x"}],
+        }
+    )
+    path = tmp_path / "config.toml"
+    cl.save(cfg, str(path))
+    app = server._build_app(
+        cfg, structlog.get_logger("test"), {}, {}, {}, config_path=str(path)
+    )
+    with TestClient(app) as client:
+        assert client.get("/health").status_code == 200  # exempt
+        assert client.get("/ready").status_code == 503  # exempt (degraded, not 401)
+        assert client.get("/admin/api/state").status_code == 200  # exempt
+        r = client.get("/b/mcp")
+        assert r.status_code == 401
+        assert r.headers["WWW-Authenticate"] == "Bearer"
+        # correct token passes the gate (404: the /bin/x backend never mounts)
+        ok = client.get("/b/mcp", headers={"Authorization": "Bearer sekret"})
+        assert ok.status_code != 401
+
+
+# ---------------------------------------------------------------------------
 # #50 — gateway.log is a rotating handler, JSON format unchanged
 # ---------------------------------------------------------------------------
 
@@ -522,6 +628,65 @@ def test_add_backend_duplicate_after_probe_is_400(tmp_path, monkeypatch):
     )
     assert r.status_code == 400
     assert [b.name for b in cl.load(cfg_path).backends] == ["b", "new"]
+
+
+def test_override_route_uniquify_returns_final_name(tmp_path):
+    # #22 — the PUT override route: strict reject by default; with the opt-in
+    # flag it stores the suffixed name and reports it back to the UI.
+    admin.DEFAULTS_DIR.mkdir(parents=True, exist_ok=True)  # conftest-isolated
+    (admin.DEFAULTS_DIR / "b.json").write_text(
+        json.dumps(
+            {
+                "backend": "b",
+                "tools": [
+                    {
+                        "original": "t1",
+                        "title": None,
+                        "description": "d1",
+                        "params": [],
+                    },
+                    {
+                        "original": "t2",
+                        "title": None,
+                        "description": "d2",
+                        "params": [],
+                    },
+                ],
+            }
+        )
+    )
+    client = TestClient(_admin_app(tmp_path))
+    # default (no flag) stays exactly today's strict reject
+    strict = client.put(
+        "/admin/api/override",
+        json={"backend": "b", "tool_original": "t1", "override": {"name": "t2"}},
+    )
+    assert strict.status_code == 400
+    assert "already used" in strict.json()["error"]
+    # opt-in flag -> 200 with the final stored name surfaced
+    r = client.put(
+        "/admin/api/override",
+        json={
+            "backend": "b",
+            "tool_original": "t1",
+            "on_collision": "uniquify",
+            "override": {"name": "t2"},
+        },
+    )
+    assert r.status_code == 200
+    assert r.json() == {
+        "ok": True,
+        "reloaded": "in-process",
+        "name": "t2_2",
+        "uniquified": True,
+    }
+    assert cl.load(_cfg_path(tmp_path)).backends[0].tools[0].name == "t2_2"
+    # a save that needed no uniquify keeps today's response shape
+    r2 = client.put(
+        "/admin/api/override",
+        json={"backend": "b", "tool_original": "t1", "override": {"name": "fresh"}},
+    )
+    assert r2.json() == {"ok": True, "reloaded": "in-process"}
 
 
 def test_display_name_route_sets_and_clears(tmp_path):

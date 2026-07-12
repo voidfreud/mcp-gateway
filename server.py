@@ -16,6 +16,7 @@ strategy (a down backend only fails its own endpoint — issue #9). See README.m
 
 from __future__ import annotations
 
+import hmac
 import logging
 import os
 import time
@@ -315,6 +316,61 @@ class _ListChangedHandler(MessageHandler):
 
 
 # ---------------------------------------------------------------------------
+# Optional bearer-token auth for backend endpoints (pure-ASGI middleware)
+# ---------------------------------------------------------------------------
+
+
+class BearerAuthMiddleware:
+    """Require ``Authorization: Bearer <token>`` on backend MCP endpoints (#26).
+
+    Defense-in-depth for the loopback bind: with a token configured, a curious
+    or compromised local process can't call the backends without it. ``token``
+    is resolved ONCE at startup (``expand_env`` in ``_build_app``), never per
+    request; a falsy token makes the middleware a pure passthrough. Paths under
+    ``/admin``, ``/health`` and ``/ready`` stay open — the admin UI is a
+    same-origin browser fetch that carries no header, so loopback trust for
+    those is the status quo. The comparison is ``hmac.compare_digest`` on the
+    encoded bytes (no timing side channel); a failure gets a 401 JSON body plus
+    the ``WWW-Authenticate: Bearer`` challenge.
+    """
+
+    EXEMPT_PREFIXES = ("/admin", "/health", "/ready")
+
+    def __init__(self, app, *, token: str | None):
+        self.app = app
+        self._expected = f"Bearer {token}".encode() if token else None
+
+    async def __call__(self, scope, receive, send):
+        if (
+            self._expected is None  # no token configured -> zero overhead
+            or scope["type"] != "http"
+            or scope.get("path", "").startswith(self.EXEMPT_PREFIXES)
+        ):
+            await self.app(scope, receive, send)
+            return
+        supplied = dict(scope.get("headers", [])).get(b"authorization", b"")
+        if supplied and hmac.compare_digest(supplied, self._expected):
+            await self.app(scope, receive, send)
+            return
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 401,
+                "headers": [
+                    (b"content-type", b"application/json"),
+                    (b"www-authenticate", b"Bearer"),
+                ],
+            }
+        )
+        await send(
+            {
+                "type": "http.response.body",
+                "body": b'{"ok": false, "error": "missing or invalid bearer token"}',
+            }
+        )
+
+
+# ---------------------------------------------------------------------------
 # Startup reconciliation: warn on configured tools that no backend exposes
 # ---------------------------------------------------------------------------
 
@@ -489,6 +545,12 @@ def _build_app(  # noqa: PLR0913, PLR0915 — composition root; takes what it wi
     is ready as soon as admin/health are, and each endpoint appears the moment
     its backend connects — boot cost ≈ the slowest backend, not the sum.
     """
+    # #26: resolve the optional gateway bearer token ONCE at build time — a
+    # missing ${ENV} ref must fail loudly at startup (expand_env raises
+    # ConfigError), never surface per request.
+    bearer_token = (
+        config_loader.expand_env(cfg.bearer_token) if cfg.bearer_token else None
+    )
     # Populated in the lifespan; the admin closes over both (by reference) so its
     # hot-reload can target the right backend's live proxy + transform holder.
     registry: dict = {}
@@ -637,7 +699,8 @@ def _build_app(  # noqa: PLR0913, PLR0915 — composition root; takes what it wi
         ],
         lifespan=lifespan,
         middleware=[
-            StarletteMiddleware(BodyLimitMiddleware, max_bytes=ADMIN_BODY_LIMIT)
+            StarletteMiddleware(BodyLimitMiddleware, max_bytes=ADMIN_BODY_LIMIT),
+            StarletteMiddleware(BearerAuthMiddleware, token=bearer_token),
         ],
     )
     admin.register(parent, config_path, log, registry, holders, hooks)

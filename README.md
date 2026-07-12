@@ -276,7 +276,18 @@ tool name. On startup the gateway lists each backend's live tools and logs an
 
 - Binds `127.0.0.1` only — never `0.0.0.0`. Nothing off-machine can reach it.
 - Any local process could hit the port; on a single-user Mac this is a non-issue.
-  > Optional bearer-token requirement on the loopback is tracked at [#26](https://github.com/voidfreud/mcp-gateway/issues/26).
+- **Optional bearer token
+  ([#26](https://github.com/voidfreud/mcp-gateway/issues/26)).** Defense-in-depth
+  against curious or compromised local processes hitting the loopback port: set
+  `bearer_token = "${MCP_GATEWAY_TOKEN}"` in `config.toml` (an `${ENV}` ref like
+  every secret, resolved once at startup) and every backend MCP endpoint requires
+  `Authorization: Bearer <token>` — anything else gets a 401. `/admin`, `/health`
+  and `/ready` stay open (the admin UI is a same-origin browser fetch; loopback
+  trust for those is the status quo). Register each backend with the header:
+
+  ```bash
+  claude mcp add --transport http --header "Authorization: Bearer ${MCP_GATEWAY_TOKEN}" gateway-<name> http://127.0.0.1:9100/<name>/mcp
+  ```
 - Keep dangerous backend tools disabled via `enabled = false`.
 
 ## Operations

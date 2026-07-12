@@ -242,6 +242,12 @@ class GatewayConfig(BaseModel, extra="forbid"):
     # page load) cover everything but a long-lived remote backend that hot-swaps
     # tools silently; set an interval only for that rare case.
     introspect_interval: int = Field(default=0, ge=0)
+    # Optional bearer token required on every backend MCP endpoint (#26) —
+    # defense-in-depth on the loopback bind. Store a ${ENV} ref, never the raw
+    # value; the server resolves it ONCE at startup via expand_env (a missing
+    # var fails loudly), not per request. /admin, /health and /ready stay open
+    # (see server.BearerAuthMiddleware).
+    bearer_token: str | None = None
     backends: list[Backend] = Field(default_factory=list)
 
     @model_validator(mode="after")
@@ -565,6 +571,8 @@ def to_raw(cfg: GatewayConfig) -> dict:  # noqa: PLR0915 — field-by-field TOML
     }
     if cfg.introspect_interval:  # default 0 (off) — only persist when set (#43)
         out["introspect_interval"] = cfg.introspect_interval
+    if cfg.bearer_token is not None:  # default None — only persist when set (#26)
+        out["bearer_token"] = cfg.bearer_token
     out["backends"] = [_backend(b) for b in cfg.backends]
     return out
 
