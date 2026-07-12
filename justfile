@@ -27,3 +27,8 @@ verify url="http://127.0.0.1:9100/mcp":
 # Restart the launchd daemon
 restart:
     launchctl kickstart -k gui/$(id -u)/com.void.mcp-gateway
+
+# Install/sync the LaunchAgent via the ~/.local/opt symlink (#149).
+# Re-run after moving the repo. Preview with: ./install.sh --dry-run
+install:
+    ./install.sh

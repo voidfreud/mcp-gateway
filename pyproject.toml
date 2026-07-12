@@ -33,7 +33,9 @@ dev = [
 [tool.ruff]
 # corpus/ is read-only third-party source material (never reformat upstream
 # code); our own code — including .claude/ skill scripts — stays in scope.
-extend-exclude = ["corpus"]
+# .claude/worktrees holds agent checkouts (gitignored) — each runs its own
+# gate; linting them from the parent tree double-reports their WIP.
+extend-exclude = ["corpus", ".claude/worktrees"]
 
 [tool.ruff.lint]
 # Extended set adopted in #89. Complexity leftovers carry per-line noqa with

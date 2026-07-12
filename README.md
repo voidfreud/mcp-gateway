@@ -57,8 +57,8 @@ Python 3.12 · FastMCP 3.x · Pydantic · structlog · `uv`.
 ## Install
 
 ```bash
-cd ~/Developer/mine/mcp-gateway
-uv sync     # create .venv from uv.lock
+cd /path/to/mcp-gateway   # wherever the clone lives — install.sh handles the rest
+uv sync                   # create .venv from uv.lock
 ```
 
 On first run the server **auto-seeds `config.toml`** from the committed
@@ -75,16 +75,36 @@ Foreground (dev):
 uv run server.py              # serves /admin, /health, and one /<backend>/mcp endpoint per backend
 ```
 
-At login (the intended mode) — a launchd LaunchAgent:
-
-> **Machine-specific paths:** `com.void.mcp-gateway.plist` and
-> `deploy/newsyslog-mcp-gateway.conf` hardcode this machine's absolute paths
-> (home dir, repo location, venv). launchd needs absolute paths, so on another
-> machine/account edit those files to match before installing.
+At login (the intended mode) — a launchd LaunchAgent, installed via one script:
 
 ```bash
-cp com.void.mcp-gateway.plist ~/Library/LaunchAgents/
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.void.mcp-gateway.plist
+just install        # or: ./install.sh   (preview with ./install.sh --dry-run)
+```
+
+launchd needs absolute paths, and hardcoding the clone's location in the plist
+meant a repo move silently orphaned the LaunchAgent while a ghost process kept
+`/health` green ([#149](https://github.com/voidfreud/mcp-gateway/issues/149)).
+So the plist points every path through **one stable symlink**,
+`~/.local/opt/mcp-gateway` → the repo, and `install.sh` maintains it: it
+repoints the symlink at wherever the repo actually lives, copies the plist to
+`~/Library/LaunchAgents/`, and (re)loads the agent.
+
+- **First time:** `uv sync`, then `just install`.
+- **After moving the repo:** re-run `just install` from the new location —
+  that's the only step.
+- **Drift check:** `curl -s http://127.0.0.1:9100/health` names the daemon's
+  *resolved* code path (`ok mcp-gateway <version> @ /path/to/repo`) — if it
+  doesn't match where the repo lives now, you're talking to a ghost from the
+  old clone.
+
+> **Machine-specific paths:** the plist's symlink paths still embed this
+> machine's home dir (launchd resolves no `~`), and
+> `deploy/newsyslog-mcp-gateway.conf` hardcodes absolute paths too — on
+> another machine/account edit those to match before installing.
+
+Day-to-day launchctl, when you need it by hand:
+
+```bash
 launchctl print     gui/$(id -u)/com.void.mcp-gateway     # status
 launchctl kickstart -k gui/$(id -u)/com.void.mcp-gateway  # restart
 launchctl bootout   gui/$(id -u)/com.void.mcp-gateway     # stop + unload
@@ -269,7 +289,11 @@ tool name. On startup the gateway lists each backend's live tools and logs an
   `err.log` only ever catch rare pre-init or hard-crash text and stay bounded. For a
   belt-and-suspenders cap on those two, an optional `newsyslog` config ships at
   `deploy/newsyslog-mcp-gateway.conf` (install per the comments in that file).
-- **Health:** `curl -s http://127.0.0.1:9100/health` → `ok`.
+- **Health:** `curl -s http://127.0.0.1:9100/health` →
+  `ok mcp-gateway <version> @ /path/to/repo`. The path is the daemon's
+  *resolved* code location — compare it against where the repo lives to catch
+  a ghost process left over from a repo move
+  ([#149](https://github.com/voidfreud/mcp-gateway/issues/149)).
 - **Restart:** `launchctl kickstart -k gui/$(id -u)/com.void.mcp-gateway`.
 - **Verify rewrites end-to-end:** with the gateway running,
   `uv run verify_rename.py http://127.0.0.1:9100` checks every backend endpoint

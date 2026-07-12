@@ -377,8 +377,14 @@ def _suppress_list_changed(proxy) -> None:
 
 async def _health(_request: Request) -> PlainTextResponse:
     # Body starts with "ok" so existing liveness checks still pass; the version
-    # tail lets you confirm which build answered (#57).
-    return PlainTextResponse(f"ok mcp-gateway {admin.gateway_version()}")
+    # tail lets you confirm which build answered (#57). The resolved code path
+    # makes path drift visible (#149): after the repo moved, a ghost process
+    # started from the OLD clone kept /health green while the installed
+    # LaunchAgent pointed nowhere — a /health that names the directory the
+    # daemon actually runs from turns "running from a deleted/moved clone"
+    # into something a one-line curl can catch.
+    here = Path(__file__).resolve().parent
+    return PlainTextResponse(f"ok mcp-gateway {admin.gateway_version()} @ {here}")
 
 
 async def _mount_backend(  # noqa: PLR0913 — the mount needs the full lifespan plumbing; a param object would just rename the coupling
