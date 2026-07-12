@@ -6,7 +6,10 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import plistlib
 import re
+import subprocess
 import time
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -173,6 +176,18 @@ def test_health_reports_version():
     # still starts with "ok" so existing liveness checks pass; version is visible
     assert r.text.startswith("ok")
     assert admin.gateway_version() in r.text
+
+
+def test_health_reports_resolved_code_path():
+    # #149: /health names the daemon's REAL resolved code path, so a ghost
+    # process running from a deleted/moved clone is visible to a one-line curl
+    # (the path won't match where the repo lives now).
+    client = TestClient(
+        Starlette(routes=[Route("/health", server._health, methods=["GET"])])
+    )
+    r = client.get("/health")
+    assert r.text.startswith("ok")
+    assert f" @ {Path(server.__file__).resolve().parent}" in r.text
 
 
 # ---------------------------------------------------------------------------
@@ -715,3 +730,56 @@ def test_unmount_drops_route_and_registry():
     paths = [getattr(r, "path", None) for r in app.router.routes]
     assert "/b" not in paths  # backend mount removed
     assert "/health" in paths  # other routes untouched
+
+
+# ---------------------------------------------------------------------------
+# #149 — launchd decoupled from the repo path via the ~/.local/opt symlink
+# ---------------------------------------------------------------------------
+
+REPO_ROOT = Path(server.__file__).resolve().parent
+SYMLINK_PREFIX = "/.local/opt/mcp-gateway"
+
+
+def _plist_strings(node):
+    """Every string value in a parsed plist, recursively."""
+    if isinstance(node, str):
+        yield node
+    elif isinstance(node, dict):
+        for v in node.values():
+            yield from _plist_strings(v)
+    elif isinstance(node, list):
+        for v in node:
+            yield from _plist_strings(v)
+
+
+def test_plist_paths_all_go_through_stable_symlink():
+    # The repo plist must reference the repo ONLY via ~/.local/opt/mcp-gateway
+    # (maintained by install.sh) — a hardcoded clone path is exactly the drift
+    # that #149 made invisible. No string may mention any real clone location.
+    plist = plistlib.loads((REPO_ROOT / "com.void.mcp-gateway.plist").read_bytes())
+    strings = list(_plist_strings(plist))
+    assert strings  # parsed something
+
+    for s in strings:
+        assert "/Developer/projects/" not in s, s
+        assert "/Developer/mine/" not in s, s
+        # Any string that names a repo file/dir must route through the symlink.
+        if "server.py" in s or "config.toml" in s or "/.venv/" in s:
+            assert SYMLINK_PREFIX + "/" in s, s
+
+    # The load-bearing keys specifically:
+    for arg in plist["ProgramArguments"]:
+        assert SYMLINK_PREFIX + "/" in arg, arg
+    assert plist["WorkingDirectory"].endswith(SYMLINK_PREFIX)
+    assert SYMLINK_PREFIX + "/" in plist["EnvironmentVariables"]["MCP_GATEWAY_CONFIG"]
+
+
+def test_install_sh_is_executable_and_parses():
+    # install.sh maintains the symlink + plist; keep it syntactically valid for
+    # macOS's stock /bin/bash 3.2 (bash -n) and executable.
+    script = REPO_ROOT / "install.sh"
+    assert os.access(script, os.X_OK)
+    proc = subprocess.run(
+        ["/bin/bash", "-n", str(script)], capture_output=True, text=True, check=False
+    )
+    assert proc.returncode == 0, proc.stderr

@@ -7,14 +7,20 @@
 
     <!-- Run the venv python directly (no `uv run` supervisor process) — one
          resident process, faster start. Recreate the venv with `uv sync`. -->
+    <!-- Every repo path goes through the STABLE symlink
+         ~/.local/opt/mcp-gateway (maintained by install.sh), never the real
+         clone location (#149): launchd needs absolute paths, and hardcoding
+         the clone's path meant a repo move silently orphaned the LaunchAgent
+         while a ghost process kept /health green. After moving the repo,
+         re-run ./install.sh — this file needs no edit. -->
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/alexanderbass/Developer/projects/mcp-gateway/.venv/bin/python</string>
-        <string>/Users/alexanderbass/Developer/projects/mcp-gateway/server.py</string>
+        <string>/Users/alexanderbass/.local/opt/mcp-gateway/.venv/bin/python3</string>
+        <string>/Users/alexanderbass/.local/opt/mcp-gateway/server.py</string>
     </array>
 
     <key>WorkingDirectory</key>
-    <string>/Users/alexanderbass/Developer/projects/mcp-gateway</string>
+    <string>/Users/alexanderbass/.local/opt/mcp-gateway</string>
 
     <key>RunAtLoad</key>
     <true/>
@@ -29,7 +35,7 @@
         <string>/Users/alexanderbass/.local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
         <!-- Absolute config path so it resolves regardless of cwd. -->
         <key>MCP_GATEWAY_CONFIG</key>
-        <string>/Users/alexanderbass/Developer/projects/mcp-gateway/config.toml</string>
+        <string>/Users/alexanderbass/.local/opt/mcp-gateway/config.toml</string>
         <!-- FastMCP's log level is quieted in-process (server._configure_logging),
              so no FASTMCP_LOG_LEVEL env is needed here (#83, one suffices). -->
         <!-- Add backend secrets here when a backend needs them, e.g.:
