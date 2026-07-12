@@ -131,6 +131,15 @@ Any prefix works (`gateway-` keeps them grouped). Tools then resolve as
 `mcp__gateway-deepwiki__ask_question`, etc. Stored in `~/.claude.json`, active
 across all projects; reversible with `claude mcp remove gateway-<backend>`.
 
+Or skip the terminal entirely: each backend's admin page has a **Register in
+CC** button (scope selectable) that runs the same `claude mcp add` for you
+([#45](https://github.com/voidfreud/mcp-gateway/issues/45)) — also offered as
+a checkbox when importing a new backend, and re-offered after a hard rename.
+Removing a backend best-effort runs `claude mcp remove` first. (Claude Code
+sometimes needs a reload to notice either direction.) If a `bearer_token` is
+configured (see Safety), the registration automatically carries the
+`Authorization` header.
+
 > **Heads-up on duplicates.** The gateway *proxies* backends. If a backend (e.g.
 > `gitnexus`, `deepwiki`) is also registered directly with Claude Code, Claude
 > sees both the direct tools and the gateway's rewritten versions. The intended
@@ -141,14 +150,40 @@ across all projects; reversible with `claude mcp remove gateway-<backend>`.
 ## Admin UI
 
 A built-in web admin is served by the same daemon at **`http://127.0.0.1:9100/admin`**
-(loopback only). It shows every backend in a left pane, an **Import MCP** button,
+(loopback only). It shows every backend in a left pane — each with a live
+**connection-status dot** ([#23](https://github.com/voidfreud/mcp-gateway/issues/23):
+probed asynchronously through the live proxy, so a down backend marks itself
+red without stalling the page) — an **Import MCP** button,
 and per-tool editing of **everything Claude Code sees** — broadcast name, title,
 description, each parameter's description, disable a tool. Parameter *names* are
-shown read-only and carry no per-param hide button in the UI
+shown read-only and carry no blanket per-param hide button in the UI
 ([#128](https://github.com/voidfreud/mcp-gateway/issues/128); the `hide`/rename
 levers still exist in config and pass through untouched). The backend's *real,
 provider-facing* names (the original tool + parameter names the gateway forwards
 to) are likewise **read-only** — those can't change.
+
+**Injected param defaults ([#35](https://github.com/voidfreud/mcp-gateway/issues/35)).**
+Each parameter row has an **inject value** field: a fixed scalar the gateway
+sends to the backend on every call. Setting one unlocks a **hidden** pill —
+with an injected value, hiding is safe even for a *required* param (Claude
+never sees it; the backend always receives the value). Hiding a required param
+*without* a default stays rejected.
+
+**Tool lists stay fresh ([#43](https://github.com/voidfreud/mcp-gateway/issues/43)).**
+The captured baseline auto-refreshes, event-driven: after every (re)connect
+(daemon boot, hot-add, re-enable — catches backend upgrades), on a backend's
+`tools/list_changed` push, and on opening the admin page (throttled, ~5 min).
+A scheduled sweep exists but is off by default (`introspect_interval = 0`).
+Overrides are stored as diffs by original name, so refreshes never clobber
+edits — new tools appear un-overridden, removed ones drop. **Re-inspect**
+forces a refresh and reports the `+N/−N` tool delta.
+
+**Hard rename ([#44](https://github.com/voidfreud/mcp-gateway/issues/44)).**
+**Rename…** in a backend's header changes its *real identity* — endpoint URL,
+config key, defaults file, `gateway-<name>` registration — with a restart and
+an explicit prompt to re-register in Claude Code (one-click, with old-name
+cleanup). For a cosmetic label, use **Display name** instead
+([#42](https://github.com/voidfreud/mcp-gateway/issues/42)).
 
 Every editable field is **prefilled with its effective value** (your override if
 set, else the backend default), so it's never blank — clear it and it falls back
@@ -156,7 +191,10 @@ to the default. Only values that actually differ from the default are stored, so
 `config.toml` stays minimal. Broadcast names are validated as MCP-safe
 identifiers (`[A-Za-z0-9_-]`) **and must be unique** — a rename that would collide
 with another tool's broadcast name (or a description set identical to another's)
-is rejected with a clear error, so two tools can never share a name. Each
+is rejected with a clear error, so two tools can never share a name. (Renaming
+in bulk? An opt-in **auto-uniquify** toggle in the gateway header retries a
+colliding save once with a deterministic `_2`/`_3` suffix and tells you the
+final name — [#22](https://github.com/voidfreud/mcp-gateway/issues/22).) Each
 backend's original broadcast is captured once as a baseline
 (`~/.local/state/mcp-gateway/defaults/<backend>.json`) for **reset to default**;
 `config.toml` is snapshotted to `backups/` on every save.

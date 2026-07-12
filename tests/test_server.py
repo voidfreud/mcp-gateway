@@ -9,7 +9,9 @@ import logging
 import os
 import plistlib
 import re
+import shutil
 import subprocess
+import tempfile
 import time
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -1420,3 +1422,38 @@ def test_register_carries_bearer_header_and_redacts_it(tmp_path, monkeypatch):
     # redaction: neither command nor CLI output may leak the token
     assert "s3cret" not in j["command"] and "***" in j["command"]
     assert "s3cret" not in j["stdout"]
+
+
+# ---------------------------------------------------------------------------
+# admin.html integrity — the UI is a single hand-merged file; guard it
+# ---------------------------------------------------------------------------
+
+
+def test_admin_html_has_no_conflict_markers():
+    # A merge conflict in admin.html once shipped committed (the CONFLICT line
+    # scrolled out of a tail'ed merge log) — ruff doesn't lint HTML and no test
+    # parsed the page, so the whole admin UI silently broke. Never again.
+    text = (REPO_ROOT / "admin.html").read_text(encoding="utf-8")
+    for marker in ("<" * 7, "=" * 7 + "\n", ">" * 7):
+        assert marker not in text, f"merge-conflict marker {marker[:7]!r} in admin.html"
+
+
+def test_admin_html_inline_script_parses():
+    # `node --check` the inline <script> so a syntax error (stray backtick,
+    # bad template literal, conflict remnant) fails the gate, not the browser.
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node not available")
+    text = (REPO_ROOT / "admin.html").read_text(encoding="utf-8")
+    start = text.index("<script>") + len("<script>")
+    end = text.index("</script>")
+    with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as fh:
+        fh.write(text[start:end])
+        js_path = fh.name
+    try:
+        proc = subprocess.run(
+            [node, "--check", js_path], capture_output=True, text=True, check=False
+        )
+        assert proc.returncode == 0, proc.stderr
+    finally:
+        os.unlink(js_path)
