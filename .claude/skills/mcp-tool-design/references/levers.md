@@ -24,8 +24,10 @@ Not levers: schemas (types/enums/required), annotations, response shapes — tho
 
 - Effective surface + byte budgets: `surface.py` (see SKILL.md step 1).
 - Raw captured text as the backend shipped it: `~/.local/state/mcp-gateway/defaults/<backend>.json` (also `server_info`, `capabilities`). The baseline auto-refreshes (#43: post-(re)connect, backend `tools/list_changed`, admin page load, optional interval) — overrides are diffs by original name, so a refresh never clobbers edits; new tools appear un-overridden.
-- Per-backend liveness: `GET /admin/api/status` (#23) — `ok`/`error`/`unmounted`/`disabled` + latency, probed through the live proxy.
-- Everything at once, as the admin UI sees it: `GET http://127.0.0.1:9100/admin/api/state`.
+- Per-backend liveness: `GET /admin/api/status` (#23) — `ok`/`error`/`unmounted`/`disabled` + latency, probed through the live proxy. A WARM backend that probes `error` also triggers a session recycle (#161, best-effort).
+- Everything at once, as the admin UI sees it: `GET http://127.0.0.1:9100/admin/api/state` (also carries `bearer_token` — the `${ENV}` ref, never resolved — and `introspect_interval`).
+- Gateway-wide settings: `GET/PUT /admin/api/settings` (#155) — the bearer-token `${ENV}` ref and `introspect_interval`. Both are read only at boot, so a PUT returns restart semantics; the token PUT rejects a raw (non-`${ENV}`) value.
+- Warm-session recycling (#161): warm (`stateless=false`) backends now reuse ONE backend session across calls AND auto-recycle it (unmount + fresh re-mount) when it dies — a dead session is detected in the call-log middleware / status probe and heals without a daemon restart (cooldown: one recycle per backend per 30s). Import now defaults new backends to warm for every transport. Toggle per backend via `POST /admin/api/backend/{name}/stateless` `{value}` (saves + recycles; no restart).
 - Live probe of a real tool through the gateway (research use, respect read-onlyness): `POST /admin/api/run` `{backend, tool, args}`.
 
 ## Guardrails the app enforces
