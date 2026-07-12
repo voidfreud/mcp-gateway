@@ -1,6 +1,7 @@
 ---
 name: mcp-tool-design
-description: "Tunes the broadcast surface of the gateway's MCP backends — server instructions, tool names, descriptions, parameters, pinning — so a cold-start agent discovers the right tool, picks it over similar ones, and uses it correctly. Use when tuning, overriding, or sharpening a backend's tool text, when agents confuse, ignore, or misuse gateway tools, or when a backend is added, removed, or toggled (re-harmonize the field). Not for installing MCP servers or building new ones."
+description: "Tune what the gateway's backends broadcast to Claude — instructions, tool names/descriptions/params, pinning. Use when editing a backend's tool text."
+when_to_use: "Also when agents confuse, ignore, or misuse gateway tools; when a backend is added, removed, enabled, or disabled (re-harmonize the field's boundaries); when sharpening names for cold-start discovery or ToolSearch. Not for installing MCP servers or building new ones."
 ---
 
 # Tune a backend's broadcast surface

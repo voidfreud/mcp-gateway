@@ -349,8 +349,10 @@ def effective_tools(cfg: GatewayConfig, backend: str | None = None) -> list[dict
         if backend is not None and b.name != backend:
             continue
         defaults = load_defaults(b.name) or {}
+        captured = set()
         for dt in defaults.get("tools", []):
             orig = dt["original"]
+            captured.add(orig)
             ov = _find_tool_override(b, orig)
             if ov is not None and not ov.enabled:
                 continue  # disabled -> not broadcast -> can't collide
@@ -358,6 +360,23 @@ def effective_tools(cfg: GatewayConfig, backend: str | None = None) -> list[dict
             desc = ov.description if (ov and ov.description) else dt.get("description")
             out.append(
                 {"backend": b.name, "original": orig, "name": name, "description": desc}
+            )
+        # DANGLING overrides — original absent from captured defaults (e.g. the
+        # backend renamed the tool upstream and a #43 refresh moved the
+        # baseline). They no longer broadcast, but their entries still land in
+        # the transforms, and FastMCP rejects a duplicate transform TARGET name
+        # at build time — an invisible-to-validation 500 landmine (found live
+        # while migrating the openrouter drift). Their names count as taken.
+        for ov in b.tools:
+            if ov.original in captured or not ov.enabled:
+                continue
+            out.append(
+                {
+                    "backend": b.name,
+                    "original": ov.original,
+                    "name": ov.name or ov.original,
+                    "description": ov.description,
+                }
             )
     return out
 
@@ -691,6 +710,15 @@ def apply_tool_override(cfg: GatewayConfig, backend: str, payload: dict) -> str 
             for t in effective_tools(cfg, backend)
             if t["original"] != original
         }
+        # Also dodge DISABLED entries' target names: they don't broadcast, but
+        # they still occupy a transform target (FastMCP rejects duplicates at
+        # build time regardless of enabled), so a suffix landing on one would
+        # bounce off the dry-build guard below.
+        taken |= {
+            t.name or t.original
+            for t in b.tools
+            if t.original != original and not t.enabled
+        }
         if eff_name in taken:
             final = uniquify_name(eff_name, taken)
             # equal-to-default still inherits (config stays minimal)
@@ -704,7 +732,25 @@ def apply_tool_override(cfg: GatewayConfig, backend: str, payload: dict) -> str 
     b.tools = [t for t in b.tools if t.original != original]
     if has_override:
         b.tools.append(new)
+    _reject_transform_landmines(cfg, b)
     return uniquified
+
+
+def _reject_transform_landmines(cfg: GatewayConfig, b: Backend) -> None:
+    """Transform-level dry run: FastMCP rejects duplicate transform TARGET
+    names at build time — including combinations the broadcast-level collision
+    check deliberately allows (a DISABLED entry, a dangling override for a tool
+    the backend renamed away). Without this, the save persists, the very next
+    hot-reload/mount raises, and the backend fails to mount on every boot — a
+    config landmine (found live migrating the openrouter drift)."""
+    try:
+        cl.build_transforms(cfg, b)
+    except ValueError as exc:
+        raise cl.ConfigError(
+            f"override rejected — it would break the tool transforms: {exc}. "
+            f"If the clashing entry is a stale override for a tool the backend "
+            f"no longer exposes, reset that tool first."
+        ) from None
 
 
 # ---------------------------------------------------------------------------
