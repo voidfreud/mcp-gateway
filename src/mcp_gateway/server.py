@@ -19,6 +19,7 @@ from __future__ import annotations
 import hmac
 import logging
 import os
+import sys
 import time
 from contextlib import AsyncExitStack, asynccontextmanager
 from logging.handlers import RotatingFileHandler
@@ -38,10 +39,24 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse
 from starlette.routing import Mount, Route
 
-import admin
-import config_loader
+from mcp_gateway import admin, config_loader
 
-CONFIG_PATH = os.environ.get("MCP_GATEWAY_CONFIG", "config.toml")
+
+def default_config_path() -> str:
+    """Where the live config lives, in precedence order: the MCP_GATEWAY_CONFIG
+    env var (the launchd install sets it); a ./config.toml in the working
+    directory (a repo checkout / dev run); else the XDG-style user path
+    ~/.config/mcp-gateway/config.toml — auto-seeded on first run, so a
+    `uv tool install` + `mcp-gateway` run works out of the box."""
+    env = os.environ.get("MCP_GATEWAY_CONFIG")
+    if env:
+        return env
+    if Path("config.toml").is_file():
+        return "config.toml"
+    return str(Path("~/.config/mcp-gateway/config.toml").expanduser())
+
+
+CONFIG_PATH = default_config_path()
 
 # Cap admin-API request bodies. Admin payloads are tiny (tool text, backend
 # config); anything larger is rejected before it's buffered/parsed. Issue #49.
@@ -826,6 +841,20 @@ def _load_config_or_recover(log) -> config_loader.GatewayConfig:
 
 
 def main() -> None:
+    # `mcp-gateway --version` prints and exits — the install smoke check
+    # (anything else on argv is a usage error; the daemon takes no arguments).
+    args = sys.argv[1:]
+    if args == ["--version"]:
+        print(
+            f"mcp-gateway {admin.gateway_version()} @ {Path(__file__).resolve().parent}"
+        )
+        return
+    if args:
+        print(
+            f"usage: mcp-gateway [--version]  (unexpected: {' '.join(args)})",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
     # Configure logging BEFORE loading config, so a load failure is a clean
     # structured line in gateway.log rather than a raw traceback in launchd's
     # err.log (#96). Start on the default log path; re-point if the loaded cfg

@@ -41,11 +41,21 @@ run() {
 
 echo "repo root: $REPO_ROOT"
 
-# 1. The venv must exist BEFORE (re)loading the agent, or launchd would
-#    crash-loop on a missing interpreter.
-if [ ! -x "$REPO_ROOT/.venv/bin/python3" ]; then
-    echo "error: $REPO_ROOT/.venv/bin/python3 not found." >&2
-    echo "       Run 'uv sync' in $REPO_ROOT first, then re-run this script." >&2
+# 1. The venv (and its mcp-gateway console script) must exist BEFORE
+#    (re)loading the agent, or launchd would crash-loop on a missing binary.
+#    Bootstrap it automatically when uv is available — out-of-the-box install.
+if [ ! -x "$REPO_ROOT/.venv/bin/mcp-gateway" ]; then
+    if command -v uv >/dev/null 2>&1; then
+        echo "no venv yet — running 'uv sync' to create it"
+        run uv sync --project "$REPO_ROOT"
+    else
+        echo "error: $REPO_ROOT/.venv/bin/mcp-gateway not found and 'uv' is not installed." >&2
+        echo "       Install uv (https://docs.astral.sh/uv/), then re-run this script." >&2
+        exit 1
+    fi
+fi
+if [ "$DRY_RUN" -eq 0 ] && [ ! -x "$REPO_ROOT/.venv/bin/mcp-gateway" ]; then
+    echo "error: uv sync did not produce .venv/bin/mcp-gateway — inspect the output above." >&2
     exit 1
 fi
 
@@ -62,10 +72,25 @@ else
     fi
 fi
 
-# 3. Install the plist (it references only the symlink, so this copy is
-#    identical no matter where the repo lives).
+# 3. Render the plist template for THIS user (the repo carries no personal
+#    paths) and install it. The rendered file references only the symlink, so
+#    the copy is identical no matter where the repo lives.
+TEMPLATE="$REPO_ROOT/deploy/$LABEL.plist.template"
+if [ ! -f "$TEMPLATE" ]; then
+    echo "error: plist template missing: $TEMPLATE" >&2
+    exit 1
+fi
 run mkdir -p "$AGENTS_DIR"
-run cp "$REPO_ROOT/$LABEL.plist" "$AGENTS_DIR/$LABEL.plist"
+if [ "$DRY_RUN" -eq 1 ]; then
+    echo "[dry-run] render $TEMPLATE (@@HOME@@ -> $HOME) -> $AGENTS_DIR/$LABEL.plist"
+else
+    sed "s|@@HOME@@|$HOME|g" "$TEMPLATE" > "$AGENTS_DIR/$LABEL.plist"
+    echo "rendered plist -> $AGENTS_DIR/$LABEL.plist"
+    if command -v plutil >/dev/null 2>&1; then
+        plutil -lint -s "$AGENTS_DIR/$LABEL.plist" || {
+            echo "error: rendered plist failed plutil lint" >&2; exit 1; }
+    fi
+fi
 
 # 4. (Re)load: bootout is best-effort (fails harmlessly when not loaded),
 #    bootstrap loads the fresh copy, kickstart -k (re)starts the daemon now.

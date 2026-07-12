@@ -25,9 +25,8 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
-import admin
-import config_loader as cl
-import server
+from mcp_gateway import admin, server
+from mcp_gateway import config_loader as cl
 
 # ---------------------------------------------------------------------------
 # #48 — malformed/missing JSON body → 400 (not 500 + traceback)
@@ -295,7 +294,7 @@ def test_configure_logging_closes_prior_handler(tmp_path):
 
 
 def test_gateway_version_matches_pyproject():
-    text = (admin.HERE / "pyproject.toml").read_text(encoding="utf-8")
+    text = (admin.HERE.parents[1] / "pyproject.toml").read_text(encoding="utf-8")
     want = re.search(r'(?m)^version\s*=\s*"([^"]+)"', text).group(1)
     assert admin.gateway_version() == want
 
@@ -1376,7 +1375,7 @@ def test_post_mount_refresh_trigger_fires(tmp_path, monkeypatch):
 # #149 — launchd decoupled from the repo path via the ~/.local/opt symlink
 # ---------------------------------------------------------------------------
 
-REPO_ROOT = Path(server.__file__).resolve().parent
+REPO_ROOT = Path(__file__).resolve().parents[1]  # repo root (src layout)
 SYMLINK_PREFIX = "/.local/opt/mcp-gateway"
 
 
@@ -1392,26 +1391,40 @@ def _plist_strings(node):
             yield from _plist_strings(v)
 
 
-def test_plist_paths_all_go_through_stable_symlink():
-    # The repo plist must reference the repo ONLY via ~/.local/opt/mcp-gateway
-    # (maintained by install.sh) — a hardcoded clone path is exactly the drift
-    # that #149 made invisible. No string may mention any real clone location.
-    plist = plistlib.loads((REPO_ROOT / "com.void.mcp-gateway.plist").read_bytes())
+def _rendered_plist(home="/Users/somebody"):
+    tpl = (REPO_ROOT / "deploy" / "com.void.mcp-gateway.plist.template").read_text()
+    return plistlib.loads(tpl.replace("@@HOME@@", home).encode())
+
+
+def test_plist_template_carries_no_personal_paths():
+    # Shippable: the repo must contain NOBODY's home directory — only the
+    # @@HOME@@ placeholder install.sh renders for whoever installs (#149).
+    tpl = (REPO_ROOT / "deploy" / "com.void.mcp-gateway.plist.template").read_text()
+    assert "@@HOME@@" in tpl
+    assert "/Users/" not in tpl.replace("@@HOME@@", "")
+    assert "/Developer/" not in tpl
+
+
+def test_rendered_plist_paths_all_go_through_stable_symlink():
+    # Rendered for an arbitrary user, every repo reference routes through
+    # ~/.local/opt/mcp-gateway — a hardcoded clone path is exactly the drift
+    # that #149 made invisible.
+    plist = _rendered_plist()
     strings = list(_plist_strings(plist))
-    assert strings  # parsed something
+    assert strings
 
     for s in strings:
-        assert "/Developer/projects/" not in s, s
-        assert "/Developer/mine/" not in s, s
-        # Any string that names a repo file/dir must route through the symlink.
-        if "server.py" in s or "config.toml" in s or "/.venv/" in s:
-            assert SYMLINK_PREFIX + "/" in s, s
+        assert "/Developer/" not in s, s
+        if "mcp-gateway" in s and "state" not in s and "com.void" not in s:
+            assert SYMLINK_PREFIX + "/" in s or s.endswith(SYMLINK_PREFIX), s
 
-    # The load-bearing keys specifically:
-    for arg in plist["ProgramArguments"]:
-        assert SYMLINK_PREFIX + "/" in arg, arg
+    # The load-bearing keys: the venv console script, through the symlink.
+    assert plist["ProgramArguments"] == [
+        "/Users/somebody/.local/opt/mcp-gateway/.venv/bin/mcp-gateway"
+    ]
     assert plist["WorkingDirectory"].endswith(SYMLINK_PREFIX)
     assert SYMLINK_PREFIX + "/" in plist["EnvironmentVariables"]["MCP_GATEWAY_CONFIG"]
+    assert plist["Label"] == "com.void.mcp-gateway"
 
 
 def test_install_sh_is_executable_and_parses():
@@ -1461,7 +1474,8 @@ def test_admin_html_has_no_conflict_markers():
     # A merge conflict in admin.html once shipped committed (the CONFLICT line
     # scrolled out of a tail'ed merge log) — ruff doesn't lint HTML and no test
     # parsed the page, so the whole admin UI silently broke. Never again.
-    text = (REPO_ROOT / "admin.html").read_text(encoding="utf-8")
+    html_path = REPO_ROOT / "src" / "mcp_gateway" / "admin.html"
+    text = html_path.read_text(encoding="utf-8")
     for marker in ("<" * 7, "=" * 7 + "\n", ">" * 7):
         assert marker not in text, f"merge-conflict marker {marker[:7]!r} in admin.html"
 
@@ -1472,7 +1486,8 @@ def test_admin_html_inline_script_parses():
     node = shutil.which("node")
     if node is None:
         pytest.skip("node not available")
-    text = (REPO_ROOT / "admin.html").read_text(encoding="utf-8")
+    html_path = REPO_ROOT / "src" / "mcp_gateway" / "admin.html"
+    text = html_path.read_text(encoding="utf-8")
     start = text.index("<script>") + len("<script>")
     end = text.index("</script>")
     with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as fh:

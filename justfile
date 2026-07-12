@@ -18,7 +18,7 @@ test:
 
 # Import smoke — server/admin/config_loader load cleanly
 smoke:
-    uv run python -c "import server, admin, config_loader; print('imports OK')"
+    uv run python -c "import mcp_gateway.server, mcp_gateway.admin, mcp_gateway.config_loader; print('imports OK')"
 
 # End-to-end rename check against the RUNNING daemon (needs live backends)
 verify url="http://127.0.0.1:9100/mcp":

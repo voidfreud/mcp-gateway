@@ -32,8 +32,13 @@ from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse
 from starlette.routing import Route
 
-import config_loader as cl
-from config_loader import Backend, GatewayConfig, ParamOverride, ToolOverride
+from mcp_gateway import config_loader as cl
+from mcp_gateway.config_loader import (
+    Backend,
+    GatewayConfig,
+    ParamOverride,
+    ToolOverride,
+)
 
 STATE_DIR = Path("~/.local/state/mcp-gateway").expanduser()
 DEFAULTS_DIR = STATE_DIR / "defaults"
@@ -75,7 +80,8 @@ def gateway_version() -> str:
     except importlib.metadata.PackageNotFoundError:
         pass
     try:
-        text = (HERE / "pyproject.toml").read_text(encoding="utf-8")
+        # repo checkout fallback: pyproject sits at the repo root (src layout)
+        text = (HERE.parents[1] / "pyproject.toml").read_text(encoding="utf-8")
         m = re.search(r'(?m)^version\s*=\s*"([^"]+)"', text)
         if m:
             return m.group(1)

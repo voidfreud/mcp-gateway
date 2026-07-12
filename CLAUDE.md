@@ -11,7 +11,7 @@ shared by all Claude Code sessions.
 Python 3.12 · FastMCP 3.x · Pydantic · structlog · `uv`.
 
 ## How to run
-- Dev: `uv run server.py` → one `/<backend>/mcp` endpoint per backend, plus `/admin` + `/health`.
+- Dev: `uv run mcp-gateway` → one `/<backend>/mcp` endpoint per backend, plus `/admin` + `/health`. Code lives in `src/mcp_gateway/` (installable package; console script `mcp-gateway`).
 - Login: launchd LaunchAgent `com.void.mcp-gateway.plist`, installed via
   `just install` / `./install.sh` (#149): every plist path routes through the
   stable symlink `~/.local/opt/mcp-gateway` → the repo, so after a repo move you
@@ -26,17 +26,19 @@ backend endpoint (bare names, instructions <=2KB) + a real passthrough call.
 Per-backend liveness: `GET /admin/api/status` (#23).
 
 ## Layout
-- `config_loader.py` — Pydantic models + `config.toml` → proxy config + transforms; also `dump_toml`/`save` (admin writes config back).
-- `server.py` — one single-backend `create_proxy` per backend, each mounted at `/<backend>/mcp` under a parent Starlette (+ `/admin` + `/health`); lifespans composed via `AsyncExitStack`.
-- `admin.py` — admin UI/API at `/admin`: introspect/defaults, edit overrides, in-process hot-reload, import/remove (restart).
-- `admin.html` — single-file vanilla-JS admin page (no framework, no build).
+- `src/mcp_gateway/config_loader.py` — Pydantic models + `config.toml` → proxy config + transforms; also `dump_toml`/`save` (admin writes config back).
+- `src/mcp_gateway/server.py` — one single-backend `create_proxy` per backend, each mounted at `/<backend>/mcp` under a parent Starlette (+ `/admin` + `/health`); lifespans composed via `AsyncExitStack`.
+- `src/mcp_gateway/admin.py` — admin UI/API at `/admin`: introspect/defaults, edit overrides, in-process hot-reload, import/remove (restart).
+- `src/mcp_gateway/admin.html` — single-file vanilla-JS admin page (no framework, no build).
   Tests guard it against merge-conflict remnants and JS syntax errors
   (`node --check` of the inline script) — it broke silently once.
-- `install.sh` — idempotent launchd (re)install through the `~/.local/opt`
-  symlink (#149); `--dry-run` prints actions. `just install` wraps it.
+- `install.sh` — idempotent launchd (re)install: bootstraps the venv (uv sync),
+  renders `deploy/com.void.mcp-gateway.plist.template` (@@HOME@@) for the
+  installing user, wires the `~/.local/opt` symlink (#149). `--dry-run` prints
+  actions. `just install` wraps it. The repo carries NO personal paths.
 - `config.toml` — the LIVE, admin-managed config (**gitignored** — regenerated on
   every UI save). Auto-seeded from `config.default.toml` on first run (`config_loader.ensure_config`).
-- `config.default.toml` — committed runnable seed (both backends passthrough).
+- `src/mcp_gateway/config.default.toml` — committed runnable seed (ships in the wheel; seeds config.toml on first run).
   `config.example.toml` — full annotated schema reference. Defaults/backups for
   the runtime live under `~/.local/state/mcp-gateway/`.
 - `.claude/skills/mcp-tool-design/` — the tuning pipeline for the backend

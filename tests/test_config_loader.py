@@ -12,7 +12,7 @@ from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 from pydantic import ValidationError
 
-import config_loader as cl
+from mcp_gateway import config_loader as cl
 
 # --- strategies ------------------------------------------------------------
 
@@ -137,7 +137,12 @@ def test_self_check_main_runs_clean():
 
     repo = pathlib.Path(__file__).resolve().parent.parent
     r = subprocess.run(
-        [sys.executable, "config_loader.py", "config.default.toml"],
+        [
+            sys.executable,
+            "-m",
+            "mcp_gateway.config_loader",
+            "src/mcp_gateway/config.default.toml",
+        ],
         cwd=repo,
         check=False,  # returncode asserted below with stderr attached
         capture_output=True,
