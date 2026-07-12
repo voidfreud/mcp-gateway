@@ -6,7 +6,9 @@ from __future__ import annotations
 import json
 import string
 
+import anyio
 import pytest
+import structlog
 from hypothesis import given
 from hypothesis import strategies as st
 
@@ -976,3 +978,126 @@ def test_effective_tools_scopes_to_one_backend(defaults_dir):
     )
     assert {t["backend"] for t in admin.effective_tools(cfg, "b1")} == {"b1"}
     assert {t["backend"] for t in admin.effective_tools(cfg)} == {"b1", "b2"}
+
+
+# --- #43: throttled baseline refresh -----------------------------------------
+
+
+def _fake_capture(tools=("t1",), instructions=None):
+    async def capture(b):
+        return {
+            "backend": b.name,
+            "captured_at": 0,
+            "instructions": instructions,
+            "server_info": None,
+            "capabilities": None,
+            "tools": [
+                {"original": t, "title": None, "description": "d", "params": []}
+                for t in tools
+            ],
+        }
+
+    return capture
+
+
+def _b(name="b"):
+    return cl.Backend(name=name, transport="stdio", command="/bin/x")
+
+
+def test_refresh_defaults_captures_and_reports_delta(defaults_dir, monkeypatch):
+    _write_defaults(defaults_dir, "b", "t1")
+    monkeypatch.setattr(admin, "capture_defaults", _fake_capture(("t1", "t2")))
+    log = structlog.get_logger("test")
+    res = anyio.run(lambda: admin.refresh_defaults(_b(), log))
+    assert res["status"] == "refreshed"
+    assert res["added"] == ["t2"] and res["removed"] == []
+    assert res["changed"] is True
+    # the baseline file was rewritten
+    assert {t["original"] for t in admin.load_defaults("b")["tools"]} == {"t1", "t2"}
+
+
+def test_refresh_defaults_unchanged_is_not_changed(defaults_dir, monkeypatch):
+    _write_defaults(defaults_dir, "b", "t1")
+    monkeypatch.setattr(admin, "capture_defaults", _fake_capture(("t1",)))
+    log = structlog.get_logger("test")
+    res = anyio.run(lambda: admin.refresh_defaults(_b(), log))
+    assert res["status"] == "refreshed" and res["changed"] is False
+
+
+def test_refresh_defaults_throttles_second_call(defaults_dir, monkeypatch):
+    _write_defaults(defaults_dir, "b", "t1")
+    calls = []
+
+    async def capture(b):
+        calls.append(b.name)
+        return await _fake_capture(("t1",))(b)
+
+    monkeypatch.setattr(admin, "capture_defaults", capture)
+    log = structlog.get_logger("test")
+
+    async def go():
+        first = await admin.refresh_defaults(_b(), log)
+        second = await admin.refresh_defaults(_b(), log)
+        forced = await admin.refresh_defaults(_b(), log, force=True)
+        return first, second, forced
+
+    first, second, forced = anyio.run(go)
+    assert first["status"] == "refreshed"
+    assert second["status"] == "throttled"
+    assert forced["status"] == "refreshed"  # manual Re-inspect bypasses
+    assert calls == ["b", "b"]
+
+
+def test_refresh_defaults_error_keeps_throttle(defaults_dir, monkeypatch):
+    # a down backend is retried at the throttle cadence, not on every trigger
+    async def capture(b):
+        raise RuntimeError("down")
+
+    monkeypatch.setattr(admin, "capture_defaults", capture)
+    log = structlog.get_logger("test")
+
+    async def go():
+        return (
+            await admin.refresh_defaults(_b(), log),
+            await admin.refresh_defaults(_b(), log),
+        )
+
+    first, second = anyio.run(go)
+    assert first["status"] == "error" and "down" in first["error"]
+    assert second["status"] == "throttled"
+
+
+def test_refresh_and_reload_hot_reloads_only_on_change(
+    defaults_dir, tmp_path, monkeypatch
+):
+    _write_defaults(defaults_dir, "b", "t1")
+    cfg = _single_cfg()
+    path = tmp_path / "config.toml"
+    cl.save(cfg, str(path))
+    reloads = []
+    monkeypatch.setattr(admin, "hot_reload", lambda *a, **k: reloads.append(a[3]))
+    log = structlog.get_logger("test")
+
+    monkeypatch.setattr(admin, "capture_defaults", _fake_capture(("t1",)))
+    res = anyio.run(
+        lambda: admin.refresh_and_reload(_b(), str(path), {}, {}, log, force=True)
+    )
+    assert res["changed"] is False and reloads == []
+
+    monkeypatch.setattr(admin, "capture_defaults", _fake_capture(("t1", "t2")))
+    res = anyio.run(
+        lambda: admin.refresh_and_reload(_b(), str(path), {}, {}, log, force=True)
+    )
+    assert res["changed"] is True and reloads == ["b"]
+
+
+def test_refresh_defaults_instructions_change_counts_as_changed(
+    defaults_dir, monkeypatch
+):
+    _write_defaults(defaults_dir, "b", "t1")  # stub has no "instructions" key
+    monkeypatch.setattr(
+        admin, "capture_defaults", _fake_capture(("t1",), instructions="new blurb")
+    )
+    log = structlog.get_logger("test")
+    res = anyio.run(lambda: admin.refresh_defaults(_b(), log))
+    assert res["changed"] is True

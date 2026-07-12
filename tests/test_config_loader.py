@@ -747,3 +747,37 @@ def test_param_no_default_omitted_from_toml():
     cfg = _cfg_with_param({"original": "p", "hide": True})
     raw = cl.to_raw(cfg)
     assert "default" not in raw["backends"][0]["tools"][0]["params"][0]
+
+
+# --- #43: introspect_interval knob -------------------------------------------
+
+
+def test_introspect_interval_default_off_and_omitted():
+    cfg = cl.GatewayConfig.model_validate(
+        {"backends": [{"name": "b", "transport": "stdio", "command": "/bin/x"}]}
+    )
+    assert cfg.introspect_interval == 0
+    assert "introspect_interval" not in cl.to_raw(cfg)
+
+
+def test_introspect_interval_roundtrips():
+    cfg = cl.GatewayConfig.model_validate(
+        {
+            "introspect_interval": 900,
+            "backends": [{"name": "b", "transport": "stdio", "command": "/bin/x"}],
+        }
+    )
+    reparsed = cl.GatewayConfig.model_validate(tomllib.loads(cl.dump_toml(cfg)))
+    assert reparsed.introspect_interval == 900
+
+
+def test_introspect_interval_rejects_negative():
+    import pydantic
+
+    with pytest.raises((cl.ConfigError, pydantic.ValidationError)):
+        cl.GatewayConfig.model_validate(
+            {
+                "introspect_interval": -5,
+                "backends": [{"name": "b", "transport": "stdio", "command": "/bin/x"}],
+            }
+        )

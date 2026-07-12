@@ -23,7 +23,8 @@ Not levers: schemas (types/enums/required), annotations, response shapes — tho
 ## Reading state
 
 - Effective surface + byte budgets: `surface.py` (see SKILL.md step 1).
-- Raw captured text as the backend shipped it: `~/.local/state/mcp-gateway/defaults/<backend>.json` (also `server_info`, `capabilities`).
+- Raw captured text as the backend shipped it: `~/.local/state/mcp-gateway/defaults/<backend>.json` (also `server_info`, `capabilities`). The baseline auto-refreshes (#43: post-(re)connect, backend `tools/list_changed`, admin page load, optional interval) — overrides are diffs by original name, so a refresh never clobbers edits; new tools appear un-overridden.
+- Per-backend liveness: `GET /admin/api/status` (#23) — `ok`/`error`/`unmounted`/`disabled` + latency, probed through the live proxy.
 - Everything at once, as the admin UI sees it: `GET http://127.0.0.1:9100/admin/api/state`.
 - Live probe of a real tool through the gateway (research use, respect read-onlyness): `POST /admin/api/run` `{backend, tool, args}`.
 

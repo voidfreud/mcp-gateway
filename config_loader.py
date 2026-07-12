@@ -237,6 +237,11 @@ class GatewayConfig(BaseModel, extra="forbid"):
     host: str = "127.0.0.1"
     port: int = 9100
     log_file: str = "~/.local/state/mcp-gateway/gateway.log"
+    # #43: scheduled re-introspection interval in seconds. OFF by default (0) —
+    # the event-driven triggers (post-mount refresh, tools/list_changed, admin
+    # page load) cover everything but a long-lived remote backend that hot-swaps
+    # tools silently; set an interval only for that rare case.
+    introspect_interval: int = Field(default=0, ge=0)
     backends: list[Backend] = Field(default_factory=list)
 
     @model_validator(mode="after")
@@ -558,6 +563,8 @@ def to_raw(cfg: GatewayConfig) -> dict:  # noqa: PLR0915 — field-by-field TOML
         "port": cfg.port,
         "log_file": cfg.log_file,
     }
+    if cfg.introspect_interval:  # default 0 (off) — only persist when set (#43)
+        out["introspect_interval"] = cfg.introspect_interval
     out["backends"] = [_backend(b) for b in cfg.backends]
     return out
 

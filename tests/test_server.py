@@ -370,7 +370,7 @@ def test_slow_backend_does_not_block_boot_or_others(tmp_path, monkeypatch):
     started, mounted = [], []
 
     async def fake_mount(
-        app, stack, b, cfg, all_tools, meta, captured, _reg, _hold, log
+        app, stack, b, cfg, all_tools, meta, captured, _reg, _hold, log, *extra
     ):
         started.append(b.name)
         if b.name == "slow":
@@ -667,7 +667,7 @@ def test_boot_skips_disabled_backends(tmp_path, monkeypatch):
     mounted = []
 
     async def fake_mount(
-        app, stack, b, cfg, all_tools, meta, captured, reg, _hold, log
+        app, stack, b, cfg, all_tools, meta, captured, reg, _hold, log, *extra
     ):
         mounted.append(b.name)
         reg[b.name] = object()
@@ -771,3 +771,153 @@ def test_hidden_required_param_default_injected():
     assert res.isError is False
     texts = [blk.text for blk in res.content if blk.type == "text"]
     assert texts == ["loud:hi"]  # the injected default reached the backend
+
+
+# ---------------------------------------------------------------------------
+# #23 — /admin/api/status: per-backend liveness, isolated + bounded
+# ---------------------------------------------------------------------------
+
+
+def _status_app(tmp_path, registry, backends=None):
+    cfg = cl.GatewayConfig.model_validate(
+        {
+            "backends": backends
+            or [
+                {"name": "b", "transport": "stdio", "command": "/bin/x"},
+                {"name": "c", "transport": "stdio", "command": "/bin/y"},
+            ]
+        }
+    )
+    path = tmp_path / "config.toml"
+    cl.save(cfg, str(path))
+    app = Starlette()
+    admin.register(app, str(path), structlog.get_logger("test"), registry, {})
+    return app
+
+
+def test_status_ok_unmounted_disabled_error(tmp_path):
+    backends = [
+        {"name": "b", "transport": "stdio", "command": "/bin/x"},  # live
+        {"name": "c", "transport": "stdio", "command": "/bin/y"},  # not mounted
+        {"name": "d", "transport": "stdio", "command": "/bin/z", "enabled": False},
+        {"name": "e", "transport": "stdio", "command": "/bin/w"},  # broken proxy
+    ]
+    registry = {"b": _echo_server(), "e": object()}  # e: Client() will choke
+    client = TestClient(_status_app(tmp_path, registry, backends))
+    r = client.get("/admin/api/status")
+    assert r.status_code == 200
+    s = r.json()["backends"]
+    assert s["b"]["state"] == "ok" and s["b"]["tools"] == 2 and s["b"]["ms"] >= 0
+    assert s["c"]["state"] == "unmounted"
+    assert s["d"]["state"] == "disabled"
+    assert s["e"]["state"] == "error" and s["e"]["error"]
+
+
+# ---------------------------------------------------------------------------
+# #43 — /admin/api/refresh + re-introspect delta + list_changed handler
+# ---------------------------------------------------------------------------
+
+
+def _fake_capture(tools):
+    async def capture(b):
+        return {
+            "backend": b.name,
+            "captured_at": 0,
+            "instructions": None,
+            "server_info": None,
+            "capabilities": None,
+            "tools": [
+                {"original": t, "title": None, "description": "d", "params": []}
+                for t in tools
+            ],
+        }
+
+    return capture
+
+
+def test_refresh_route_refreshes_mounted_skips_rest(tmp_path, monkeypatch):
+    monkeypatch.setattr(admin, "capture_defaults", _fake_capture(["echo", "boom"]))
+    registry = {"b": _echo_server()}
+    client = TestClient(_status_app(tmp_path, registry))
+    r = client.post("/admin/api/refresh")
+    assert r.status_code == 200
+    res = r.json()["backends"]
+    assert res["b"]["status"] == "refreshed"
+    assert sorted(res["b"]["added"]) == ["boom", "echo"]  # no prior baseline
+    assert res["c"]["status"] == "skipped"  # not mounted
+    # the baseline file landed
+    assert {t["original"] for t in admin.load_defaults("b")["tools"]} == {
+        "echo",
+        "boom",
+    }
+
+
+def test_reintrospect_route_reports_delta_and_errors(tmp_path, monkeypatch):
+    monkeypatch.setattr(admin, "capture_defaults", _fake_capture(["echo"]))
+    registry = {"b": _echo_server()}
+    client = TestClient(_status_app(tmp_path, registry))
+    r = client.post("/admin/api/introspect/b")
+    assert r.status_code == 200 and r.json()["added"] == ["echo"]
+
+    assert client.post("/admin/api/introspect/nope").status_code == 400
+
+    async def broken(b):
+        raise RuntimeError("backend down")
+
+    monkeypatch.setattr(admin, "capture_defaults", broken)
+    r = client.post("/admin/api/introspect/b")  # force=True bypasses throttle
+    assert r.status_code == 502
+    assert "backend down" in r.json()["error"]
+
+
+def test_list_changed_handler_enqueues_via_real_dispatch():
+    """Tripwire on FastMCP's MessageHandler dispatch: a wire-shaped
+    ToolListChangedNotification must reach on_tool_list_changed and enqueue the
+    backend; a full queue is swallowed (a refresh is already pending)."""
+    import mcp.types
+
+    b = cl.Backend(name="b", transport="stdio", command="/bin/x")
+    got = []
+    h = server._ListChangedHandler(b, got.append, structlog.get_logger("test"))
+    note = mcp.types.ServerNotification(
+        mcp.types.ToolListChangedNotification(method="notifications/tools/list_changed")
+    )
+    anyio.run(h, note)
+    assert got == [b]
+
+    def full(_):
+        raise anyio.WouldBlock
+
+    h2 = server._ListChangedHandler(b, full, structlog.get_logger("test"))
+    anyio.run(h2, note)  # must not raise
+
+
+def test_post_mount_refresh_trigger_fires(tmp_path, monkeypatch):
+    """#43 trigger 1: a successful mount schedules a background baseline
+    refresh for that backend (throttled inside refresh_defaults)."""
+    refreshed = []
+
+    async def fake_refresh(b, *a, **k):
+        refreshed.append(b.name)
+        return {"status": "refreshed", "changed": False}
+
+    monkeypatch.setattr(admin, "refresh_and_reload", fake_refresh)
+
+    async def fake_mount(app, stack, b, *a, **k):
+        return True
+
+    monkeypatch.setattr(server, "_mount_backend", fake_mount)
+    cfg = cl.GatewayConfig.model_validate(
+        {"backends": [{"name": "b", "transport": "stdio", "command": "/bin/x"}]}
+    )
+    path = tmp_path / "config.toml"
+    cl.save(cfg, str(path))
+    app = server._build_app(
+        cfg, structlog.get_logger("test"), {}, {}, {}, config_path=str(path)
+    )
+    with TestClient(app):
+        for _ in range(100):
+            if refreshed:
+                break
+            time.sleep(0.02)
+    assert refreshed == ["b"]

@@ -27,6 +27,7 @@ import anyio
 import structlog
 import uvicorn
 from fastmcp import Client
+from fastmcp.client.messages import MessageHandler
 from fastmcp.server import create_proxy
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 from mcp.server.lowlevel.server import NotificationOptions
@@ -226,6 +227,94 @@ class BodyLimitMiddleware:
 
 
 # ---------------------------------------------------------------------------
+# tools/list_changed subscription (#43)
+# ---------------------------------------------------------------------------
+
+
+class _AutoRefresh:
+    """The #43 auto-refresh plumbing, bundled so the lifespan stays readable:
+    a bounded queue + single worker for ``tools/list_changed`` pushes (a push
+    must never block the backend session's message pump), the post-mount
+    refresh, and the opt-in scheduled sweep. ``close()`` ends both tasks."""
+
+    def __init__(  # noqa: PLR0913 — same lifespan plumbing as _mount_backend
+        self, interval: int, config_path: str, registry: dict, holders: dict, log
+    ) -> None:
+        self.interval = interval
+        self._config_path = config_path
+        self._registry = registry
+        self._holders = holders
+        self._log = log
+        self.shutdown = anyio.Event()
+        self.send, self._recv = anyio.create_memory_object_stream(16)
+
+    async def refresh(self, b, throttle=None):
+        """Re-capture one backend's baseline + hot-reload on change (#43).
+        Never raises — auto-refresh is best-effort background work."""
+        try:
+            await admin.refresh_and_reload(
+                b,
+                self._config_path,
+                self._registry,
+                self._holders,
+                self._log,
+                throttle=admin.REFRESH_THROTTLE if throttle is None else throttle,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._log.warning("auto_refresh_error", backend=b.name, error=str(exc))
+
+    async def worker(self) -> None:
+        async for b in self._recv:  # ends when self.send closes
+            await self.refresh(b, admin.LIST_CHANGED_THROTTLE)
+
+    async def interval_loop(self) -> None:
+        # trigger 4 — scheduled sweep, OFF by default (introspect_interval = 0);
+        # a pure safety net for a backend that neither reconnects nor declares
+        # tools.listChanged.
+        while True:
+            with anyio.move_on_after(self.interval):
+                await self.shutdown.wait()
+            if self.shutdown.is_set():
+                return
+            live = config_loader.load(self._config_path)
+            for b in live.backends:
+                if b.enabled and b.name in self._registry:
+                    await self.refresh(b)
+
+    def close(self) -> None:
+        self.shutdown.set()
+        self.send.close()
+
+
+class _ListChangedHandler(MessageHandler):
+    """Enqueue a backend re-introspection when it pushes
+    ``notifications/tools/list_changed`` (#43).
+
+    Only wired for STATEFUL backends — stateless ones use a fresh session per
+    request, so there is no persistent connection to receive pushes (their
+    refresh comes from the other triggers). Passing a ``message_handler``
+    replaces FastMCP's default ``TaskNotificationHandler`` on this client;
+    fine here — the gateway never starts SEP-1686 background tasks on
+    backends. The handler must never block this session's message pump (live
+    tool calls share it), so it only ENQUEUES; the lifespan's refresh worker
+    does the actual seconds-long re-capture.
+    """
+
+    def __init__(self, backend: config_loader.Backend, send_nowait, log) -> None:
+        super().__init__()
+        self._backend = backend
+        self._send_nowait = send_nowait
+        self._log = log
+
+    async def on_tool_list_changed(self, _notification) -> None:
+        try:
+            self._send_nowait(self._backend)
+            self._log.info("tools_list_changed", backend=self._backend.name)
+        except anyio.WouldBlock:
+            pass  # queue full — a refresh for this burst is already pending
+
+
+# ---------------------------------------------------------------------------
 # Startup reconciliation: warn on configured tools that no backend exposes
 # ---------------------------------------------------------------------------
 
@@ -303,9 +392,13 @@ async def _mount_backend(  # noqa: PLR0913 — the mount needs the full lifespan
     registry: dict,
     holders: dict,
     log,
+    message_handler: MessageHandler | None = None,
 ) -> bool:
     """Build ONE backend's proxy, apply its transforms + instructions, run its
     http lifespan, and mount it at ``/<backend>/mcp``. Returns True on success.
+
+    *message_handler* (stateful backends only) subscribes the persistent client
+    to backend notifications — the ``tools/list_changed`` trigger of #43.
 
     ``stateless=false`` backends are built from a **persistent connected Client**
     (entered on *stack*, so one warm backend session is reused for the daemon's
@@ -319,7 +412,10 @@ async def _mount_backend(  # noqa: PLR0913 — the mount needs the full lifespan
         if not b.stateless:
             # Warm: one connected client reused for every call (issues #8/#9).
             client = await stack.enter_async_context(
-                Client(config_loader.to_proxy_config_one(b))
+                Client(
+                    config_loader.to_proxy_config_one(b),
+                    message_handler=message_handler,
+                )
             )
             proxy = create_proxy(client, name=name)
         else:
@@ -364,7 +460,7 @@ async def _mount_backend(  # noqa: PLR0913 — the mount needs the full lifespan
 # ---------------------------------------------------------------------------
 
 
-def _build_app(  # noqa: PLR0913 — composition root; takes what it wires
+def _build_app(  # noqa: PLR0913, PLR0915 — composition root; takes what it wires, and its lifespan owns the per-runner anyio scope rules (splitting would scatter them)
     cfg: config_loader.GatewayConfig,
     log,
     all_tools: dict,
@@ -401,6 +497,10 @@ def _build_app(  # noqa: PLR0913 — composition root; takes what it wires
         # route. On shutdown we set them all. A disabled backend is never mounted
         # (boot skips it), so its endpoint is simply absent (404) until re-enabled.
         stops: dict[str, anyio.Event] = {}
+        # #43: list_changed queue + worker, post-mount refresh, interval sweep.
+        refresher = _AutoRefresh(
+            cfg.introspect_interval, config_path, registry, holders, log
+        )
 
         async def runner(  # noqa: PLR0913 — mirrors _mount_backend's signature
             b,
@@ -413,6 +513,13 @@ def _build_app(  # noqa: PLR0913 — composition root; takes what it wires
         ):
             ev = anyio.Event()
             stops[b.name] = ev
+            # Stateful backends get a persistent client -> subscribe it to
+            # tools/list_changed (#43); stateless ones have no standing session.
+            handler = (
+                None
+                if b.stateless
+                else _ListChangedHandler(b, refresher.send.send_nowait, log)
+            )
             try:
                 async with AsyncExitStack() as stack:
                     ok = await _mount_backend(
@@ -426,15 +533,24 @@ def _build_app(  # noqa: PLR0913 — composition root; takes what it wires
                         registry,
                         holders,
                         log,
+                        handler,
                     )
                     task_status.started(ok)
                     if ok:
+                        # #43 trigger 1 (the load-bearing one): a (re)connect
+                        # means possibly-new backend state — re-capture the
+                        # baseline in the background (throttled; boot after an
+                        # upgrade catches e.g. gitnexus 13 -> 17 tools).
+                        tg.start_soon(refresher.refresh, b)
                         await ev.wait()
             finally:
                 stops.pop(b.name, None)
                 _unmount(app, b.name, registry, holders)
 
         async with anyio.create_task_group() as tg:
+            tg.start_soon(refresher.worker)  # #43: list_changed consumer
+            if refresher.interval > 0:
+                tg.start_soon(refresher.interval_loop)
             # #61: start every backend's runner CONCURRENTLY and don't block
             # readiness on any of them — boot ≈ the slowest backend instead of
             # the sum, and a slow/hung backend delays only its own endpoint
@@ -480,6 +596,7 @@ def _build_app(  # noqa: PLR0913 — composition root; takes what it wires
             finally:
                 hooks.pop("add", None)
                 hooks.pop("remove", None)
+                refresher.close()  # ends the worker + interval loop (#43)
                 for ev in list(stops.values()):
                     ev.set()  # graceful: every runner exits its stack, tg drains
                 # A runner stuck mid-connect never reaches its event wait; without a

@@ -66,6 +66,16 @@
   .chip { font: 500 9px var(--mono); padding: 1px 5px; border-radius: 3px;
           border: 1px solid var(--b); color: var(--tm); flex-shrink: 0; }
 
+  /* Connection-status dots (#23) — painted async from /admin/api/status */
+  .st-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--td);
+            flex-shrink: 0; display: inline-block; }
+  .st-dot.st-ok  { background: var(--gn); box-shadow: 0 0 6px rgba(72,204,136,.45); }
+  .st-dot.st-err { background: var(--rd); box-shadow: 0 0 6px rgba(255,103,103,.45); }
+  .st-dot.st-off { background: var(--td); }
+  .st-dot.st-unk { background: var(--td); animation: glow 1.6s infinite; }
+  .st-line.st-ok-t  { color: var(--gn); }
+  .st-line.st-err-t { color: var(--rd); }
+
   /* Layout */
   .wrap { flex: 1; display: flex; min-height: 0; }
   aside { width: 248px; background: var(--s1); border-right: 1px solid var(--b);
@@ -331,6 +341,7 @@
 const $ = (s, r=document) => r.querySelector(s);
 const GATEWAY = '__gateway__';  // sentinel for the gateway pseudo-item
 let STATE = null, SELECTED = null;
+let STATUS = null;  // #23: backend name -> {state, ms, tools, error}, async
 const timers = {};
 
 async function api(method, path, body) {
@@ -353,6 +364,68 @@ async function load() {
   if (SELECTED === GATEWAY) renderDetail(GATEWAY);
   else if (SELECTED && STATE.backends.find(b => b.name === SELECTED)) renderDetail(SELECTED);
   else { SELECTED = null; $('#detail').innerHTML = '<div class="empty">Select an MCP on the left.</div>'; }
+}
+
+// --- #23 connection status + #43 dashboard-load refresh -------------------
+// Both are async and non-blocking: the page paints from cached state first,
+// dots/lists update as each probe resolves; a down backend marks itself only.
+function stateOf(name) {
+  const b = STATE && STATE.backends.find(x => x.name === name);
+  if (b && !b.enabled) return 'off';
+  const s = STATUS && STATUS[name];
+  if (!s) return 'unk';
+  return s.state === 'ok' ? 'ok' : (s.state === 'disabled' ? 'off' : 'err');
+}
+function stTitle(name) {
+  const s = STATUS && STATUS[name];
+  const b = STATE && STATE.backends.find(x => x.name === name);
+  if (b && !b.enabled) return 'disabled';
+  if (!s) return 'checking…';
+  if (s.state === 'ok') return `connected · ${s.tools} tools · ${s.ms} ms`;
+  if (s.state === 'unmounted') return 'not mounted — failed to connect (see logs)';
+  if (s.state === 'disabled') return 'disabled';
+  return 'unreachable: ' + (s.error || 'error');
+}
+function paintStatus() {
+  document.querySelectorAll('.st-dot[data-b]').forEach(el => {
+    el.classList.remove('st-ok', 'st-err', 'st-off', 'st-unk');
+    el.classList.add('st-' + stateOf(el.dataset.b));
+    el.title = stTitle(el.dataset.b);
+  });
+  document.querySelectorAll('.st-line[data-b]').forEach(el => {
+    el.textContent = stTitle(el.dataset.b);
+    el.classList.remove('st-ok-t', 'st-err-t');
+    const st = stateOf(el.dataset.b);
+    if (st === 'ok') el.classList.add('st-ok-t');
+    if (st === 'err') el.classList.add('st-err-t');
+  });
+  const sum = $('[data-stsum]');
+  if (sum && STATUS && STATE) {
+    const bad = STATE.backends.filter(b => b.enabled && stateOf(b.name) === 'err');
+    const off = STATE.backends.filter(b => !b.enabled).length;
+    sum.textContent = bad.length ? bad.map(b => b.name).join(', ') + ' unreachable'
+      : (off ? off + ' off' : 'all connected');
+    sum.className = 's-sub ' + (bad.length ? 'rd' : (off ? 'rd' : 'gn'));
+  }
+}
+async function refreshStatus() {
+  try { STATUS = (await api('GET', '/admin/api/status')).backends; paintStatus(); }
+  catch {}
+}
+let REFRESHED_ONCE = false;
+async function refreshBackends() {  // #43: on-dashboard-load re-introspect
+  if (REFRESHED_ONCE) return;       // once per page load; the server throttles too
+  REFRESHED_ONCE = true;
+  try {
+    const j = await api('POST', '/admin/api/refresh');
+    const changed = Object.entries(j.backends || {})
+      .filter(([, r]) => r.status === 'refreshed' && r.changed);
+    if (changed.length) {
+      await load();
+      toast('tool lists refreshed: ' + changed.map(([n, r]) =>
+        `${n} +${(r.added || []).length}/−${(r.removed || []).length}`).join(' · '), 5000);
+    }
+  } catch {}
 }
 
 // how many of a backend's tools carry any override
@@ -385,6 +458,7 @@ function renderList() {
                  title="${b.enabled ? 'broadcasting — click to disable' : 'disabled — click to enable'}">
           ${b.always_load ? '<button class="b-pin-ind" title="whole server pinned — click to unpin">📌</button>' : ''}
         </span>
+        <span class="st-dot st-unk" data-b="${esc(b.name)}"></span>
         <div class="nm" title="${esc(b.name)}">${label}</div>
         <span class="chip">${chipT(b.transport)}</span>
       </div>
@@ -400,6 +474,7 @@ function renderList() {
     if (bp) bp.addEventListener('click', e => { e.stopPropagation(); pinBackend(b.name, false); });
     el.appendChild(d);
   });
+  paintStatus();  // re-apply live connection states to the fresh dots (#23)
 }
 
 function renderDetail(name) {
@@ -411,9 +486,11 @@ function renderDetail(name) {
     : esc(b.url || '');
   m.innerHTML = `
     <div class="b-head">
+      <span class="st-dot st-unk" data-b="${esc(b.name)}"></span>
       <h2>${esc(b.display_name || b.name)}</h2>
       <span class="chip">${chipT(b.transport)}</span>
       <span class="url">${conn}</span>
+      <span class="si st-line" data-b="${esc(b.name)}"></span>
       <span class="spacer"></span>
       <button class="btn" style="font-size:11px" onclick="reintrospect('${escJS(b.name)}')">Re-inspect</button>
       <button class="btn btn-danger" style="font-size:11px" onclick="delBackend('${escJS(b.name)}')">Remove</button>
@@ -448,6 +525,7 @@ function renderDetail(name) {
   wireInstr(m, b.name, b.default_instructions);
   wireCaps(m);
   wireGrow(m);
+  paintStatus();  // #23: live state for the header dot + status line
   const tw = $('#tools', m);
   if (!b.introspected) { tw.innerHTML = '<div class="empty">Backend not introspected yet — click Re-inspect.</div>'; return; }
   // Order: pinned first, switched-off last; among equals, overridden above.
@@ -587,7 +665,7 @@ function renderGateway() {
     const pct = Math.min(100, Math.round(100 * instr / 2048));
     const near = pct >= 80;
     return `<div class="ep${near ? ' near' : ''}">
-      <div class="e-top"><span class="dot5${b.enabled ? '' : ' off'}"></span>
+      <div class="e-top"><span class="st-dot st-unk" data-b="${esc(b.name)}"></span>
         <span class="e-nm">${esc(b.display_name || b.name)}</span><span class="chip">${chipT(b.transport)}</span></div>
       <span class="e-url">${esc(base + (b.endpoint || ''))}</span>
       <div class="e-counts"><span>${b.tools.length} tools</span>
@@ -634,7 +712,7 @@ function renderGateway() {
         <div class="s-val" style="display:flex;align-items:center;gap:10px">${on}/${total}
           <input type="checkbox" class="tgl" id="masterTgl"
             title="broadcast all backends on/off"></div>
-        <div class="s-sub ${on === total ? 'gn' : 'rd'}">${on === total ? 'all connected' : (total - on) + ' off'}</div></div>
+        <div class="s-sub ${on === total ? 'gn' : 'rd'}" data-stsum>${on === total ? 'all connected' : (total - on) + ' off'}</div></div>
       <div class="stat"><div class="s-lbl">Tools</div>
         <div class="s-val">${toolTot}</div>
         <div class="s-sub ac">${ovrTot} overridden</div></div>
@@ -672,6 +750,7 @@ function renderGateway() {
     mt.indeterminate = on > 0 && on < total;
     mt.addEventListener('change', () => enableAll(mt.checked));
   }
+  paintStatus();  // #23
 }
 
 // Tool card — editable fields prefilled with effective values (#62 semantics).
@@ -1126,7 +1205,12 @@ async function resetTool(backend, original) {
   catch (e) { toast('reset failed: ' + e.message); }
 }
 async function reintrospect(name) {
-  try { await api('POST', '/admin/api/introspect/' + encodeURIComponent(name)); await load(); toast('re-inspected ' + name); }
+  try {
+    const r = await api('POST', '/admin/api/introspect/' + encodeURIComponent(name));
+    await load();
+    const a = (r.added || []).length, d = (r.removed || []).length;
+    toast('re-inspected ' + name + (a || d ? ` — +${a}/−${d} tools` : ' — no changes'));
+  }
   catch (e) { toast('inspect failed: ' + e.message); }
 }
 async function pinBackend(name, value) {
@@ -1239,7 +1323,9 @@ function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;',
 // JS-escape then HTML-escape for inline on*="fn('…')" handlers (issue #51).
 function escJS(s) { return esc(String(s ?? '').replace(/\\/g, '\\\\').replace(/'/g, "\\'")); }
 
-load();
+// Boot: paint from cached state immediately, then (async, non-blocking) probe
+// liveness (#23) and run the throttled on-open re-introspect sweep (#43).
+load().then(() => { refreshStatus(); refreshBackends(); });
 </script>
 </body>
 </html>

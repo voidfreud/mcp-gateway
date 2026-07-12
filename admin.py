@@ -45,6 +45,21 @@ LAUNCHD_LABEL = "com.void.mcp-gateway"
 # Generous enough for a cold stdio backend (e.g. gitnexus' ~13s re-index).
 CAPTURE_TIMEOUT = 30.0
 
+# #43: minimum gap between automatic re-introspections of one backend, so
+# reconnect storms / rapid dashboard reloads can't hammer a backend. Manual
+# Re-inspect (force=True) bypasses it; a tools/list_changed push uses a short
+# floor instead (LIST_CHANGED_THROTTLE) since the backend itself asked.
+REFRESH_THROTTLE = 300.0
+LIST_CHANGED_THROTTLE = 2.0
+
+# #23: upper bound on one backend's liveness probe for /admin/api/status.
+STATUS_TIMEOUT = 5.0
+
+# #43: per-backend timestamp of the last (attempted) auto-refresh. In-process
+# only — resets on restart, which is exactly right: a fresh daemon means fresh
+# backend connections, whose baselines should re-capture once.
+_last_refresh: dict[str, float] = {}
+
 
 @functools.cache
 def gateway_version() -> str:
@@ -201,9 +216,64 @@ async def ensure_defaults(cfg: GatewayConfig, log, force: str | None = None) -> 
                 continue
         try:
             save_defaults(await capture_defaults(b))
+            # stamp the #43 throttle: a just-captured baseline is fresh, the
+            # post-mount auto-refresh shouldn't immediately re-capture it
+            _last_refresh[b.name] = time.monotonic()
             log.info("defaults_captured", backend=b.name)
         except Exception as exc:  # noqa: BLE001
             log.warning("defaults_capture_failed", backend=b.name, error=str(exc))
+
+
+async def refresh_defaults(
+    b: Backend, log, *, force: bool = False, throttle: float = REFRESH_THROTTLE
+) -> dict:
+    """Re-capture ONE backend's baseline, throttled (#43). Returns a result
+    dict: ``{"status": "refreshed"|"throttled"|"error", ...}``; on refresh it
+    carries ``added``/``removed`` (original tool names vs the previous baseline)
+    and ``changed`` (tools OR server instructions differ).
+
+    Override safety: this only rewrites the immutable baseline; user overrides
+    are stored separately as diffs and merged by original name, so a refresh
+    never clobbers edits — new tools appear un-overridden, removed tools drop.
+
+    The throttle stamp is set BEFORE the capture await (storms coalesce) and
+    kept on failure (a down backend is retried at the throttle cadence, not on
+    every trigger).
+    """
+    now = time.monotonic()
+    last = _last_refresh.get(b.name)
+    if not force and last is not None and now - last < throttle:
+        return {"status": "throttled"}
+    _last_refresh[b.name] = now
+    old = load_defaults(b.name)
+    try:
+        data = await capture_defaults(b)
+    except Exception as exc:  # noqa: BLE001 — a down backend is a result, not a crash
+        log.warning("defaults_refresh_failed", backend=b.name, error=str(exc))
+        return {"status": "error", "error": str(exc)}
+    save_defaults(data)
+    old_names = {t["original"] for t in (old or {}).get("tools", [])}
+    new_names = {t["original"] for t in data.get("tools", [])}
+    added = sorted(new_names - old_names)
+    removed = sorted(old_names - new_names)
+    changed = bool(
+        added or removed or (old or {}).get("instructions") != data.get("instructions")
+    )
+    if changed:
+        log.info(
+            "defaults_refreshed",
+            backend=b.name,
+            tools=len(new_names),
+            added=added,
+            removed=removed,
+        )
+    return {
+        "status": "refreshed",
+        "added": added,
+        "removed": removed,
+        "changed": changed,
+        "tools": len(new_names),
+    }
 
 
 def backup_config(config_path: str) -> None:
@@ -778,6 +848,27 @@ def hot_reload(
     log.info("hot_reload", backend=backend)
 
 
+async def refresh_and_reload(  # noqa: PLR0913 — mirrors hot_reload's plumbing args
+    b: Backend,
+    config_path: str,
+    registry: dict,
+    holders: dict,
+    log,
+    *,
+    force: bool = False,
+    throttle: float = REFRESH_THROTTLE,
+) -> dict:
+    """Re-capture one backend's baseline and, if it changed, hot-reload its
+    live transforms + instructions so pins/enabled reconcile with the fresh
+    tool list (#43). The shared tail of every auto-refresh trigger (post-mount,
+    tools/list_changed, dashboard load, interval, manual Re-inspect)."""
+    res = await refresh_defaults(b, log, force=force, throttle=throttle)
+    if res.get("changed"):
+        cfg = cl.load(config_path)
+        hot_reload(registry, holders, cfg, b.name, log)
+    return res
+
+
 def under_launchd() -> bool:
     """True iff *this* process is the one launchd manages, i.e. a kickstart would
     actually restart us. We ask launchctl for the loaded job's pid and compare it
@@ -1119,6 +1210,7 @@ def _backend_routes(ctx: _AdminCtx) -> list[Route]:  # noqa: PLR0915 — stateme
         # taking config_lock, so a slow backend can't block other admin edits.
         try:
             save_defaults(await capture_defaults(b))
+            _last_refresh[b.name] = time.monotonic()  # fresh — see #43 throttle
         except Exception as exc:  # noqa: BLE001
             return JSONResponse(
                 {"ok": False, "error": f"could not connect to backend: {exc}"},
@@ -1188,8 +1280,16 @@ def _backend_routes(ctx: _AdminCtx) -> list[Route]:  # noqa: PLR0915 — stateme
     ]
 
 
+async def admin_refresh(ctx: _AdminCtx, b: Backend, *, force: bool = False) -> dict:
+    """ctx-bound :func:`refresh_and_reload` (#43) for the admin routes."""
+    return await refresh_and_reload(
+        b, ctx.config_path, ctx.registry, ctx.holders, ctx.log, force=force
+    )
+
+
 def _ops_routes(ctx: _AdminCtx) -> list[Route]:
-    """Operational endpoints: mini-inspector, manual restart, re-introspect."""
+    """Operational endpoints: mini-inspector, manual restart, re-introspect,
+    liveness status (#23), and the dashboard-load refresh sweep (#43)."""
 
     async def restart_gateway(_request: Request):
         """Manual on-demand restart of the daemon (#56). Same launchd-gated
@@ -1244,15 +1344,69 @@ def _ops_routes(ctx: _AdminCtx) -> list[Route]:
         )
 
     async def reintrospect(request: Request):
+        """Manual Re-inspect: force a re-capture (bypasses the #43 throttle)
+        and hot-reload so pins/enabled reconcile with the fresh tool list.
+        Unlike the auto triggers, a failure here is surfaced (502), not just
+        logged — the user explicitly asked and deserves the answer."""
         name = request.path_params["name"]
         cfg = ctx.load()
-        await ensure_defaults(cfg, ctx.log, force=name)
-        return JSONResponse({"ok": True})
+        b = next((x for x in cfg.backends if x.name == name), None)
+        if b is None:
+            return _err("unknown backend")
+        res = await admin_refresh(ctx, b, force=True)
+        if res["status"] == "error":
+            return _err(f"introspection failed: {res['error']}", status=502)
+        return JSONResponse({"ok": True, **res})
+
+    async def get_status(_request: Request):
+        """#23: per-backend liveness — one concurrent probe per backend through
+        its LIVE mounted proxy (the same path Claude's list_tools takes), each
+        bounded by STATUS_TIMEOUT so a hung backend marks itself, not the UI."""
+
+        async def one(b: Backend) -> tuple[str, dict]:
+            if not b.enabled:
+                return b.name, {"state": "disabled"}
+            proxy = ctx.registry.get(b.name)
+            if proxy is None:
+                return b.name, {"state": "unmounted"}
+            started = time.perf_counter()
+            try:
+                async with asyncio.timeout(STATUS_TIMEOUT):
+                    async with Client(proxy) as c:
+                        tools = await c.list_tools()
+                return b.name, {
+                    "state": "ok",
+                    "ms": round((time.perf_counter() - started) * 1000, 1),
+                    "tools": len(tools),
+                }
+            except Exception as exc:  # noqa: BLE001 — the error IS the status
+                err = f"{type(exc).__name__}: {exc}"
+                return b.name, {"state": "error", "error": err}
+
+        cfg = ctx.load()
+        results = await asyncio.gather(*(one(b) for b in cfg.backends))
+        return JSONResponse({"backends": dict(results)})
+
+    async def refresh_all(_request: Request):
+        """#43 dashboard-load trigger: throttled re-introspect of every
+        enabled+mounted backend, concurrently and per-backend isolated — a
+        down/slow backend reports itself and never stalls the others."""
+
+        async def one(b: Backend) -> tuple[str, dict]:
+            if not b.enabled or b.name not in ctx.registry:
+                return b.name, {"status": "skipped"}
+            return b.name, await admin_refresh(ctx, b)
+
+        cfg = ctx.load()
+        results = await asyncio.gather(*(one(b) for b in cfg.backends))
+        return JSONResponse({"ok": True, "backends": dict(results)})
 
     return [
         Route("/admin/api/run", _needs_json(run_tool), methods=["POST"]),
         Route("/admin/api/restart", restart_gateway, methods=["POST"]),
         Route("/admin/api/introspect/{name}", reintrospect, methods=["POST"]),
+        Route("/admin/api/status", get_status, methods=["GET"]),
+        Route("/admin/api/refresh", refresh_all, methods=["POST"]),
     ]
 
 
