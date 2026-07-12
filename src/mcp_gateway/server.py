@@ -785,6 +785,9 @@ async def _run(cfg: config_loader.GatewayConfig, log) -> None:
     # cached) so transforms (incl. per-backend always_load) and per-endpoint
     # instructions can be built from the captured baseline.
     await admin.ensure_defaults(cfg, log)
+    # #156: remove any captured-defaults files for backends no longer in config
+    # (predate prune-on-remove) so a stale baseline can't resurrect a ghost.
+    admin.sweep_orphan_defaults(cfg, log)
     all_tools = admin.all_tools_from_defaults(cfg)
     captured_meta = admin.all_meta_from_defaults(cfg)
     captured_instr = admin.captured_instructions(cfg)

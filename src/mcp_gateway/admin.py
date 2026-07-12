@@ -207,6 +207,29 @@ def save_defaults(data: dict) -> None:
     )
 
 
+def sweep_orphan_defaults(cfg: GatewayConfig, log) -> list[str]:
+    """Delete captured-defaults files whose stem is not a configured backend name.
+
+    Such files predate prune-on-remove (#54) — a backend removed before that
+    landed left its ``<name>.json`` behind, and a stale baseline can resurrect a
+    ghost backend's overrides on a re-import. Runs once at boot (#156). Deletes
+    each orphan, logs one line per file, returns the removed stems. A DISABLED
+    backend is still configured (it stays in ``cfg.backends``) so its file is
+    kept; a missing defaults dir is tolerated (nothing to sweep).
+    """
+    if not DEFAULTS_DIR.is_dir():
+        return []
+    configured = {b.name for b in cfg.backends}
+    removed: list[str] = []
+    for p in sorted(DEFAULTS_DIR.glob("*.json")):
+        if p.stem in configured:
+            continue
+        p.unlink(missing_ok=True)
+        removed.append(p.stem)
+        log.info("orphan_defaults_swept", backend=p.stem, file=str(p))
+    return removed
+
+
 async def ensure_defaults(cfg: GatewayConfig, log, force: str | None = None) -> None:
     """Capture defaults for any backend missing them (or *force* one by name).
 
@@ -396,6 +419,33 @@ def effective_tools(cfg: GatewayConfig, backend: str | None = None) -> list[dict
     return out
 
 
+def dangling_overrides(cfg: GatewayConfig, backend: str) -> list[dict]:
+    """Stored overrides whose ``original`` no longer matches a captured tool —
+    the backend renamed the tool upstream and a #43 baseline refresh moved the
+    baseline out from under the override (#153). Their tuned text silently stops
+    applying (reconcile logs ``override_no_match``), yet the entry still occupies
+    a transform target. Surfaced in the UI so it can be migrated or discarded.
+
+    Each entry: the stored ``original``, its ``name`` (effective broadcast name,
+    == original when un-renamed), ``has_description`` (whether tuned description
+    text would be lost), and ``enabled``.
+    """
+    b = next((x for x in cfg.backends if x.name == backend), None)
+    if b is None:
+        return []
+    captured = {t["original"] for t in (load_defaults(backend) or {}).get("tools", [])}
+    return [
+        {
+            "original": ov.original,
+            "name": ov.name or ov.original,
+            "has_description": ov.description is not None,
+            "enabled": ov.enabled,
+        }
+        for ov in b.tools
+        if ov.original not in captured
+    ]
+
+
 def check_no_collision(
     cfg: GatewayConfig, backend: str, original: str, new: ToolOverride
 ) -> None:
@@ -515,6 +565,10 @@ def build_state(cfg: GatewayConfig) -> dict:
                 "default_instructions": (defaults or {}).get("instructions"),
                 "instructions": b.instructions,
                 "server_info": (defaults or {}).get("server_info"),
+                # #153: stored overrides whose original no longer matches a
+                # captured tool (backend renamed it upstream) — the UI flags
+                # these for one-click migrate/discard.
+                "dangling": dangling_overrides(cfg, b.name),
                 "tools": tools_state,
             }
         )
@@ -766,6 +820,79 @@ def _reject_transform_landmines(cfg: GatewayConfig, b: Backend) -> None:
             f"If the clashing entry is a stale override for a tool the backend "
             f"no longer exposes, reset that tool first."
         ) from None
+
+
+def migrate_override(cfg: GatewayConfig, backend: str, frm: str, to: str) -> dict:
+    """Carry a DANGLING override's tuned text onto the tool's new original (#153).
+
+    *frm* must be a stored override that is dangling (its ``original`` absent
+    from the captured baseline — the backend renamed the tool away). *to* must be
+    a captured tool that has no stored override yet. The override's fields (name,
+    title, description, enabled, pin) move onto *to* through the normal
+    :func:`apply_tool_override` path (so collision + transform validation still
+    run); param overrides survive ONLY where the param's ``original`` still
+    exists in *to*'s captured schema — dropped ones are reported. The old *frm*
+    entry is then removed. Raises :class:`ConfigError` (→ 400) on any bad target.
+
+    Mutates *cfg* in place; the caller commits (backup + save + hot-reload).
+    """
+    b = next((x for x in cfg.backends if x.name == backend), None)
+    if b is None:
+        raise cl.ConfigError(f"unknown backend {backend!r}")
+    captured = {
+        t["original"]: t for t in (load_defaults(backend) or {}).get("tools", [])
+    }
+    if to not in captured:
+        raise cl.ConfigError(
+            f"cannot migrate to {to!r}: it is not a captured tool of backend "
+            f"{backend!r} — re-inspect the backend, or pick its new tool name"
+        )
+    src = next((t for t in b.tools if t.original == frm), None)
+    if src is None:
+        raise cl.ConfigError(f"no stored override for {frm!r} in backend {backend!r}")
+    if frm in captured:
+        raise cl.ConfigError(
+            f"{frm!r} is still a live tool of backend {backend!r}; only a "
+            f"dangling override (its tool renamed away upstream) can be migrated"
+        )
+    if any(t.original == to for t in b.tools):
+        raise cl.ConfigError(
+            f"cannot migrate to {to!r}: it already has a stored override — reset "
+            f"it first"
+        )
+    # Params survive only where the target still has that param (#153).
+    to_params = {p["original"] for p in captured[to].get("params", [])}
+    kept, dropped = [], []
+    for p in src.params:
+        if p.original in to_params:
+            kept.append(
+                {
+                    "original": p.original,
+                    "name": p.name,
+                    "description": p.description,
+                    "hide": p.hide,
+                    "default": p.default,
+                }
+            )
+        else:
+            dropped.append(p.original)
+    override = {
+        "name": src.name,
+        "title": src.title,
+        "description": src.description,
+        "enabled": src.enabled,
+        "always_load": src.always_load,
+        "params": kept,
+    }
+    # Drop the dangling entry BEFORE applying, so its (soon-obsolete) transform
+    # target name can't collide with the migrated name on the target tool.
+    b.tools = [t for t in b.tools if t.original != frm]
+    apply_tool_override(cfg, backend, {"tool_original": to, "override": override})
+    return {
+        "migrated_to": to,
+        "carried_params": [p["original"] for p in kept],
+        "dropped_params": dropped,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1030,6 +1157,25 @@ CLAUDE_SCOPES = ("local", "user", "project")
 # longer hang means a broken install — surface it, don't wait on it.
 CLAUDE_CLI_TIMEOUT = 30
 
+# #46: cache `claude mcp list` output in-process so repeated /admin page loads
+# don't re-shell the CLI on every render; `?fresh=1` busts it after a
+# register/deregister. Module-level (resets on restart, which is fine).
+CC_REG_CACHE_TTL = 60.0
+_cc_reg_cache: dict[str, Any] = {"ts": 0.0, "output": None}
+
+
+def parse_cc_registrations(output: str, backends: list[str]) -> dict[str, bool]:
+    """Map each configured backend to whether it is registered in Claude Code,
+    parsed from ``claude mcp list`` output (#46).
+
+    A backend counts as registered iff the token ``gateway-<name>:`` appears in
+    the output — the colon anchors the match so ``gateway-cc:`` can't be read
+    off ``gateway-cc-docs:``, and the connection-status suffix
+    (``✓ Connected`` / ``✘ Failed``) is deliberately ignored: this reports
+    REGISTRATION, not liveness (that is #23's ``/admin/api/status``).
+    """
+    return {name: f"gateway-{name}:" in output for name in backends}
+
 
 def claude_mcp_command(
     action: str,
@@ -1191,8 +1337,9 @@ def _general_routes(ctx: _AdminCtx) -> list[Route]:
     ]
 
 
-def _settings_routes(ctx: _AdminCtx) -> list[Route]:
-    """Text overrides: tool override, reset, instructions, settings import."""
+def _settings_routes(ctx: _AdminCtx) -> list[Route]:  # noqa: PLR0915 — statement count is the nested handlers; the group is cohesive
+    """Text overrides: tool override, reset, instructions, import, and the #153
+    dangling-override migrate/discard repairs."""
 
     async def put_override(request: Request):
         payload = await request.json()
@@ -1234,6 +1381,37 @@ def _settings_routes(ctx: _AdminCtx) -> list[Route]:
         ctx.commit(cfg, backend)  # set_instructions validated the name
         return JSONResponse({"ok": True})
 
+    async def migrate_override_route(request: Request):
+        """#153: carry a dangling override's tuned text onto the tool's new
+        original, then drop the old entry. Hot-reloads that backend."""
+        name = request.path_params["name"]
+        payload = await request.json()
+        cfg = ctx.load()
+        try:
+            res = migrate_override(cfg, name, payload.get("from"), payload.get("to"))
+        except (cl.ConfigError, KeyError) as exc:
+            return _err(str(exc))
+        ctx.commit(cfg, name)
+        return JSONResponse({"ok": True, "reloaded": "in-process", **res})
+
+    async def discard_override_route(request: Request):
+        """#153: drop a dangling override entry (its tuned text no longer
+        applies). Same removal as /reset — the intent is different (clearing a
+        stale entry, not reverting a live tool)."""
+        name = request.path_params["name"]
+        payload = await request.json()
+        cfg = ctx.load()
+        b = next((x for x in cfg.backends if x.name == name), None)
+        if b is None:
+            return _err("unknown backend")
+        original = payload.get("original")
+        before = len(b.tools)
+        b.tools = [t for t in b.tools if t.original != original]
+        if len(b.tools) == before:
+            return _err(f"no stored override for {original!r}")
+        ctx.commit(cfg, name)
+        return JSONResponse({"ok": True, "reloaded": "in-process"})
+
     async def post_import(request: Request):
         """Atomic settings import (#136): validate the whole bundle against a
         fresh cfg; persist and hot-reload only if EVERY item passes."""
@@ -1267,6 +1445,16 @@ def _settings_routes(ctx: _AdminCtx) -> list[Route]:
         Route(
             "/admin/api/import",
             _needs_json(ctx.locked(post_import)),
+            methods=["POST"],
+        ),
+        Route(
+            "/admin/api/backend/{name}/migrate-override",
+            _needs_json(ctx.locked(migrate_override_route)),
+            methods=["POST"],
+        ),
+        Route(
+            "/admin/api/backend/{name}/discard-override",
+            _needs_json(ctx.locked(discard_override_route)),
             methods=["POST"],
         ),
     ]
@@ -1595,6 +1783,38 @@ def _claude_routes(ctx: _AdminCtx) -> list[Route]:
             return _err(str(exc))
         return await _run_cli(argv)
 
+    async def cc_registrations(request: Request):
+        """#46: which backends are registered in Claude Code. Runs
+        ``claude mcp list`` ONCE (in a thread), caches the output in-process for
+        ``CC_REG_CACHE_TTL`` so page reloads don't re-shell the CLI; ``?fresh=1``
+        busts the cache (used right after a register/deregister). Returns
+        ``{"available": false}`` when the CLI isn't on PATH, else
+        ``{"available": true, "registered": {backend: bool}}``."""
+        if shutil.which("claude") is None:
+            return JSONResponse({"available": False})
+        fresh = request.query_params.get("fresh") in ("1", "true")
+        now = time.monotonic()
+        output = _cc_reg_cache.get("output")
+        if fresh or output is None or now - _cc_reg_cache["ts"] > CC_REG_CACHE_TTL:
+            try:
+                r = await asyncio.to_thread(
+                    subprocess.run,
+                    ["claude", "mcp", "list"],
+                    capture_output=True,
+                    text=True,
+                    timeout=CLAUDE_CLI_TIMEOUT,
+                    check=False,
+                )
+                output = (r.stdout or "") + (r.stderr or "")
+            except (subprocess.SubprocessError, OSError):
+                output = ""
+            _cc_reg_cache["output"] = output
+            _cc_reg_cache["ts"] = now
+        names = [b.name for b in ctx.load().backends]
+        return JSONResponse(
+            {"available": True, "registered": parse_cc_registrations(output, names)}
+        )
+
     return [
         Route(
             "/admin/api/backend/{name}/register",
@@ -1606,6 +1826,7 @@ def _claude_routes(ctx: _AdminCtx) -> list[Route]:
             _needs_json(deregister_backend),
             methods=["POST"],
         ),
+        Route("/admin/api/cc-registrations", cc_registrations, methods=["GET"]),
     ]
 
 

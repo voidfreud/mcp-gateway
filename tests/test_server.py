@@ -969,6 +969,191 @@ def test_deregister_bad_scope_is_400(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# #153 — stale-override migrate/discard routes
+# ---------------------------------------------------------------------------
+
+
+def _dangling_defaults():
+    """Captured baseline: the RENAMED tool ("new-tool") with a "keep" param."""
+    admin.DEFAULTS_DIR.mkdir(parents=True, exist_ok=True)
+    (admin.DEFAULTS_DIR / "b.json").write_text(
+        json.dumps(
+            {
+                "backend": "b",
+                "instructions": None,
+                "tools": [
+                    {
+                        "original": "new-tool",
+                        "title": None,
+                        "description": "nd",
+                        "params": [{"original": "keep", "description": "kd"}],
+                    }
+                ],
+            }
+        )
+    )
+
+
+def test_migrate_override_route_happy_path(tmp_path):
+    _dangling_defaults()
+    app = _cfg_app(
+        tmp_path,
+        {
+            "backends": [
+                {
+                    "name": "b",
+                    "transport": "stdio",
+                    "command": "/bin/x",
+                    "tools": [
+                        {
+                            "original": "old-tool",
+                            "name": "shiny",
+                            "description": "tuned",
+                            "params": [
+                                {"original": "keep", "description": "better"},
+                                {"original": "gone", "description": "lost"},
+                            ],
+                        }
+                    ],
+                }
+            ]
+        },
+    )
+    r = TestClient(app).post(
+        "/admin/api/backend/b/migrate-override",
+        json={"from": "old-tool", "to": "new-tool"},
+    )
+    assert r.status_code == 200
+    j = r.json()
+    assert j["ok"] is True
+    assert j["carried_params"] == ["keep"]
+    assert j["dropped_params"] == ["gone"]  # "gone" isn't a param of "new-tool"
+    after = cl.load(str(tmp_path / "config.toml")).backends[0]
+    tools = {t.original: t for t in after.tools}
+    assert "old-tool" not in tools  # dangling entry removed
+    assert tools["new-tool"].name == "shiny"
+    assert tools["new-tool"].description == "tuned"
+    assert [p.original for p in tools["new-tool"].params] == ["keep"]
+
+
+def test_migrate_override_route_unknown_target_is_400(tmp_path):
+    _write_defaults("b", ("new-tool",))
+    app = _cfg_app(
+        tmp_path,
+        {
+            "backends": [
+                {
+                    "name": "b",
+                    "transport": "stdio",
+                    "command": "/bin/x",
+                    "tools": [{"original": "old-tool", "name": "shiny"}],
+                }
+            ]
+        },
+    )
+    r = TestClient(app).post(
+        "/admin/api/backend/b/migrate-override",
+        json={"from": "old-tool", "to": "ghost"},
+    )
+    assert r.status_code == 400
+    # nothing changed — the dangling entry survives the rejected migrate
+    after = cl.load(str(tmp_path / "config.toml")).backends[0]
+    assert [t.original for t in after.tools] == ["old-tool"]
+
+
+def test_discard_override_route_drops_dangling(tmp_path):
+    _write_defaults("b", ("new-tool",))
+    app = _cfg_app(
+        tmp_path,
+        {
+            "backends": [
+                {
+                    "name": "b",
+                    "transport": "stdio",
+                    "command": "/bin/x",
+                    "tools": [{"original": "old-tool", "name": "shiny"}],
+                }
+            ]
+        },
+    )
+    r = TestClient(app).post(
+        "/admin/api/backend/b/discard-override", json={"original": "old-tool"}
+    )
+    assert r.status_code == 200
+    assert cl.load(str(tmp_path / "config.toml")).backends[0].tools == []
+
+
+def test_discard_override_route_unknown_is_400(tmp_path):
+    _write_defaults("b", ("new-tool",))
+    app = _cfg_app(
+        tmp_path,
+        {"backends": [{"name": "b", "transport": "stdio", "command": "/bin/x"}]},
+    )
+    r = TestClient(app).post(
+        "/admin/api/backend/b/discard-override", json={"original": "nope"}
+    )
+    assert r.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# #46 — per-backend Claude Code registration indicator
+# ---------------------------------------------------------------------------
+
+
+def test_cc_registrations_missing_cli_reports_unavailable(tmp_path, monkeypatch):
+    monkeypatch.setattr(admin.shutil, "which", lambda _cmd: None)
+    r = TestClient(_admin_app(tmp_path)).get("/admin/api/cc-registrations")
+    assert r.status_code == 200
+    assert r.json() == {"available": False}
+
+
+def test_cc_registrations_route_shape(tmp_path, monkeypatch):
+    calls = []
+    _fake_claude_cli(
+        monkeypatch,
+        calls,
+        stdout="gateway-b: http://127.0.0.1:9100/b/mcp (HTTP) - ✓ Connected\n",
+    )
+    r = TestClient(_admin_app(tmp_path)).get("/admin/api/cc-registrations")
+    assert r.status_code == 200
+    j = r.json()
+    assert j["available"] is True
+    assert j["registered"] == {"b": True}
+    assert calls == [["claude", "mcp", "list"]]
+
+
+class _FakeClock:
+    """A time-module stand-in: monotonic() is driven by the test, everything
+    else delegates to the real module (so patching admin.time is side-effect free
+    for any other admin code that runs during the request)."""
+
+    def __init__(self, ref):
+        self._ref = ref
+
+    def monotonic(self):
+        return self._ref[0]
+
+    def __getattr__(self, k):
+        return getattr(time, k)
+
+
+def test_cc_registrations_caches_and_fresh_busts(tmp_path, monkeypatch):
+    calls = []
+    _fake_claude_cli(monkeypatch, calls, stdout="gateway-b: (HTTP) - ✓ Connected\n")
+    clock = [1000.0]
+    monkeypatch.setattr(admin, "time", _FakeClock(clock))
+    client = TestClient(_admin_app(tmp_path))
+    client.get("/admin/api/cc-registrations")  # cold -> runs the CLI
+    client.get("/admin/api/cc-registrations")  # within TTL -> served from cache
+    assert len(calls) == 1
+    clock[0] += admin.CC_REG_CACHE_TTL + 1  # cache aged out
+    client.get("/admin/api/cc-registrations")
+    assert len(calls) == 2
+    client.get("/admin/api/cc-registrations?fresh=1")  # explicit bust
+    assert len(calls) == 3
+
+
+# ---------------------------------------------------------------------------
 # #96 — bad config recovers from a backup instead of crash-looping
 # ---------------------------------------------------------------------------
 
