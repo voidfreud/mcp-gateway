@@ -5,8 +5,11 @@
     <key>Label</key>
     <string>com.void.mcp-gateway</string>
 
-    <!-- Run the venv python directly (no `uv run` supervisor process) — one
-         resident process, faster start. Recreate the venv with `uv sync`. -->
+    <!-- TEMPLATE: install.sh substitutes @@HOME@@ with the installing user's
+         home and writes the result to ~/Library/LaunchAgents. Never installed
+         verbatim; never carries a specific user's paths in the repo. -->
+    <!-- Runs the venv's mcp-gateway console script directly (no `uv run`
+         supervisor) — one resident process. Recreate the venv with `uv sync`. -->
     <!-- Every repo path goes through the STABLE symlink
          ~/.local/opt/mcp-gateway (maintained by install.sh), never the real
          clone location (#149): launchd needs absolute paths, and hardcoding
@@ -15,12 +18,11 @@
          re-run ./install.sh — this file needs no edit. -->
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/alexanderbass/.local/opt/mcp-gateway/.venv/bin/python3</string>
-        <string>/Users/alexanderbass/.local/opt/mcp-gateway/server.py</string>
+        <string>@@HOME@@/.local/opt/mcp-gateway/.venv/bin/mcp-gateway</string>
     </array>
 
     <key>WorkingDirectory</key>
-    <string>/Users/alexanderbass/.local/opt/mcp-gateway</string>
+    <string>@@HOME@@/.local/opt/mcp-gateway</string>
 
     <key>RunAtLoad</key>
     <true/>
@@ -32,10 +34,10 @@
         <!-- launchd gives a minimal PATH; include user + system bins so the
              gateway and its stdio backends (e.g. gitnexus) resolve. -->
         <key>PATH</key>
-        <string>/Users/alexanderbass/.local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <string>@@HOME@@/.local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
         <!-- Absolute config path so it resolves regardless of cwd. -->
         <key>MCP_GATEWAY_CONFIG</key>
-        <string>/Users/alexanderbass/.local/opt/mcp-gateway/config.toml</string>
+        <string>@@HOME@@/.local/opt/mcp-gateway/config.toml</string>
         <!-- FastMCP's log level is quieted in-process (server._configure_logging),
              so no FASTMCP_LOG_LEVEL env is needed here (#83, one suffices). -->
         <!-- Add backend secrets here when a backend needs them, e.g.:
@@ -44,8 +46,8 @@
     </dict>
 
     <key>StandardOutPath</key>
-    <string>/Users/alexanderbass/.local/state/mcp-gateway/out.log</string>
+    <string>@@HOME@@/.local/state/mcp-gateway/out.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/alexanderbass/.local/state/mcp-gateway/err.log</string>
+    <string>@@HOME@@/.local/state/mcp-gateway/err.log</string>
 </dict>
 </plist>

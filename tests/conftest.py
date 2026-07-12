@@ -10,7 +10,7 @@ call time, so patching the module attributes covers every consumer.
 
 import pytest
 
-import admin
+from mcp_gateway import admin
 
 
 @pytest.fixture(autouse=True)

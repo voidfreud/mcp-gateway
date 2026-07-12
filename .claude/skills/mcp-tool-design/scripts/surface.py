@@ -21,10 +21,11 @@ import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
-sys.path.insert(0, str(REPO_ROOT))
+# src layout: importable via the project venv (uv run) or this path insert.
+sys.path.insert(0, str(REPO_ROOT / "src"))
 
-import config_loader as cl  # noqa: E402
-from admin import load_defaults  # noqa: E402
+from mcp_gateway import config_loader as cl  # noqa: E402
+from mcp_gateway.admin import load_defaults  # noqa: E402
 
 CAP = 2048  # Claude Code truncates descriptions and instructions at 2 KB
 

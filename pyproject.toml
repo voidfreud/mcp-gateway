@@ -1,27 +1,43 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
 [project]
 name = "mcp-gateway"
 version = "0.1.0"
 description = "Local MCP proxy that rewrites every broadcast text a backend MCP shows Claude Code"
 readme = "README.md"
 requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "voidfreud" }]
 keywords = ["mcp", "proxy", "fastmcp", "claude-code", "gateway"]
-# Private tool — the classifier blocks an accidental PyPI upload. No license is
-# declared (this repo is private, not distributed).
+# Distribution is uv/uvx straight from the GitHub repo (by choice, 2026-07-12);
+# the classifier below blocks an accidental PyPI upload — the name is taken
+# there anyway.
 classifiers = [
     "Private :: Do Not Upload",
     "Programming Language :: Python :: 3.12",
     "Topic :: Software Development :: Libraries",
 ]
 dependencies = [
-    "fastmcp>=3.4.2",
+    "fastmcp>=3.4.4",
     "pydantic>=2.13.4",
     "structlog>=26.1.0",
     "tomli-w>=1.2.0",
 ]
 
+[project.scripts]
+mcp-gateway = "mcp_gateway.server:main"
+
 [project.urls]
 Repository = "https://github.com/voidfreud/mcp-gateway"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mcp_gateway"]
+# admin.html + config.default.toml ship inside the package (server reads them
+# via Path(__file__).parent)
+artifacts = ["src/mcp_gateway/admin.html", "src/mcp_gateway/config.default.toml"]
 
 [dependency-groups]
 dev = [

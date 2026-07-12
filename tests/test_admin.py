@@ -13,8 +13,8 @@ import structlog
 from hypothesis import given
 from hypothesis import strategies as st
 
-import admin
-import config_loader as cl
+from mcp_gateway import admin
+from mcp_gateway import config_loader as cl
 
 ident = st.text(
     alphabet=string.ascii_letters + string.digits + "_-", min_size=1, max_size=15
