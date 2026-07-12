@@ -1521,3 +1521,71 @@ def test_interval_refresh_loop_sweeps_and_stops(tmp_path, monkeypatch):
 
     anyio.run(go)
     assert refreshed and set(refreshed) == {"up"}  # only mounted+enabled swept
+
+
+# ---------------------------------------------------------------------------
+# Origin guard — MCP spec DNS-rebinding protection (Streamable HTTP security)
+# ---------------------------------------------------------------------------
+
+
+def _origin_app():
+    async def ping(request):
+        return JSONResponse({"ok": True})
+
+    return Starlette(
+        routes=[
+            Route("/b/mcp", ping, methods=["GET"]),
+            Route("/admin/api/state", ping, methods=["GET"]),
+        ],
+        middleware=[
+            Middleware(server.OriginGuardMiddleware, host="127.0.0.1", port=9100)
+        ],
+    )
+
+
+def test_origin_absent_passes():
+    # non-browser clients (Claude Code, curl) send no Origin
+    client = TestClient(_origin_app())
+    assert client.get("/b/mcp").status_code == 200
+
+
+def test_origin_own_gateway_passes():
+    # the admin UI's same-origin fetches, on any loopback spelling
+    client = TestClient(_origin_app())
+    for origin in (
+        "http://127.0.0.1:9100",
+        "http://localhost:9100",
+        "http://[::1]:9100",
+    ):
+        r = client.get("/admin/api/state", headers={"Origin": origin})
+        assert r.status_code == 200, origin
+
+
+def test_origin_foreign_is_403():
+    # the DNS-rebinding shape: a browser page's own origin against loopback —
+    # spec: MUST reject an invalid Origin with 403
+    client = TestClient(_origin_app())
+    for origin in (
+        "http://evil.example",
+        "https://127.0.0.1:9100",  # scheme matters
+        "http://127.0.0.1:9999",  # port matters
+        "null",  # sandboxed documents
+    ):
+        r = client.get("/b/mcp", headers={"Origin": origin})
+        assert r.status_code == 403, origin
+        assert r.json()["error"] == "invalid origin"
+
+
+def test_build_app_wires_origin_guard(tmp_path):
+    cfg = cl.GatewayConfig.model_validate(
+        {"backends": [{"name": "b", "transport": "stdio", "command": "/bin/x"}]}
+    )
+    path = tmp_path / "config.toml"
+    cl.save(cfg, str(path))
+    app = server._build_app(
+        cfg, structlog.get_logger("test"), {}, {}, {}, config_path=str(path)
+    )
+    with TestClient(app) as client:
+        assert client.get("/health").status_code == 200  # no Origin -> open
+        r = client.get("/health", headers={"Origin": "http://evil.example"})
+        assert r.status_code == 403

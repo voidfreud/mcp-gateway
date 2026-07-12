@@ -30,7 +30,7 @@ The asymmetry is the whole game: instructions and names are the only per-server 
 
 ## Pinning (`always_load`)
 
-Pinning exempts a tool from deferral: its full definition is resident from turn 0 of every session, whether or not it is ever used. That buys stage-0 visibility and skips the search round-trip, and costs context in every session (the ⚙ Gateway panel in `/admin` shows the byte footprint, all-tools vs eager-upfront). Pin per-tool, not per-backend, and only the tool an agent should reach for without searching — a server's primary entry point. A pinned tool's description is also the strongest place to steer stage-2 selection, since it is always loaded when competitors surface via search.
+Pinning exempts a tool from deferral: its full definition is resident from turn 0 of every session, whether or not it is ever used. That buys stage-0 visibility and skips the search round-trip, and costs context in every session (the ⚙ Gateway panel in `/admin` shows the byte footprint, all-tools vs eager-upfront). Claude Code's own registration config also takes a per-SERVER `alwaysLoad: true` (and a per-server `timeout` ms field) — coarser than the gateway's per-tool pin, which stays the right lever here. Pin per-tool, not per-backend, and only the tool an agent should reach for without searching — a server's primary entry point. A pinned tool's description is also the strongest place to steer stage-2 selection, since it is always loaded when competitors surface via search.
 
 ## When tool search is off
 
@@ -44,7 +44,7 @@ Pinning exempts a tool from deferral: its full definition is resident from turn 
 | Tool description truncation | 2 KB — front-load critical content |
 | Tool name | `^[a-zA-Z0-9_-]{1,64}$` (Anthropic cap; the gateway validates the same set) |
 | ToolSearch results | 3–5 tools per query; catalog max 10,000; unsupported on Haiku |
-| Tool output | warns at 10k tokens; default cap 25k (`MAX_MCP_OUTPUT_TOKENS`) |
+| Tool output | warns at 10k tokens; default cap 25k (`MAX_MCP_OUTPUT_TOKENS`); a tool's `_meta["anthropic/maxResultSizeChars"]` overrides the cap for its text content (per-tool, wins over the env var) |
 
 ## Sources
 
