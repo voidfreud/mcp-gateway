@@ -300,6 +300,8 @@
       <label>Args (space-separated)</label>
       <input type="text" id="im_args" class="mono" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="serena-mcp" />
     </div>
+    <label class="chk" style="margin-top:14px"><input type="checkbox" class="tgl" id="im_register">
+      also register in Claude Code <span style="color:var(--td)">· claude mcp add, scope local</span></label>
     <div class="err" id="im_err"></div>
     <div class="foot">
       <button onclick="closeImport()">Cancel</button>
@@ -316,6 +318,25 @@
     <div class="foot">
       <button onclick="cancelRestart()">Cancel</button>
       <button class="btn-danger" id="rs_now" onclick="doRestartNow()">Restart now</button>
+    </div>
+  </div>
+</div>
+<div class="modal-bg" id="renameBg">
+  <div class="modal">
+    <h3>Rename backend <code id="rn_cur" style="font:600 12px var(--mono);color:var(--ac)"></code></h3>
+    <p class="hint" style="margin:0 0 10px">This is a <b>real identity change</b> — unlike the cosmetic display
+      name. The endpoint URL becomes <code>/&lt;new name&gt;/mcp</code>, the gateway <b>restarts</b>, and the
+      Claude Code registration changes from <code>gateway-&lt;old&gt;</code> to <code>gateway-&lt;new&gt;</code> —
+      Claude Code must be re-registered or the server disappears from it.</p>
+    <label>New name</label>
+    <input type="text" id="rn_name" class="mono" placeholder="new-name"
+           autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" />
+    <label class="chk" style="margin-top:14px"><input type="checkbox" class="tgl" id="rn_rereg">
+      re-register in Claude Code afterwards <span style="color:var(--td)">· claude mcp remove old + add new (scope local)</span></label>
+    <div class="err" id="rn_err"></div>
+    <div class="foot">
+      <button onclick="closeRename()">Cancel</button>
+      <button class="btn-pri" id="rn_go" onclick="doRename()">Rename &amp; restart</button>
     </div>
   </div>
 </div>
@@ -410,6 +431,8 @@ function renderDetail(name) {
       <span class="url">${conn}</span>
       <span class="spacer"></span>
       <button class="btn" style="font-size:11px" onclick="reintrospect('${escJS(b.name)}')">Re-inspect</button>
+      <button class="btn" style="font-size:11px" onclick="openRename('${escJS(b.name)}')"
+        title="hard-rename: changes the endpoint URL + Claude Code registration (restart)">Rename…</button>
       <button class="btn btn-danger" style="font-size:11px" onclick="delBackend('${escJS(b.name)}')">Remove</button>
     </div>
     <div class="b-sub-line">MCP endpoint <code>http://${esc(STATE.host)}:${STATE.port}${esc(b.endpoint || '')}</code>
@@ -425,6 +448,17 @@ function renderDetail(name) {
       <label class="lbl" title="cosmetic label for the sidebar + header; does not change routing" style="cursor:default">
         Display name <input type="text" class="f-display mono" value="${esc(b.display_name || '')}"
           placeholder="${esc(b.name)}" style="width:130px;padding:3px 7px;font-size:11px"></label>
+      <span class="div"></span>
+      <span class="lbl" style="cursor:default">
+        <select id="b-ccscope" title="claude mcp add scope"
+          style="width:auto;padding:3px 7px;font-size:11px">
+          <option value="local">local</option>
+          <option value="user">user</option>
+          <option value="project">project</option>
+        </select>
+        <button class="btn" style="font-size:11px" onclick="registerCC('${escJS(b.name)}')"
+          title="run claude mcp add for this backend's endpoint (gateway-${esc(b.name)})">Register in CC</button>
+      </span>
       <span class="spacer"></span>
       <button class="btn" style="font-size:11px" onclick="loadSnapshot('${escJS(b.name)}')"
         title="restore this backend's field values from a saved JSON file">Load fields</button>
@@ -1103,8 +1137,68 @@ async function setDisplayName(name, value) {
   try { await api('POST', '/admin/api/backend/' + encodeURIComponent(name) + '/display-name', { value }); await load(); }
   catch (e) { toast('rename failed: ' + e.message); }
 }
+// #44 — hard-rename modal: a REAL identity change (endpoint + registration),
+// unlike the cosmetic display name.
+let RENAME_FROM = null;
+function openRename(name) {
+  RENAME_FROM = name;
+  $('#rn_cur').textContent = name;
+  $('#rn_name').value = '';
+  $('#rn_name').classList.remove('bad');
+  $('#rn_rereg').checked = false;
+  $('#rn_err').textContent = '';
+  $('#renameBg').classList.add('show');
+  $('#rn_name').focus();
+}
+function closeRename() { $('#renameBg').classList.remove('show'); }
+async function doRename() {
+  const oldName = RENAME_FROM, newName = $('#rn_name').value.trim();
+  if (!NAME_RE.test(newName)) {  // client mirror of the server's _NAME_RE (#41)
+    $('#rn_name').classList.add('bad');
+    $('#rn_err').textContent = "invalid name: letters, digits, '_' or '-' only, max 64 chars";
+    return;
+  }
+  $('#rn_name').classList.remove('bad');
+  const rereg = $('#rn_rereg').checked;
+  $('#rn_go').disabled = true; $('#rn_err').textContent = 'renaming…';
+  try {
+    const r = await api('POST', '/admin/api/backend/' + encodeURIComponent(oldName) + '/rename', { value: newName });
+    closeRename();
+    SELECTED = newName;
+    toast(`renamed — new endpoint ${r.new_endpoint} · re-register in Claude Code as ${r.new_registration}`, 6000);
+    if (r.reloaded === 'restarting') await waitReload();  // poll /health, then reload state
+    else { await load(); toast('renamed (dev: no launchd restart — endpoint moves on next manual restart)'); }
+    if (rereg) await reRegisterCC(oldName, newName);
+  } catch (e) { $('#rn_err').textContent = e.message; }
+  finally { $('#rn_go').disabled = false; }
+}
+// after a rename: swap the Claude Code registration old -> new (scope local).
+async function reRegisterCC(oldName, newName) {
+  try {
+    const dr = await api('POST', '/admin/api/backend/' + encodeURIComponent(oldName) + '/deregister', { scope: 'local' });
+    if (!dr.ok) console.warn('claude mcp remove gateway-' + oldName + ' failed:', dr.stderr || dr.stdout);
+    const rr = await api('POST', '/admin/api/backend/' + encodeURIComponent(newName) + '/register', { scope: 'local' });
+    if (rr.ok) toast(`registered gateway-${newName} in Claude Code (old gateway-${oldName} ${dr.ok ? 'removed' : 'NOT removed — remove it manually'}) — reload Claude Code if it doesn't appear`, 7000);
+    else toast('claude mcp add failed: ' + (rr.stderr || rr.stdout || 'exit ' + rr.exit), 8000);
+  } catch (e) { toast('Claude Code re-register failed: ' + e.message, 6000); }
+}
+// #45 — one-click `claude mcp add` for this backend's gateway endpoint.
+async function registerCC(name, scope) {
+  scope = scope || ($('#b-ccscope') ? $('#b-ccscope').value : 'local');
+  try {
+    const r = await api('POST', '/admin/api/backend/' + encodeURIComponent(name) + '/register', { scope });
+    if (r.ok) toast(`registered gateway-${name} (scope ${scope}) — reload Claude Code if it doesn't appear`, 5000);
+    else toast('claude mcp add failed: ' + (r.stderr || r.stdout || 'exit ' + r.exit), 8000);
+  } catch (e) { toast('register failed: ' + e.message, 5000); }
+}
 async function delBackend(name) {
   if (!confirm('Remove backend "' + name + '"? This restarts the gateway.')) return;
+  // best-effort: drop the Claude Code registration first (the backend is about
+  // to disappear from config, but deregister works regardless — cleanup path).
+  try {
+    const d = await api('POST', '/admin/api/backend/' + encodeURIComponent(name) + '/deregister', { scope: 'local' });
+    if (!d.ok) console.warn('claude mcp remove gateway-' + name + ' failed:', d.stderr || d.stdout);
+  } catch (e) { console.warn('deregister skipped: ' + e.message); }
   try { const r = await api('DELETE', '/admin/api/backend/' + encodeURIComponent(name)); SELECTED = null; afterRestart(r, 'removed'); }
   catch (e) { toast('remove failed: ' + e.message); }
 }
@@ -1146,6 +1240,7 @@ function openImport() {
   for (const id of ['im_name','im_url','im_ah','im_av','im_headers','im_hh','im_cmd','im_args'])
     $('#'+id).value = '';
   $('#im_oauth').checked = false;
+  $('#im_register').checked = false;
   $('#im_transport').value = 'http';
   importTransportChange();
   $('#im_err').textContent = '';
@@ -1174,8 +1269,17 @@ async function doImport() {
     if ($('#im_oauth').checked) body.auth = 'oauth';
   }
   else { body.command = $('#im_cmd').value.trim(); body.args = $('#im_args').value.trim() ? $('#im_args').value.trim().split(/\s+/) : []; }
+  const alsoRegister = $('#im_register').checked;  // #45: register after import
   $('#im_go').disabled = true; $('#im_err').textContent = 'connecting…';
-  try { const r = await api('POST', '/admin/api/backend', body); closeImport(); SELECTED = r.backend; afterRestart(r, 'imported'); }
+  try {
+    const r = await api('POST', '/admin/api/backend', body);
+    closeImport(); SELECTED = r.backend; afterRestart(r, 'imported');
+    if (alsoRegister && r.backend) {
+      // hot-add path: the endpoint is live now, so the registration is real.
+      if (r.reloaded === 'restarting') toast('register skipped — gateway restarting; use "Register in CC" afterwards', 5000);
+      else await registerCC(r.backend, 'local');
+    }
+  }
   catch (e) { $('#im_err').textContent = e.message; }
   finally { $('#im_go').disabled = false; }
 }

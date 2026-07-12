@@ -19,6 +19,7 @@ import importlib.metadata
 import json
 import os
 import re
+import shutil
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -800,6 +801,51 @@ def restart_daemon(log) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Claude Code registration (#45) — via the `claude` CLI, never its config files
+# ---------------------------------------------------------------------------
+
+# `claude mcp add/remove` scopes (see `claude mcp add --help`).
+CLAUDE_SCOPES = ("local", "user", "project")
+# Upper bound on one CLI invocation; `claude mcp` is local bookkeeping, so a
+# longer hang means a broken install — surface it, don't wait on it.
+CLAUDE_CLI_TIMEOUT = 30
+
+
+def claude_mcp_command(
+    action: str, name: str, url: str | None = None, scope: str = "local"
+) -> list[str]:
+    """Argv to register/deregister ONE backend in Claude Code via the CLI.
+
+    Registration name convention: ``gateway-<backend name>``; the endpoint is
+    the backend's own gateway mount (``http://host:port/<name>/mcp``). Pure —
+    builds the argv only (the route runs it), so the exact command is testable
+    and surfaceable to the UI.
+    """
+    if scope not in CLAUDE_SCOPES:
+        raise cl.ConfigError(
+            f"invalid scope {scope!r}: use one of {', '.join(CLAUDE_SCOPES)}"
+        )
+    registration = f"gateway-{name}"
+    if action == "add":
+        if not url:
+            raise cl.ConfigError("register needs the backend's endpoint url")
+        return [
+            "claude",
+            "mcp",
+            "add",
+            "--transport",
+            "http",
+            "--scope",
+            scope,
+            registration,
+            url,
+        ]
+    if action == "remove":
+        return ["claude", "mcp", "remove", "--scope", scope, registration]
+    raise cl.ConfigError(f"unknown action {action!r} (use add or remove)")
+
+
+# ---------------------------------------------------------------------------
 # Route registration
 # ---------------------------------------------------------------------------
 
@@ -986,7 +1032,8 @@ def _settings_routes(ctx: _AdminCtx) -> list[Route]:
 
 
 def _backend_routes(ctx: _AdminCtx) -> list[Route]:  # noqa: PLR0915 — statement count is the nested handlers; the group is cohesive
-    """Per-backend flags and topology: pin, enable, display name, add, remove."""
+    """Per-backend flags and topology: pin, enable, display name, rename,
+    add, remove."""
 
     async def pin_backend(request: Request):
         """Toggle per-backend always_load (pin all its tools upfront). Hot-reload —
@@ -1062,6 +1109,55 @@ def _backend_routes(ctx: _AdminCtx) -> list[Route]:  # noqa: PLR0915 — stateme
             return _err(str(exc))
         ctx.commit(cfg)
         return JSONResponse({"ok": True})
+
+    async def rename_backend(request: Request):
+        """Hard-rename a backend (#44) — a REAL identity change, unlike the
+        cosmetic display_name (#42). ``name`` drives the endpoint mount
+        (``/{name}/mcp``), the Claude Code registration (``gateway-{name}``),
+        the config key, and the captured-defaults file — all move together.
+        Topology change → restart; the response carries old/new endpoint and
+        registration so the UI can say exactly what to reconfigure in
+        Claude Code."""
+        name = request.path_params["name"]
+        payload = await request.json()
+        value = payload.get("value")
+        new_name = value.strip() if isinstance(value, str) else ""
+        if not _NAME_RE.match(new_name):
+            return _err(
+                f"invalid backend name {new_name!r}: use only letters, digits, "
+                f"'_' or '-' (max 64 chars)"
+            )
+        cfg = ctx.load()
+        b = next((x for x in cfg.backends if x.name == name), None)
+        if b is None:
+            return _err("unknown backend")
+        if any(x.name == new_name for x in cfg.backends):
+            return _err(
+                f"backend name {new_name!r} already exists — pick a different one"
+            )
+        b.name = new_name  # display_name, tools, params — everything else rides
+        # Topology change: commit WITHOUT a hot-reload arg (the endpoint itself
+        # moves; the restart below rebuilds the mounts under the new name).
+        ctx.commit(cfg)
+        # Migrate the captured defaults (the immutable baseline) old → new so
+        # overrides keep diffing against it; tolerate a never-introspected
+        # backend (no file — the restart re-captures under the new name).
+        old_defaults = DEFAULTS_DIR / f"{name}.json"
+        if old_defaults.is_file():
+            data = json.loads(old_defaults.read_text(encoding="utf-8"))
+            data["backend"] = new_name
+            save_defaults(data)
+            old_defaults.unlink(missing_ok=True)
+        base = f"http://{cfg.host}:{cfg.port}"
+        return ctx.restart_response(
+            {
+                "backend": new_name,
+                "old_endpoint": f"{base}/{name}/mcp",
+                "new_endpoint": f"{base}/{new_name}/mcp",
+                "old_registration": f"gateway-{name}",
+                "new_registration": f"gateway-{new_name}",
+            }
+        )
 
     async def add_backend(request: Request):  # noqa: PLR0911 — one early return per validation/probe/mount outcome
         """Import a new backend MCP. Validates + introspects, then restarts."""
@@ -1151,10 +1247,104 @@ def _backend_routes(ctx: _AdminCtx) -> list[Route]:  # noqa: PLR0915 — stateme
             _needs_json(ctx.locked(set_display_name)),
             methods=["POST"],
         ),
+        Route(
+            "/admin/api/backend/{name}/rename",
+            _needs_json(ctx.locked(rename_backend)),
+            methods=["POST"],
+        ),
         # add_backend takes ctx.lock itself (probe stays outside the lock)
         Route("/admin/api/backend", _needs_json(add_backend), methods=["POST"]),
         Route(
             "/admin/api/backend/{name}", ctx.locked(remove_backend), methods=["DELETE"]
+        ),
+    ]
+
+
+def _claude_routes(ctx: _AdminCtx) -> list[Route]:
+    """One-click Claude Code registration (#45): shell out to `claude mcp
+    add/remove` for a backend's gateway endpoint (never edit Claude's config
+    files by hand). The CLI runs in a thread so the event loop stays free.
+    A CLI failure comes back as ``ok: false`` with its output at HTTP 200 (the
+    HTTP call itself succeeded); missing binary / bad scope are 400."""
+
+    async def _run_cli(argv: list[str]) -> JSONResponse:
+        try:
+            r = await asyncio.to_thread(
+                subprocess.run,
+                argv,
+                capture_output=True,
+                text=True,
+                timeout=CLAUDE_CLI_TIMEOUT,
+                check=False,  # a CLI failure is surfaced as ok:false, not raised
+            )
+            rc, stdout, stderr = r.returncode, r.stdout, r.stderr
+        except (subprocess.SubprocessError, OSError) as exc:
+            rc, stdout, stderr = -1, "", f"{type(exc).__name__}: {exc}"
+        return JSONResponse(
+            {
+                "ok": rc == 0,
+                "exit": rc,
+                "stdout": stdout,
+                "stderr": stderr,
+                "command": " ".join(argv),
+                "note": "Claude Code may need a reload/restart to pick up the change",
+            }
+        )
+
+    def _missing_cli() -> JSONResponse | None:
+        if shutil.which("claude") is None:
+            return _err(
+                "claude CLI not found on the daemon's PATH — install Claude "
+                "Code (or expose `claude` to the daemon's environment), then "
+                "retry"
+            )
+        return None
+
+    async def register_backend(request: Request):
+        """``claude mcp add`` for one backend as ``gateway-<name>``. Requires
+        the backend to exist in config so the registered URL is real."""
+        name = request.path_params["name"]
+        payload = await request.json()
+        scope = payload.get("scope") or "local"
+        cfg = ctx.load()
+        if not any(x.name == name for x in cfg.backends):
+            return _err("unknown backend")
+        missing = _missing_cli()
+        if missing is not None:
+            return missing
+        url = f"http://{cfg.host}:{cfg.port}/{name}/mcp"
+        try:
+            argv = claude_mcp_command("add", name, url=url, scope=scope)
+        except cl.ConfigError as exc:
+            return _err(str(exc))
+        return await _run_cli(argv)
+
+    async def deregister_backend(request: Request):
+        """``claude mcp remove`` for ``gateway-<name>``. Deliberately does NOT
+        require the backend to exist in config — this is the cleanup path after
+        a remove/rename, when the backend is already gone."""
+        name = request.path_params["name"]
+        payload = await request.json()
+        scope = payload.get("scope") or "local"
+        missing = _missing_cli()
+        if missing is not None:
+            return missing
+        try:
+            argv = claude_mcp_command("remove", name, scope=scope)
+        except cl.ConfigError as exc:
+            return _err(str(exc))
+        return await _run_cli(argv)
+
+    return [
+        Route(
+            "/admin/api/backend/{name}/register",
+            _needs_json(register_backend),
+            methods=["POST"],
+        ),
+        Route(
+            "/admin/api/backend/{name}/deregister",
+            _needs_json(deregister_backend),
+            methods=["POST"],
         ),
     ]
 
@@ -1255,6 +1445,7 @@ def register(  # noqa: PLR0913 — public API; callers pass the lifespan plumbin
             *_general_routes(ctx),
             *_settings_routes(ctx),
             *_backend_routes(ctx),
+            *_claude_routes(ctx),
             *_ops_routes(ctx),
         ]
     )

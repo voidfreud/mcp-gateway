@@ -847,6 +847,59 @@ def test_build_state_includes_endpoint(defaults_dir):
 # --- #79 effective_tools scoping (per-backend collision check) --------------
 
 
+# --- #45 claude_mcp_command (pure argv builder) ------------------------------
+
+
+@pytest.mark.parametrize("scope", ["local", "user", "project"])
+def test_claude_mcp_command_add_argv(scope):
+    url = "http://127.0.0.1:9100/b/mcp"
+    assert admin.claude_mcp_command("add", "b", url=url, scope=scope) == [
+        "claude",
+        "mcp",
+        "add",
+        "--transport",
+        "http",
+        "--scope",
+        scope,
+        "gateway-b",
+        url,
+    ]
+
+
+@pytest.mark.parametrize("scope", ["local", "user", "project"])
+def test_claude_mcp_command_remove_argv(scope):
+    # remove takes no url — it only needs the registration name
+    assert admin.claude_mcp_command("remove", "b", scope=scope) == [
+        "claude",
+        "mcp",
+        "remove",
+        "--scope",
+        scope,
+        "gateway-b",
+    ]
+
+
+def test_claude_mcp_command_default_scope_is_local():
+    argv = admin.claude_mcp_command("remove", "b")
+    assert argv[argv.index("--scope") + 1] == "local"
+
+
+@pytest.mark.parametrize("bad", ["global", "LOCAL", "", "workspace"])
+def test_claude_mcp_command_rejects_bad_scope(bad):
+    with pytest.raises(cl.ConfigError, match="scope"):
+        admin.claude_mcp_command("add", "b", url="http://h/mcp", scope=bad)
+
+
+def test_claude_mcp_command_rejects_unknown_action():
+    with pytest.raises(cl.ConfigError, match="action"):
+        admin.claude_mcp_command("list", "b")
+
+
+def test_claude_mcp_command_add_requires_url():
+    with pytest.raises(cl.ConfigError, match="url"):
+        admin.claude_mcp_command("add", "b")
+
+
 def test_effective_tools_scopes_to_one_backend(defaults_dir):
     _write_defaults(defaults_dir, "b1", "t1")
     _write_defaults(defaults_dir, "b2", "t2")

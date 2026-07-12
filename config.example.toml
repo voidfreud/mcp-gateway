@@ -12,8 +12,12 @@ log_file = "~/.local/state/mcp-gateway/gateway.log"
 # transport = "stdio" -> needs `command` (+ optional args, env)
 # ===========================================================================
 [[backends]]
-name = "exa"                       # backend id; also the tool-name prefix
-                                   # when >1 backend (exa_web_search, ...)
+name = "exa"                       # routing identity: drives the /exa/mcp
+                                   # endpoint + the gateway-exa Claude Code
+                                   # registration. Renaming it is a topology
+                                   # change (admin "Rename…", #44): restart +
+                                   # CC re-registration. Cosmetic label ->
+                                   # display_name instead (#42).
 transport = "http"
 url = "https://your-exa-endpoint/mcp"
 auth_header = "Authorization"      # optional; set BOTH or NEITHER
