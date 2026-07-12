@@ -12,18 +12,28 @@ Python 3.12 · FastMCP 3.x · Pydantic · structlog · `uv`.
 
 ## How to run
 - Dev: `uv run server.py` → one `/<backend>/mcp` endpoint per backend, plus `/admin` + `/health`.
-- Login: launchd LaunchAgent `com.void.mcp-gateway.plist` (see README "Run").
+- Login: launchd LaunchAgent `com.void.mcp-gateway.plist`, installed via
+  `just install` / `./install.sh` (#149): every plist path routes through the
+  stable symlink `~/.local/opt/mcp-gateway` → the repo, so after a repo move you
+  re-run the script and nothing else. `/health` names the daemon's resolved code
+  path (`ok mcp-gateway <ver> @ /path`) — if it doesn't match the repo's real
+  location, you're talking to a ghost process from an old clone.
 
 ## How to verify
 With the daemon up: `uv run verify_rename.py http://127.0.0.1:9100` — checks every
 backend endpoint (bare names, instructions <=2KB) + a real passthrough call.
 `uv run config_loader.py config.toml` prints parsed backends + transform keys.
+Per-backend liveness: `GET /admin/api/status` (#23).
 
 ## Layout
 - `config_loader.py` — Pydantic models + `config.toml` → proxy config + transforms; also `dump_toml`/`save` (admin writes config back).
 - `server.py` — one single-backend `create_proxy` per backend, each mounted at `/<backend>/mcp` under a parent Starlette (+ `/admin` + `/health`); lifespans composed via `AsyncExitStack`.
 - `admin.py` — admin UI/API at `/admin`: introspect/defaults, edit overrides, in-process hot-reload, import/remove (restart).
 - `admin.html` — single-file vanilla-JS admin page (no framework, no build).
+  Tests guard it against merge-conflict remnants and JS syntax errors
+  (`node --check` of the inline script) — it broke silently once.
+- `install.sh` — idempotent launchd (re)install through the `~/.local/opt`
+  symlink (#149); `--dry-run` prints actions. `just install` wraps it.
 - `config.toml` — the LIVE, admin-managed config (**gitignored** — regenerated on
   every UI save). Auto-seeded from `config.default.toml` on first run (`config_loader.ensure_config`).
 - `config.default.toml` — committed runnable seed (both backends passthrough).
@@ -122,6 +132,31 @@ backend endpoint (bare names, instructions <=2KB) + a real passthrough call.
   (which also need the launchd restart). Reconnect before verifying an override,
   or you grade stale text. (Also step 2 of the verify loop in the mcp-tool-design
   skill's `references/levers.md`.)
+- **Injected param defaults (#35):** `ParamOverride.default` (scalar only, mirrors
+  `ArgTransformConfig.default`) → the only way to hide a *required* param. Pass the
+  kwarg to `ArgTransformConfig` only when set — its `to_arg_transform` uses
+  `exclude_unset`, so an explicit None differs from never-set.
+- **Baseline auto-refresh (#43):** `admin.refresh_defaults` re-captures + diffs;
+  throttle stamps live in in-process `admin._last_refresh` (reset on restart = the
+  post-mount refresh runs once per boot, by design; failures keep the stamp so a
+  down backend retries at throttle cadence, not per trigger). `tools/list_changed`
+  is subscribed only for STATEFUL backends (persistent client), and the handler
+  only ENQUEUES into `server._AutoRefresh`'s bounded queue — never re-capture
+  inside the message handler, it shares the session's message pump with live tool
+  calls. Overrides survive every refresh (diffs by original name).
+- **Status probes (#23):** `/admin/api/status` runs one `Client(proxy)` +
+  `list_tools` per backend concurrently (STATUS_TIMEOUT 5s). Counts post-transform
+  tools; a probe of a stateless stdio backend spawns a short-lived subprocess.
+- **Bearer token (#26):** resolved via `expand_env` ONCE in `_build_app` (missing
+  env fails boot loudly); `/admin`, `/health`, `/ready` exempt. In `claude mcp add`
+  the `--header` option is VARIADIC — it must come AFTER `<name> <url>` or it
+  swallows them (live-caught); `claude_mcp_command` encodes this and the register
+  route redacts the token from everything it echoes.
+- **Hard rename (#44)** is a topology op: config key + defaults file +
+  `_last_refresh` stamp migrate, then restart. `deregister` deliberately works for
+  backends absent from config (the post-remove/rename cleanup path).
+- **Uniquify (#22)** is a per-save escape hatch (`"on_collision": "uniquify"` at
+  the payload top level) — names only; description collisions still reject.
 
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
