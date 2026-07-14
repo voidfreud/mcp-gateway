@@ -1,7 +1,9 @@
 # research/serena.md
 
 **Researched:** 2026-07-14
-**Backend:** LOCAL stdio MCP, launched via `uvx --from git+https://github.com/oraios/serena serena start-mcp-server`. Server `Serena` v1.27.0 (matches capture's `server_info`). Currently **disabled/untuned** in the gateway.
+**Backend:** LOCAL stdio MCP, launched via `uvx --from git+https://github.com/oraios/serena serena start-mcp-server`. Server `Serena` v1.27.0 (matches capture's `server_info`). At the time of this research pass the backend was **disabled/untuned**.
+
+**Update 2026-07-15 (fix pass):** the backend is now enabled and tuned. The launch command was changed to add `--context claude-code`, which makes serena itself exclude the six native-duplicate tools (`create_text_file`, `replace_content`, `replace_in_files`, `read_file`, `find_file`, `list_dir`, `search_for_pattern` — see path (a) in the "Contexts and modes" section below, which is what got adopted) — they no longer broadcast at all, so the gateway-side hide+inject workaround described there was not needed for those seven. `replace_content`, `replace_in_files`, and `onboarding` are additionally disabled at the gateway level (`enabled: false` overrides) for the reasons in the sections below. `open_dashboard` is also gateway-disabled (human-facing browser action, no agent-observable effect). All remaining broadcast tools now carry rewritten descriptions per `references/wording.md`. The "duplicate-vs-unique split" section below describes the pre-`--context claude-code` state (30 tools, default/full context) and is kept for history, but the **live broadcast today only contains the LSP-unique and state/project-management tools plus `activate_project`/`get_current_config`/`initial_instructions`/the memory sextet** — the duplicate list no longer appears at all.
 **Tools seen (30, matches capture):** `create_text_file`, `replace_content`, `replace_in_files`, `replace_symbol_body`, `insert_after_symbol`, `insert_before_symbol`, `read_file`, `list_dir`, `find_file`, `search_for_pattern`, `get_symbols_overview`, `find_symbol`, `find_referencing_symbols`, `find_implementations`, `find_declaration`, `get_diagnostics_for_file`, `rename_symbol`, `safe_delete_symbol`, `write_memory`, `read_memory`, `list_memories`, `delete_memory`, `rename_memory`, `edit_memory`, `execute_shell_command`, `open_dashboard`, `activate_project`, `get_current_config`, `onboarding`, `initial_instructions`. Server instructions broadcast: "CRITICAL: Before starting to work on a coding task, call the `initial_instructions` tool to read the 'Serena Instructions Manual'."
 **Sources:** captured baseline `~/.local/state/mcp-gateway/defaults/serena.json`; deepwiki `oraios/serena` (5 targeted questions: contexts/modes gating, `activate_project` internals, LSP warm-up + `execute_shell_command` safety, memory storage + onboarding injection, common footguns); live read-only probes via `POST /admin/api/run` against this gateway instance (`get_current_config`, `list_memories`, `list_dir` — no project registered yet, so all three returned the "No active project" gate error, which is itself the key finding, not a probe failure).
 
@@ -45,7 +47,7 @@ Serena gates its own toolset by **context** (fixed at server startup, e.g. via `
 
 **This is directly relevant to tuning**: the upstream project's own `claude-code` context ships a config that already hides the exact tools that duplicate Claude Code's native ones. The gateway's hide+inject lever can replicate that curation manually since this backend was launched with the default/unrestricted context (no `--context` flag passed), not `claude-code`. Two paths: (a) relaunch with `--context ide-assistant` (deprecated name) / `--context claude-code` at the command level so serena itself does the trimming, or (b) keep the current launch and use gateway-side hide on the same tool list. (a) is architecturally cleaner if the launch command is easy to edit; worth flagging to the tuner.
 
-## Duplicate-vs-unique split (the core tuning decision)
+## Duplicate-vs-unique split (historical — describes the pre-2026-07-15 default/full-context capture, superseded by the update note above)
 
 **Pure duplicates of Claude Code's native tools, zero added value, prime hide candidates:**
 - `read_file` → Read
@@ -90,4 +92,4 @@ Both look like "code intelligence," but they're built on fundamentally different
 
 ## Sync note
 
-If the gateway ever launches serena with an explicit `--context` flag (e.g. `claude-code`) instead of the default unrestricted context, the actual visible tool count will drop below 30 (removing the native-duplicate set) — re-capture the baseline and refresh this file if that launch command changes; the "duplicate vs unique" section above assumes the current default/full-context launch is what's captured.
+Done as of 2026-07-15: the gateway now launches serena with `--context claude-code` (see the update note at the top), which removed the native-duplicate set from the broadcast. If the launch command changes again (different `--context`, or dropped entirely), re-capture the baseline and refresh this file — the "duplicate vs unique" section is now historical, not current.
