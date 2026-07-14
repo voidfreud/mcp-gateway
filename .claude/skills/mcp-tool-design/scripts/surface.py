@@ -69,10 +69,10 @@ def turn0(cfg, target: str | None) -> int:
         # #15: prompts surface to the agent as slash commands at turn 0.
         povs = {p.original: p for p in b.prompts}
         for dp in d.get("prompts") or []:
-            ov = povs.get(dp.get("name"))
+            ov = povs.get(dp.get("original"))
             if ov is not None and not ov.enabled:
                 continue
-            pname = (ov.name if ov else None) or dp.get("name")
+            pname = (ov.name if ov else None) or dp.get("original")
             print(f"/mcp__gateway-{b.name}__{pname}")
         print()
     if target and shown == 0:
@@ -100,7 +100,7 @@ def _resources_prompts(b, d: dict, full: bool) -> None:
                 print(f"      desc: {desc or '(none)'}")
     povs = {p.original: p for p in b.prompts}
     for dp in d.get("prompts") or []:
-        orig = dp.get("name", "?")
+        orig = dp.get("original", "?")
         ov = povs.get(orig)
         if ov is not None and not ov.enabled:
             print(f"  - prompt {orig}: DISABLED (not broadcast)")
@@ -112,10 +112,11 @@ def _resources_prompts(b, d: dict, full: bool) -> None:
         if full:
             print(f"      desc: {desc or '(none)'}")
             aovs = {a.original: a for a in (ov.args if ov else [])}
-            for da in dp.get("arguments") or []:
-                ao = aovs.get(da.get("name"))
+            for da in dp.get("args") or []:
+                aname = da.get("original")
+                ao = aovs.get(aname)
                 adesc = (ao.description if ao else None) or da.get("description")
-                print(f"      arg {da.get('name')}: {adesc or '(no description)'}")
+                print(f"      arg {aname}: {adesc or '(no description)'}")
 
 
 def main() -> int:
