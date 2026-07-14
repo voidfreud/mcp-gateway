@@ -683,6 +683,8 @@ def build_state(cfg: GatewayConfig) -> dict:
                     "description": ov.description if ov else None,
                     "enabled": ov.enabled if ov else True,
                     "always_load": ov.always_load if ov else False,
+                    # #162: per-tool output cap (chars) — None = client default
+                    "max_result_chars": ov.max_result_chars if ov else None,
                     # #16: behavior hooks — hand-authored in config.toml, shown
                     # read-only (specs + current load status; None = no hooks /
                     # loading fine).
@@ -801,6 +803,22 @@ def _clean_param_default(v, param: str):
         f"parameter {param!r}: injected default must be a string, number, or "
         f"boolean (got {type(v).__name__})"
     )
+
+
+def _clean_max_result_chars(v) -> int | None:
+    """Validate a per-tool output cap (#162): a positive integer or None. The
+    UI's cleared number field sends null/""; a whole-number float (JSON has no
+    int type) is accepted; anything else is a clean 400 — mirroring the model
+    validator so nonsense never reaches a persisted config."""
+    if v is None or v == "":
+        return None
+    if isinstance(v, str) and v.strip().isdigit():
+        v = int(v.strip())
+    if isinstance(v, float) and v.is_integer():
+        v = int(v)
+    if isinstance(v, bool) or not isinstance(v, int) or v < 1:
+        raise cl.ConfigError(f"max_result_chars must be a positive integer (got {v!r})")
+    return v
 
 
 _NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
@@ -929,6 +947,11 @@ def apply_tool_override(cfg: GatewayConfig, backend: str, payload: dict) -> str 
         lambda: bool(ov["always_load"]),
         prev.always_load if prev else False,
     )
+    max_result_chars = _field(
+        "max_result_chars",
+        lambda: _clean_max_result_chars(ov["max_result_chars"]),
+        prev.max_result_chars if prev else None,
+    )
     new = ToolOverride(
         original=original,
         name=name,
@@ -936,6 +959,7 @@ def apply_tool_override(cfg: GatewayConfig, backend: str, payload: dict) -> str 
         description=description,
         enabled=enabled,
         always_load=always_load,
+        max_result_chars=max_result_chars,
         # #16: hooks are hand-authored in config.toml, not admin-editable — a UI
         # save must carry them through unchanged, never silently drop them.
         validate_=prev.validate_ if prev else None,
@@ -974,6 +998,7 @@ def apply_tool_override(cfg: GatewayConfig, backend: str, payload: dict) -> str 
         or description
         or not enabled
         or always_load
+        or max_result_chars is not None
         or params
         or new.validate_
         or new.post_process
@@ -1211,6 +1236,7 @@ def migrate_override(cfg: GatewayConfig, backend: str, frm: str, to: str) -> dic
         "description": src.description,
         "enabled": src.enabled,
         "always_load": src.always_load,
+        "max_result_chars": src.max_result_chars,
         "params": kept,
     }
     # Drop the dangling entry BEFORE applying, so its (soon-obsolete) transform
@@ -1232,7 +1258,7 @@ EXPORT_KIND = "mcp-gateway-settings"
 EXPORT_VERSION = 1
 
 
-def export_settings(  # noqa: PLR0912 — one branch per serialized override field
+def export_settings(  # noqa: PLR0912, PLR0915 — one branch per serialized override field
     cfg: GatewayConfig, full: bool = False
 ) -> dict:
     """The COMPLETE stored settings as one JSON-safe bundle: per-backend
@@ -1266,6 +1292,8 @@ def export_settings(  # noqa: PLR0912 — one branch per serialized override fie
                 td["enabled"] = False
             if t.always_load:
                 td["always_load"] = True
+            if t.max_result_chars is not None:  # #162
+                td["max_result_chars"] = t.max_result_chars
             if t.params:
                 td["params"] = [
                     {

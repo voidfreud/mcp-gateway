@@ -953,7 +953,7 @@ function renderGateway() {
 // Tool card — editable fields prefilled with effective values (#62 semantics).
 function toolCard(b, t) {
   const card = document.createElement('div');
-  const isOvr = !!(t.name || t.title || t.description
+  const isOvr = !!(t.name || t.title || t.description || t.max_result_chars != null
     || t.params.some(p => p.name || p.description || p.hide || p.default != null));
   card.className = 'tool' + (t.enabled ? '' : ' disabled') + (isOvr ? ' ovr' : '');
   card.dataset.original = t.original;
@@ -987,6 +987,13 @@ function toolCard(b, t) {
       </div>
       <span class="flabel">Description${dot('description')}</span>
       <textarea class="f-desc grow${t.description ? ' ov' : ''}" data-cap="2048" data-default="${esc(t.default_description||'')}">${esc(desc)}</textarea>
+      <div class="row2">
+        <div><span class="flabel">Output cap (chars)${t.max_result_chars != null ? ' <span class="ovd">·</span>' : ''}</span>
+          <input type="number" class="f-maxchars mono${t.max_result_chars != null ? ' ov' : ''}" min="1" step="1"
+            value="${t.max_result_chars != null ? t.max_result_chars : ''}" placeholder="client default (~25k tokens)"
+            title="per-tool result budget — broadcast as _meta anthropic/maxResultSizeChars; empty = no cap override"></div>
+        <div></div>
+      </div>
       <div class="params">
         <span class="flabel" style="margin-top:0">Parameters</span>
         ${t.params.map(p => paramRow(p)).join('') || '<div class="si">no parameters</div>'}
@@ -1301,6 +1308,8 @@ function gather(card) {
     description: $('.f-desc', card).value,
     enabled: $('.f-enabled', card).checked,
     always_load: $('.f-always', card).checked,
+    // #162: per-tool output cap — empty field = null = no cap override.
+    max_result_chars: ($('.f-maxchars', card).value.trim() === '') ? null : Number($('.f-maxchars', card).value),
     params,
   };
 }
@@ -1308,7 +1317,7 @@ function gather(card) {
 // ---- #113: Load field snapshots (browser-side restore; Save buttons removed —
 // use GET /admin/api/export for downloads, or the old snapshot files still load).
 const SNAP_KIND = 'mcp-gateway-fields';
-const EMPTY_OVERRIDE = { name: '', title: '', description: '', enabled: true, always_load: false, params: [] };
+const EMPTY_OVERRIDE = { name: '', title: '', description: '', enabled: true, always_load: false, max_result_chars: null, params: [] };
 
 // ---- #136 settings bundles: Export/Import wired to the server-side API ----
 async function exportSettings() {
@@ -1514,6 +1523,7 @@ function patchToolState(backend, original, o) {
   t.description = ovVal(o.description, t.default_description);
   t.enabled = o.enabled;
   t.always_load = o.always_load;
+  t.max_result_chars = o.max_result_chars;
   o.params.forEach(op => {
     const p = t.params.find(x => x.original === op.original);
     if (!p) return;
