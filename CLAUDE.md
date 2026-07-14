@@ -138,14 +138,13 @@ layout, console script `mcp-gateway`). MIT; distributed via
   symlink; recreate the venv with `uv sync`.
 - Accepted spec gaps (#92): completions capability not forwarded; tools/list
   served as one page. Framework-level, irrelevant to Claude Code.
-- Backlog: #162 (per-tool output-cap lever),
-  north-star #121. Uninstall is `./install.sh
-  --uninstall` (#171; `--purge` adds config+state, `--dry-run` composes).
-  The old parked set is resolved (2026-07-14): #10/#25 closed by audit/ADR-0004,
-  #15 (resource+prompt rewriting), #16 (behavior hooks), #18 (guarded
-  non-loopback bind) merged; #14/#21/#13 built as STACKED DRAFT PRs
-  #173→#175/#176 on `feat/14-composite-tools` — unmerged pending live testing,
-  merge #173 first.
+- Backlog (2026-07-15): the issue tracker is CLEAR except north-star #121
+  (ongoing tuning mission) and the three STACKED DRAFT PRs #173→#175/#176
+  (composites → smart routing / code mode) on `feat/14-composite-tools` —
+  reviewed, conflict-free, unmerged pending live testing; merge #173 first.
+  Everything else shipped: parked set (#10/#13–16/#18/#21/#25), #157 age-gate,
+  #162 output-cap lever, #170 UI revamp, #171 uninstall (`./install.sh
+  --uninstall`; `--purge` adds config+state, `--dry-run` composes).
 
 ## Hard-won session learnings (2026-07-12 — read before repeating them)
 
