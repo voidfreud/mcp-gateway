@@ -1,6 +1,6 @@
 ---
 name: mcp-tool-design
-description: "Tune what the gateway's backends broadcast to Claude — instructions, tool names/descriptions/params, pinning. Use when editing a backend's tool text."
+description: "Tune what the gateway's backends broadcast to Claude — instructions, tool names/descriptions/params, resource and prompt text, pinning. Use when editing a backend's broadcast text."
 when_to_use: "Also when agents confuse, ignore, or misuse gateway tools; when a backend is added, removed, enabled, or disabled (re-harmonize the field's boundaries); when sharpening names for cold-start discovery or ToolSearch. Not for installing MCP servers or building new ones."
 ---
 
@@ -9,6 +9,8 @@ when_to_use: "Also when agents confuse, ignore, or misuse gateway tools; when a 
 The gateway rewrites every text a backend broadcasts to Claude Code — this skill is the pipeline for making that text razor-sharp for a cold-start agent: one that has never seen these tools, sees only what Claude Code shows it, and must reach for the right tool for the right reason without hesitating between similar ones. Changing the text is the easy half; the work is knowing what to write, grounded in research and the sources in `corpus/`, never in guesswork.
 
 The user names the backend(s) to tune; with no target named, run a harmonization pass over the whole field. Scope is always the currently-enabled backends and tools only.
+
+The tunable surface is everything broadcast: server instructions, tool names/titles/descriptions and param docs, and — for backends that emit them — resource and prompt text (#15; prompts surface as slash commands, so their names get the same name-only rigor as tools). When text alone cannot fix a misuse pattern (an agent keeps sending malformed args, or a tool floods the context), escalate past wording: behavior hooks (#16, `validate`/`post_process` — see levers.md) reshape the call itself; propose them explicitly rather than bending descriptions into warnings.
 
 Execute this pipeline:
 

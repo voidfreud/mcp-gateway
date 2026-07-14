@@ -6,12 +6,14 @@ A local MCP proxy daemon (FastMCP v3) between Claude Code and backend MCP
 servers. Most MCP servers ship sloppy broadcast text — vague names, empty
 instructions, useless param docs — so agents can't use them. The gateway
 rewrites EVERYTHING a backend broadcasts (tool name/title/description, every
-param name/description, server instructions, pinning, hide+inject) until a
-sloppy server reads like a well-designed one, while forwarding real calls
-untouched. One loopback daemon at login, shared by all sessions. Mission
-statement: issue #121. The ongoing hand-work is tuning backends with the
-`.claude/skills/mcp-tool-design` skill — 4 configured backends (gitnexus,
-graphitti, serena, xapi) are still disabled/untuned.
+param name/description, server instructions, resource + prompt text (#15),
+pinning, hide+inject) until a sloppy server reads like a well-designed one,
+while forwarding real calls untouched — and per-tool behavior hooks (#16) can
+validate/reshape the calls themselves. One loopback daemon at login (loopback
+by default — a non-loopback bind requires bearer_token, #18), shared by all
+sessions. Mission statement: issue #121. The ongoing hand-work is tuning
+backends with the `.claude/skills/mcp-tool-design` skill — 4 configured
+backends (gitnexus, graphitti, serena, xapi) are still disabled/untuned.
 
 ## Stack & layout
 
@@ -68,6 +70,13 @@ layout, console script `mcp-gateway`). MIT; distributed via
   you're talking to a ghost process from an old clone.
 - Ship: branch → PR (one closing keyword per issue) → squash-merge → deploy is
   `./install.sh` (plist/code changed) or `POST /admin/api/restart` (code only).
+- **Docs ship with the feature, in the same PR** — the levers.md sync rule
+  generalized: a user-visible change updates README ("What you get"),
+  the relevant docs/ page, CHANGELOG (Unreleased), and THIS FILE (north-star
+  scope + a gotcha if the change has a trap). This file is the next session's
+  memory: when a session ends having changed how the gateway works or ships,
+  the backlog line and gotchas here must already say so. Stale instructions
+  are worse than none — prune as eagerly as you add.
 
 ## Gotchas (verified against FastMCP 3.4.4)
 
@@ -94,6 +103,12 @@ layout, console script `mcp-gateway`). MIT; distributed via
   clobbers them; a backend renaming tools upstream leaves DANGLING overrides
   (text silently inactive) → the UI's stale-override banner migrates/discards
   them (#153). Baselines capture concurrently at boot.
+- **Behavior hooks (#16):** the `ToolOverride` model field is `validate_`
+  (TOML key `validate` — the bare name shadows a pydantic attr; the surface.py
+  false-positive from getattr'ing `validate` already happened once). Hooks
+  fail CLOSED per tool: a broken hook errors that tool's calls, never the
+  mount, and never silently skips a configured guard. Hook files re-read by
+  mtime; specs are importlib'd from the hooks dir, never eval'd.
 - **Auth:** optional `bearer_token` (${ENV} ref, resolved once at boot) gates
   backend endpoints AND `/admin/api/*` (open admin = config writes + tool
   execution for any local process); only `/health`, `/ready`, bare `GET
