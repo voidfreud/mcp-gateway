@@ -21,6 +21,12 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `POST /admin/api/resource-reset`, `PUT /admin/api/prompt-override`,
   `POST /admin/api/prompt-reset`.
 
+### Documentation
+
+- **ADR-0004: per-session isolation** — recorded that caller isolation is the
+  existing per-backend `stateless` lever, not a new gateway mode; added a
+  "Session isolation between callers" section to the security guide (#25).
+
 ## [1.0.0] - 2026-07-12
 
 The first feature-complete release. This wave (#150) turns the gateway from a
