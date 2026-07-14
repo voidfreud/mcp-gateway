@@ -121,6 +121,20 @@ by disabling it (`enabled = false` on the tool, or the toggle in the admin UI).
 A disabled tool is not broadcast to Claude and cannot be called through the
 gateway.
 
+## Session isolation between callers
+
+Warm backends (`stateless = false`) share one persistent backend session across
+every local caller. That is safe here because backend credentials are fixed at
+boot from `${ENV}` references — identical for all callers — and the gateway
+never forwards a caller's own `Authorization` header to a backend (its optional
+bearer token is consumed at the gateway).
+
+If you ever add a backend that authenticates **per caller** from the incoming
+request, flip that backend to `stateless = true` (config, or
+`POST /admin/api/backend/{name}/stateless`): each call then gets a fresh,
+isolated backend session. The reasoning is recorded in
+[ADR-0004](decisions/0004-per-session-isolation.md).
+
 ## Related
 
 - [configuration.md](configuration.md#secrets) — the secrets mechanism in the
