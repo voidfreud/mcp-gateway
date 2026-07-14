@@ -92,6 +92,18 @@ surface is list + toggle.
 | GET | `/admin/api/composites` | — | `{mounted, composites: [{name, description, enabled, strategy, always_load, params, members}]}`. `mounted` is whether the shared `/composite/mcp` endpoint is live (composites existed at boot). |
 | POST | `/admin/api/composite/{name}/enabled` | `{enabled: bool}` | Persists the toggle and hot-applies it on the live composite server (`reloaded: "hot"`, or `"restart-needed"` when the endpoint isn't mounted). Connected sessions see the change after reconnect (`/mcp`). |
 
+## Code mode (`/meta/mcp`)
+
+Not an admin route but documented here for completeness: with `[meta] enabled
+= true` in `config.toml`
+([configuration.md](configuration.md#code-mode-meta)), the gateway serves an
+MCP endpoint at `/meta/mcp` carrying three meta-tools — `search`,
+`get_schema`, and `execute` — that operate over the whole gateway catalog
+through the same live proxies (so every override applies). It obeys the same
+Origin guard and bearer token as every backend endpoint. Disabled (the
+default) means the endpoint is absent (404). There is no admin API surface for
+it beyond the config flag.
+
 ## Operations
 
 | Method | Path | Body | Response |

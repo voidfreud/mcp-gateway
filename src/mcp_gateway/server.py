@@ -40,7 +40,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse
 from starlette.routing import Mount, Route
 
-from mcp_gateway import admin, composite, config_loader
+from mcp_gateway import admin, composite, config_loader, meta
 
 
 def default_config_path() -> str:
@@ -832,6 +832,39 @@ def _build_app(  # noqa: PLR0913, PLR0915 — composition root; takes what it wi
                     if getattr(r, "path", None) != f"/{composite.COMPOSITE_ROUTE}"
                 ]
 
+        async def meta_runner(*, task_status=anyio.TASK_STATUS_IGNORED):
+            """Own the opt-in ``/meta/mcp`` code-mode mount's lifecycle (#13) —
+            one more runner task, same LIFO stack ownership as the backend and
+            composite runners. The meta server holds NO backend connection of
+            its own (search/get_schema/execute resolve targets from ``registry``
+            + ``hooks`` at call time), so its lifespan is just FastMCP's session
+            manager; a build/mount failure logs and skips, never blocking the
+            per-backend mounts."""
+            ev = anyio.Event()
+            stops[meta.META_ROUTE] = ev
+            try:
+                async with AsyncExitStack() as stack:
+                    try:
+                        srv = meta.build_meta_server(registry, hooks, log)
+                        sub = srv.http_app(path="/mcp")
+                        await stack.enter_async_context(sub.lifespan(sub))
+                        app.router.routes.append(Mount(f"/{meta.META_ROUTE}", app=sub))
+                        log.info("meta_mounted", path=f"/{meta.META_ROUTE}/mcp")
+                        ok = True
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning("meta_mount_failed", error=str(exc))
+                        ok = False
+                    task_status.started(ok)
+                    if ok:
+                        await ev.wait()
+            finally:
+                stops.pop(meta.META_ROUTE, None)
+                app.router.routes[:] = [
+                    r
+                    for r in app.router.routes
+                    if getattr(r, "path", None) != f"/{meta.META_ROUTE}"
+                ]
+
         async def hot_recycle(name: str) -> None:
             """Tear a warm backend's runner down like hot_remove AND immediately
             re-run it — fresh AsyncExitStack, fresh client, re-mount (#161). This
@@ -899,6 +932,10 @@ def _build_app(  # noqa: PLR0913, PLR0915 — composition root; takes what it wi
             # hot-applies without a restart); absent otherwise (404, zero cost).
             if cfg.composites:
                 tg.start_soon(composite_runner)
+            # #13: code mode. Opt-in ([meta] enabled = true); disabled means
+            # the /meta/mcp endpoint is simply absent (404, zero cost).
+            if cfg.meta.enabled:
+                tg.start_soon(meta_runner)
 
             async def hot_add(b: config_loader.Backend) -> bool:
                 """Mount a just-imported backend live (#7). Config is already

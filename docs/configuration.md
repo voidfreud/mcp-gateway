@@ -169,6 +169,39 @@ Authored schema, not a rewrite — there is no backend schema behind these.
 | `static_args` | table | empty | `member_param = value` — a fixed scalar injected on every call (same idea as a hidden param's injected `default`). |
 | `timeout` | number | `30.0` | Seconds this member gets before it reports `timeout` in the merge. |
 
+## Code mode (`[meta]`)
+
+An opt-in endpoint, `/meta/mcp`, exposing exactly three **meta-tools** that
+let an agent script against the gateway's whole catalog instead of loading
+every tool into context:
+
+- `search(query, backend?, limit?)` — rank matching tools across every mounted
+  backend (and the composite endpoint) by deterministic text match on
+  name/title/description/parameter docs. Returns compact rows
+  `{backend, tool, summary}`.
+- `get_schema(backend, tool)` — one tool's full **exposed** definition
+  (description + parameter JSON Schema), read from what the live proxy
+  actually broadcasts — every rename and override applies.
+- `execute(backend, tool, arguments)` — run the tool through the gateway's own
+  per-backend proxy (the same in-process path composites use) and return the
+  result verbatim; unknown backend/tool comes back as an honest structured
+  error, never a crash.
+
+Register it in Claude Code like any backend endpoint
+(`http://127.0.0.1:9100/meta/mcp`). Tool names passed to the meta-tools are
+the **exposed** (post-rename) names — exactly what `search` returns. While
+`[meta]` is enabled, the backend name `meta` is reserved. Changing the flag
+takes a daemon restart.
+
+| Key | Type | Default | Meaning |
+|-----|------|---------|---------|
+| `enabled` | boolean | `false` | Mount the `/meta/mcp` code-mode endpoint. Disabled means the endpoint is absent (404) — zero impact. |
+
+```toml
+[meta]
+enabled = true
+```
+
 ## Secrets
 
 Secrets are never written into `config.toml`. Instead you write a reference —

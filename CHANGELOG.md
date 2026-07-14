@@ -16,6 +16,14 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   every override applies. Member selection is a pluggable strategy (`"all"`
   today) — the dispatch seam smart routing (#21) will build on. Admin API:
   `GET /admin/api/composites` and a live enable/disable toggle. (#14)
+- **Code mode** — an opt-in `/meta/mcp` endpoint (`[meta] enabled = true`)
+  exposing three meta-tools that let an agent script against the whole gateway
+  catalog instead of loading every tool: `search` (deterministic keyword
+  ranking across every mounted backend and the composite endpoint),
+  `get_schema` (one tool's full **exposed**, post-rewrite definition), and
+  `execute` (runs any tool through the gateway's own proxy path — every
+  override applies — with honest structured errors for unknown targets).
+  Disabled by default: the endpoint is simply absent. (#13)
 
 ## [1.0.0] - 2026-07-12
 

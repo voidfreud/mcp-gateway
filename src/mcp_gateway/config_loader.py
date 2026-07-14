@@ -236,6 +236,21 @@ class Backend(BaseModel, extra="forbid"):
 # that name while composites are configured.
 COMPOSITE_ROUTE = "composite"
 
+# The reserved mount path for code mode (#13): the search/get_schema/execute
+# meta-tools are served at /<META_ROUTE>/mcp, so no backend may claim that
+# name while [meta] is enabled.
+META_ROUTE = "meta"
+
+
+class MetaConfig(BaseModel, extra="forbid"):
+    """Code mode (#13, spec §17.3): an opt-in ``/meta/mcp`` endpoint exposing
+    three meta-tools (``search``/``get_schema``/``execute``) that let an agent
+    script against the WHOLE gateway catalog instead of loading every tool.
+    Off by default: disabled means the endpoint is not mounted at all."""
+
+    enabled: bool = False
+
+
 _NAME_RE = r"[A-Za-z0-9_-]{1,64}"
 
 
@@ -371,6 +386,8 @@ class GatewayConfig(BaseModel, extra="forbid"):
     backends: list[Backend] = Field(default_factory=list)
     # #14: synthetic multi-backend tools, all served at /composite/mcp.
     composites: list[Composite] = Field(default_factory=list)
+    # #13: code mode — the /meta/mcp meta-tool endpoint. Opt-in; off by default.
+    meta: MetaConfig = Field(default_factory=MetaConfig)
 
     @model_validator(mode="after")
     def _check_backends(self) -> GatewayConfig:
@@ -401,6 +418,14 @@ class GatewayConfig(BaseModel, extra="forbid"):
                             f"composite {c.name!r}: member references unknown "
                             f"backend {m.backend!r}"
                         )
+        # The meta endpoint mounts at /meta/mcp (#13) — a backend of that name
+        # would collide with the route. Gated on meta being enabled so a legacy
+        # config with a backend named "meta" keeps loading while code mode is off.
+        if self.meta.enabled and META_ROUTE in names:
+            raise ConfigError(
+                f"backend name {META_ROUTE!r} is reserved for the code-mode "
+                f"endpoint while [meta] is enabled"
+            )
         return self
 
 
@@ -751,6 +776,8 @@ def to_raw(cfg: GatewayConfig) -> dict:  # noqa: PLR0915 — field-by-field TOML
         out["introspect_interval"] = cfg.introspect_interval
     if cfg.bearer_token is not None:  # default None — only persist when set (#26)
         out["bearer_token"] = cfg.bearer_token
+    if cfg.meta.enabled:  # #13 — default off; only persist the opt-in
+        out["meta"] = {"enabled": True}
     out["backends"] = [_backend(b) for b in cfg.backends]
     if cfg.composites:  # #14 — only persist when configured
         out["composites"] = [_composite(c) for c in cfg.composites]

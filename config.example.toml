@@ -93,6 +93,17 @@ stateless = true                   # parsed; shared-session reuse is a
 # env = { SOME_KEY = "${SOME_ENV}" }
 # stateless = false
 
+# ── Code mode (#13) ──────────────────────────────────────────────────────────
+# Opt-in: serve three meta-tools at /meta/mcp — search (rank tools across every
+# mounted backend by keyword), get_schema (one tool's full EXPOSED definition,
+# post-rewrite), execute (call any tool through the gateway's own proxy path,
+# so every override applies). Lets an agent script against the whole catalog
+# instead of loading every tool. Off by default: disabled = endpoint absent.
+# The backend name "meta" is reserved while enabled.
+#
+# [meta]
+# enabled = true
+
 # ── Composite tools (#14) ────────────────────────────────────────────────────
 # A composite is a synthetic tool the gateway itself serves at /composite/mcp:
 # one call fans out to every member tool CONCURRENTLY (each member bounded by
