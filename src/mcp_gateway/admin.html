@@ -8,127 +8,203 @@
      UI accent blue. Data URI, so no external fetch. -->
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cg fill='none' stroke='%234a93ff' stroke-width='2.6' stroke-linecap='round'%3E%3Cline x1='9' y1='16' x2='23' y2='16'/%3E%3C/g%3E%3Cg fill='%234a93ff'%3E%3Ccircle cx='7' cy='16' r='4.5'/%3E%3Ccircle cx='25' cy='16' r='4.5'/%3E%3C/g%3E%3C/svg%3E">
 <style>
-  /* Design tokens — #122 redesign (design_handoff_admin_redesign) */
+  /* Design tokens — #170 visual revamp. Two themes via prefers-color-scheme;
+     alpha tints derive from the base hues with color-mix so both themes stay
+     coherent from ONE set of hue tokens. Dark is the base (:root). */
   :root {
-    --bg:  #07090d;   /* page background */
-    --s0:  #0b0e14;   /* deepest surface (param rows, inputs) */
-    --s1:  #0f1318;   /* sidebar, cards, header */
-    --s2:  #141b24;   /* input backgrounds */
-    --s3:  #1b2432;   /* deferred bar fill */
-    --b:   rgba(255,255,255,.07);
-    --b2:  rgba(255,255,255,.13);
-    --t:   #c3cbd9;   /* primary text */
-    --tm:  #546070;   /* muted text */
-    --td:  #36455a;   /* dim text / placeholders */
+    color-scheme: dark;
+    --bg:  #0a0c10;   /* page background */
+    --s0:  #0d1016;   /* deepest surface (param rows) */
+    --s1:  #11151c;   /* sidebar, cards, header */
+    --s2:  #171c26;   /* input backgrounds */
+    --s3:  #202939;   /* deferred bar fill */
+    --b:   rgba(255,255,255,.08);
+    --b2:  rgba(255,255,255,.15);
+    --t:   #d4dbe7;   /* primary text */
+    --tm:  #8b96a8;   /* muted text */
+    --td:  #55617a;   /* dim text / placeholders */
+    --tt:  #b3bfd0;   /* long-form textarea text */
     --ac:  #4a93ff;   /* accent blue (overrides, selection) */
-    --gn:  #48cc88;   /* green (connected, broadcast on) */
+    --acT: #04142e;   /* text on accent-filled buttons */
+    --gn:  #41cc8c;   /* green (connected, broadcast on) */
     --am:  #e7a53a;   /* amber (pinned, budget warning) */
-    --rd:  #ff6767;   /* red (offline, danger, disabled) */
+    --rd:  #ff6b6b;   /* red (offline, danger, disabled) */
+    --nm:  #46698f;   /* footprint "tool names" segment */
+    --shadow: 0 1px 2px rgba(0,0,0,.35);
+    --shadow-lg: 0 12px 40px rgba(0,0,0,.5);
     --mono: ui-monospace,'Cascadia Code',Menlo,monospace;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      color-scheme: light;
+      --bg:  #f4f5f8;
+      --s0:  #edeff3;
+      --s1:  #ffffff;
+      --s2:  #f6f7fa;
+      --s3:  #dee4ee;
+      --b:   rgba(18,26,46,.10);
+      --b2:  rgba(18,26,46,.18);
+      --t:   #1d2635;
+      --tm:  #5a6577;
+      --td:  #96a0b2;
+      --tt:  #333e52;
+      --ac:  #2e6ee0;
+      --acT: #ffffff;
+      --gn:  #0e8f56;
+      --am:  #ad6b02;
+      --rd:  #d92d20;
+      --nm:  #8ea9c7;
+      --shadow: 0 1px 2px rgba(18,26,46,.06);
+      --shadow-lg: 0 12px 40px rgba(18,26,46,.18);
+    }
   }
   * { box-sizing: border-box; }
   @keyframes glow { 0%,100%{opacity:1} 50%{opacity:.45} }
-  body { margin: 0; font: 13px/1.45 system-ui, -apple-system, sans-serif;
-         background: var(--bg); color: var(--t); height: 100vh; display: flex; flex-direction: column; }
+  @keyframes rise { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: none; } }
+  @keyframes toast-in { from { opacity: 0; transform: translate(-50%, 8px); } to { opacity: 1; transform: translate(-50%, 0); } }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
+  }
+  body { margin: 0; font: 13px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+         background: var(--bg); color: var(--t); height: 100vh; display: flex; flex-direction: column;
+         -webkit-font-smoothing: antialiased; }
+  .ic { width: 12px; height: 12px; fill: currentColor; flex-shrink: 0; vertical-align: -1.5px; }
+  :focus-visible { outline: 2px solid var(--ac); outline-offset: 1px; }
 
   /* Header bar — 46px */
   header { display: flex; align-items: center; gap: 8px; height: 46px; padding: 0 16px;
            border-bottom: 1px solid var(--b); background: var(--s1); flex-shrink: 0; }
   header .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--gn);
-                box-shadow: 0 0 8px rgba(72,204,136,.5); animation: glow 3s infinite; }
+                box-shadow: 0 0 8px color-mix(in srgb, var(--gn) 50%, transparent); animation: glow 3s infinite; }
   header h1 { font: 600 13px system-ui; letter-spacing: -0.01em; color: var(--t); margin: 0; }
   header .sub { font: 12px system-ui; color: var(--td); }
   header .spacer { flex: 1; }
-  .saved { font: 11px system-ui; color: rgba(72,204,136,.55); opacity: 0; transition: opacity .2s; }
+  .saved { display: inline-flex; align-items: center; gap: 4px; font: 500 11px system-ui;
+           color: var(--gn); background: color-mix(in srgb, var(--gn) 10%, transparent);
+           border: 1px solid color-mix(in srgb, var(--gn) 25%, transparent);
+           padding: 2px 9px; border-radius: 99px; opacity: 0; transition: opacity .2s; }
   .saved.show { opacity: 1; }
 
   /* Buttons */
   button, .btn { font: 12px/1 system-ui; background: transparent;
     border: 1px solid var(--b2); color: var(--tm);
-    border-radius: 7px; padding: 5px 11px; cursor: pointer; }
+    border-radius: 7px; padding: 5px 11px; cursor: pointer;
+    display: inline-flex; align-items: center; gap: 5px; justify-content: center;
+    transition: border-color .15s, color .15s, background-color .15s, box-shadow .15s; }
   button:hover, .btn:hover { border-color: var(--ac); color: var(--t); }
-  .btn-pri { background: var(--ac); border-color: var(--ac); color: #00193a; font-weight: 600; padding: 6px 14px; }
-  .btn-pri:hover { color: #00193a; }
-  .btn-danger { color: var(--rd); border-color: rgba(255,103,103,.22); }
-  .btn-danger:hover { border-color: var(--rd); color: var(--rd); }
+  button:active { transform: translateY(0.5px); }
+  .btn-pri { background: var(--ac); border-color: var(--ac); color: var(--acT); font-weight: 600; padding: 6px 14px; }
+  .btn-pri:hover { color: var(--acT); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ac) 20%, transparent); }
+  .btn-danger { color: var(--rd); border-color: color-mix(in srgb, var(--rd) 25%, transparent); }
+  .btn-danger:hover { border-color: var(--rd); color: var(--rd);
+                      background: color-mix(in srgb, var(--rd) 7%, transparent); }
 
-  /* Toggle switches — real checkboxes styled as the design's pills, so all
-     existing change/gather wiring keeps working untouched. */
+  /* Toggle switches — real checkboxes styled as pills, so all existing
+     change/gather wiring keeps working untouched. */
   input[type=checkbox].tgl { appearance: none; -webkit-appearance: none; margin: 0;
     width: 28px; height: 16px; border-radius: 99px; position: relative; cursor: pointer;
-    background: var(--s0); border: 1px solid var(--b); flex-shrink: 0; }
+    background: var(--s3); border: 1px solid var(--b); flex-shrink: 0;
+    transition: background-color .18s, border-color .18s; }
   input[type=checkbox].tgl::after { content: ''; position: absolute; top: 2px; left: 2px;
-    width: 10px; height: 10px; border-radius: 50%; background: var(--td); transition: all .12s; }
-  input[type=checkbox].tgl:checked { background: rgba(72,204,136,.14); border-color: rgba(72,204,136,.3); }
-  input[type=checkbox].tgl:checked::after { left: auto; right: 2px; background: var(--gn); }
+    width: 10px; height: 10px; border-radius: 50%; background: var(--tm);
+    transition: left .18s, right .18s, background-color .18s; }
+  input[type=checkbox].tgl:checked { background: color-mix(in srgb, var(--gn) 18%, transparent);
+    border-color: color-mix(in srgb, var(--gn) 35%, transparent); }
+  input[type=checkbox].tgl:checked::after { left: 14px; background: var(--gn); }
   /* off-red variant (backend offline/disabled in sidebar) */
-  input[type=checkbox].tgl.tgl-red:not(:checked) { background: rgba(255,103,103,.1); border-color: rgba(255,103,103,.28); }
+  input[type=checkbox].tgl.tgl-red:not(:checked) { background: color-mix(in srgb, var(--rd) 12%, transparent);
+    border-color: color-mix(in srgb, var(--rd) 30%, transparent); }
   input[type=checkbox].tgl.tgl-red:not(:checked)::after { background: var(--rd); }
 
   /* Chip */
-  .chip { font: 500 9px var(--mono); padding: 1px 5px; border-radius: 3px;
-          border: 1px solid var(--b); color: var(--tm); flex-shrink: 0; }
+  .chip { font: 500 9px var(--mono); padding: 1px 5px; border-radius: 4px;
+          border: 1px solid var(--b); color: var(--tm); flex-shrink: 0; background: var(--s2); }
   /* #46 — Claude Code registration chip (next to "Register in CC") */
   .cc-chip { font: 500 10px system-ui; text-transform: none; letter-spacing: 0; }
-  .cc-chip.cc-yes { color: var(--gn); border-color: rgba(72,204,136,.3); background: rgba(72,204,136,.09); }
+  .cc-chip.cc-yes { color: var(--gn); border-color: color-mix(in srgb, var(--gn) 30%, transparent);
+                    background: color-mix(in srgb, var(--gn) 9%, transparent); }
   .cc-chip.cc-no { color: var(--td); }
 
-  /* Connection-status dots (#23) — painted async from /admin/api/status */
+  /* Connection-status dots (#23) — painted async from /admin/api/status.
+     st-unk = probe in flight: a soft skeleton pulse, not a verdict. */
   .st-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--td);
-            flex-shrink: 0; display: inline-block; }
-  .st-dot.st-ok  { background: var(--gn); box-shadow: 0 0 6px rgba(72,204,136,.45); }
-  .st-dot.st-err { background: var(--rd); box-shadow: 0 0 6px rgba(255,103,103,.45); }
+            flex-shrink: 0; display: inline-block; transition: background-color .25s; }
+  .st-dot.st-ok  { background: var(--gn); box-shadow: 0 0 6px color-mix(in srgb, var(--gn) 45%, transparent); }
+  .st-dot.st-err { background: var(--rd); box-shadow: 0 0 6px color-mix(in srgb, var(--rd) 45%, transparent); }
   .st-dot.st-off { background: var(--td); }
   .st-dot.st-unk { background: var(--td); animation: glow 1.6s infinite; }
   .st-line.st-ok-t  { color: var(--gn); }
   .st-line.st-err-t { color: var(--rd); }
 
+  /* Skeleton placeholders (first paint, before /admin/api/state resolves) */
+  .skel { background: var(--s2); border-radius: 5px; animation: glow 1.4s infinite; }
+  .skel-item { display: flex; align-items: center; gap: 9px; padding: 13px 16px;
+               border-bottom: 1px solid var(--b); }
+  .skel-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+  .skel-line { height: 10px; flex: 1; }
+  .skel-block { height: 72px; border-radius: 10px; margin-bottom: 12px; }
+
   /* Layout */
   .wrap { flex: 1; display: flex; min-height: 0; }
-  aside { width: 248px; background: var(--s1); border-right: 1px solid var(--b);
+  aside { width: 250px; background: var(--s1); border-right: 1px solid var(--b);
           overflow-y: auto; flex-shrink: 0; }
   main { flex: 1; overflow-y: auto; padding: 16px 20px; }
-  .empty { color: var(--td); margin-top: 40px; text-align: center; }
+  .empty { color: var(--td); margin-top: 56px; text-align: center; font-size: 12.5px; }
+  .empty .ic { width: 26px; height: 26px; display: block; margin: 0 auto 10px; color: var(--td); opacity: .7; }
 
-  /* Sidebar rows (screen 2a sidebar — the one true sidebar, both screens) */
-  .b-item { padding: 10px 16px; border-bottom: 1px solid var(--b); cursor: pointer; }
-  .b-item:hover { background: rgba(255,255,255,.02); }
-  .b-item.sel-bg { background: rgba(74,147,255,.06) !important; box-shadow: inset 3px 0 0 var(--ac); }
-  .b-item.off { opacity: .65; }
-  .b-item .gw-nm { font: 12px system-ui; color: var(--tm); }
+  /* Sidebar rows */
+  .b-item { padding: 10px 16px; border-bottom: 1px solid var(--b); cursor: pointer;
+            transition: background-color .12s; }
+  .b-item:hover { background: color-mix(in srgb, var(--t) 3%, transparent); }
+  .b-item.sel-bg { background: color-mix(in srgb, var(--ac) 8%, transparent) !important;
+                   box-shadow: inset 2.5px 0 0 var(--ac); }
+  .b-item.off { opacity: .6; }
+  .b-item .gw-nm { font: 600 12px system-ui; color: var(--tm); }
   .b-item .gw-sub { font: 11px system-ui; color: var(--td); margin-top: 1px; }
   .b-item .b-row { display: flex; align-items: center; gap: 8px; }
-  .b-item .b-row .nm { flex: 1; white-space: nowrap;
+  .b-item .b-row .nm { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
                        font: 600 13px system-ui; color: var(--t); }
   .b-item .b-sub { display: flex; justify-content: space-between; padding-left: 36px; margin-top: 5px; }
-  .b-item .b-sub .cnt { font: 11px system-ui; color: var(--tm); }
+  .b-item .b-sub .cnt { font: 11px system-ui; color: var(--tm); display: inline-flex; align-items: center; gap: 3px; }
   .b-item .b-sub .ovr { font: 11px system-ui; color: var(--ac); }
-  .b-item .b-sub .warn { font: 11px system-ui; color: var(--am); }
+  .b-item .warn { font: 11px system-ui; color: var(--am); display: inline-flex; align-items: center; gap: 3px; }
 
-  /* Detail — backend header */
-  .b-head { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; flex-wrap: wrap; row-gap: 6px; }
-  .b-head h2 { font: 600 15px system-ui; color: var(--t); margin: 0; }
+  /* Detail — backend header (sticky: stays visible over the long tool list) */
+  .b-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; row-gap: 6px;
+            position: sticky; top: -16px; z-index: 5;
+            margin: -16px -20px 4px; padding: 14px 20px 10px;
+            background: color-mix(in srgb, var(--bg) 82%, transparent);
+            backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+            border-bottom: 1px solid transparent; }
+  .b-head h2 { font: 600 15px system-ui; letter-spacing: -0.01em; color: var(--t); margin: 0; }
   .b-head .url { font: 10.5px var(--mono); color: var(--td); max-width: 280px;
                  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .b-head .spacer { flex: 1; }
+  .btn-group { display: inline-flex; gap: 6px; }
   .b-sub-line { font: 11px system-ui; color: var(--td); margin-bottom: 14px; }
   .b-sub-line code { background: var(--s2); padding: 1px 5px; border-radius: 3px;
                      color: var(--tm); font: 10.5px var(--mono); }
 
-  /* Controls bar — wraps instead of overflowing as controls accumulate */
-  .ctrl-bar { display: flex; align-items: center; gap: 12px; row-gap: 8px; flex-wrap: wrap;
-              margin-bottom: 14px;
-              padding: 9px 13px; background: var(--s1); border: 1px solid var(--b); border-radius: 8px; }
-  .ctrl-bar .lbl { font: 12px system-ui; color: var(--tm); display: flex; align-items: center; gap: 7px; cursor: pointer; }
-  .ctrl-bar .div { width: 1px; height: 14px; background: var(--b2); }
+  /* Controls bar — related actions grouped into captioned clusters (#170)
+     instead of one long divider-separated strip. */
+  .ctrl-bar { display: flex; align-items: stretch; gap: 8px; row-gap: 8px; flex-wrap: wrap;
+              margin-bottom: 14px; }
+  .cgroup { display: flex; align-items: center; gap: 10px; padding: 7px 12px 8px;
+            background: var(--s1); border: 1px solid var(--b); border-radius: 9px;
+            box-shadow: var(--shadow); position: relative; }
+  .cgroup .cg-cap { font: 600 9px system-ui; text-transform: uppercase; letter-spacing: .7px;
+                    color: var(--td); margin-right: 2px; }
+  .ctrl-bar .lbl { font: 12px system-ui; color: var(--tm); display: flex; align-items: center; gap: 6px;
+                   cursor: pointer; text-transform: none; letter-spacing: 0; margin: 0; }
   .ctrl-bar .spacer { flex: 1; }
 
   /* Cards (instructions, sections) */
   .card { border: 1px solid var(--b); border-radius: 10px; background: var(--s1);
-          padding: 13px 14px; margin-bottom: 14px; }
+          padding: 13px 14px; margin-bottom: 14px; box-shadow: var(--shadow); }
   /* #153 — stale (dangling) overrides warning banner */
-  .dg-banner { border-color: rgba(231,165,58,.4); background: rgba(231,165,58,.06); }
-  .dg-banner .c-title { color: var(--am); }
+  .dg-banner { border-color: color-mix(in srgb, var(--am) 40%, transparent);
+               background: color-mix(in srgb, var(--am) 6%, var(--s1)); }
+  .dg-banner .c-title { color: var(--am); display: inline-flex; align-items: center; gap: 6px; }
   .dg-banner .dg-lead { font: 11px system-ui; color: var(--tm); margin-bottom: 8px; }
   .dg-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; row-gap: 6px;
             padding: 8px 0; border-top: 1px solid var(--b); }
@@ -139,8 +215,6 @@
   .card .c-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 8px; }
   .card .c-title { font: 600 12.5px system-ui; color: var(--t); }
   .card .c-meta { font: 11px var(--mono); color: var(--tm); }
-  .card .c-bytes { font: 10px var(--mono); color: var(--gn); margin-left: auto; }
-  .card .c-bytes.over { color: var(--rd); }
   .si { color: var(--tm); font-size: 11px; }
   .hint { font-size: 11px; color: var(--td); margin-top: 3px; }
 
@@ -148,57 +222,73 @@
   label, .flabel { display: block; font: 500 10px system-ui; text-transform: uppercase;
           letter-spacing: .5px; color: var(--tm); margin: 10px 0 5px; }
   .flabel .ovd { color: var(--ac); }
-  input[type=text], textarea, select {
+  input[type=text], input[type=number], textarea, select {
     width: 100%; background: var(--s2); border: 1px solid var(--b); color: var(--t);
-    border-radius: 7px; padding: 7px 9px; font: 12.5px system-ui; }
+    border-radius: 7px; padding: 7px 9px; font: 12.5px system-ui;
+    transition: border-color .15s, box-shadow .15s; }
   input.mono, textarea.mono { font-family: var(--mono); font-size: 12px; }
-  input:focus, textarea:focus { outline: none; border-color: var(--ac); }
-  input.ov, textarea.ov { border-color: rgba(74,147,255,.35); }
+  input:focus, textarea:focus, select:focus { outline: none; border-color: var(--ac);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--ac) 14%, transparent); }
+  input.ov, textarea.ov { border-color: color-mix(in srgb, var(--ac) 40%, transparent); }
   input.bad { border-color: var(--rd); outline: 1px solid var(--rd); }
+  ::placeholder { color: var(--td); }
   textarea { resize: vertical; min-height: 90px; overflow-y: hidden;
-             font-size: 13px; line-height: 1.55; color: #a8b3c4; }
+             font-size: 13px; line-height: 1.55; color: var(--tt); }
   .f-instr { font-family: var(--mono); font-size: 12.5px; line-height: 1.6;
-             min-height: 200px; color: #a8b3c4; }
+             min-height: 200px; color: var(--tt); }
+  /* Byte-budget counter for [data-cap] fields — always visible, amber near the
+     cap (≥80%), red at/over. */
   .cap-wrap { position: relative; }
-  .cap-count { position: absolute; right: 9px; top: -18px; pointer-events: none;
-               font: 10px var(--mono); color: var(--gn); }
-  .cap-count.over { color: var(--rd); }
+  .cap-count { position: absolute; right: 4px; top: -19px; pointer-events: none;
+               font: 10px var(--mono); color: var(--td); }
+  .cap-count.warn { color: var(--am); }
+  .cap-count.over { color: var(--rd); font-weight: 700; }
 
   /* Tool cards */
-  .tool { border: 1px solid var(--b); border-radius: 10px; background: var(--s1); margin-bottom: 9px; }
-  .tool.ovr { border-color: rgba(74,147,255,.22); }
-  .tool.disabled { opacity: .4; }
+  .tool { border: 1px solid var(--b); border-radius: 10px; background: var(--s1);
+          margin-bottom: 9px; box-shadow: var(--shadow);
+          transition: border-color .15s, opacity .2s; }
+  .tool:hover { border-color: var(--b2); }
+  .tool.ovr { border-color: color-mix(in srgb, var(--ac) 28%, transparent); }
+  .tool.disabled { opacity: .45; }
   .tc-h { display: flex; align-items: center; gap: 9px; padding: 11px 14px; cursor: pointer; }
   .tc-h .orig { font: 11.5px var(--mono); color: var(--tm); }
   .tc-h .arrow { color: var(--td); }
   .tc-h .newname { font: 600 11.5px var(--mono); color: var(--t); }
   .tool.ovr .tc-h .newname { color: var(--ac); }
-  .tc-h .ov-badge { font: 10px system-ui; color: var(--ac); background: rgba(74,147,255,.1);
+  .tc-h .ov-badge { font: 10px system-ui; color: var(--ac);
+                    background: color-mix(in srgb, var(--ac) 12%, transparent);
                     padding: 1px 6px; border-radius: 3px; }
+  .tc-h .hk-badge { font: 10px system-ui; color: var(--rd);
+                    background: color-mix(in srgb, var(--rd) 10%, transparent);
+                    padding: 1px 6px; border-radius: 3px; display: inline-flex; align-items: center; gap: 4px; }
   .tc-h .spacer { flex: 1; }
-  .tc-h .chev { font-size: 10px; color: var(--tm); }
-  .pin-btn { font: 11px system-ui; border: 1px solid var(--b2);
-             border-radius: 5px; padding: 3px 8px; background: transparent;
-             filter: grayscale(1); opacity: .45; }
-  .pin-btn:hover:not(:disabled) { opacity: .8; }
-  .pin-btn.pinned { background: rgba(231,165,58,.08); border-color: rgba(231,165,58,.3);
-                    filter: none; opacity: 1; }
-  .pin-btn:disabled { opacity: .18; cursor: not-allowed; border-color: var(--b); }
+  .tc-h .chev { color: var(--td); display: inline-flex;
+                transition: transform .18s ease; }
+  .tool.open .tc-h .chev { transform: rotate(90deg); }
+  .pin-btn { border: 1px solid var(--b2); border-radius: 5px; padding: 4px 8px;
+             background: transparent; color: var(--td); }
+  .pin-btn:hover:not(:disabled) { color: var(--am); border-color: color-mix(in srgb, var(--am) 40%, transparent); }
+  .pin-btn.pinned { background: color-mix(in srgb, var(--am) 10%, transparent);
+                    border-color: color-mix(in srgb, var(--am) 35%, transparent); color: var(--am); }
+  .pin-btn:disabled { opacity: .25; cursor: not-allowed; border-color: var(--b); color: var(--td); }
   .tgl-col { display: flex; flex-direction: column; align-items: center; gap: 3px; }
-  .b-pin-ind { border: none; background: none; padding: 0; font-size: 11px; line-height: 1;
-               cursor: pointer; opacity: .9; }
-  .pin-mini { font-size: 10px; }
+  .b-pin-ind { border: none; background: none; padding: 0; line-height: 1;
+               cursor: pointer; color: var(--am); }
+  .b-pin-ind .ic, .pin-mini .ic { width: 10px; height: 10px; }
+  .pin-mini { color: var(--am); display: inline-flex; }
   .t-body { padding: 14px; display: none; border-top: 1px solid var(--b); }
-  .tool.open .t-body { display: block; }
+  .tool.open .t-body { display: block; animation: rise .18s ease; }
   .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 
   /* Params */
-  .params { border-top: 1px dashed rgba(255,255,255,.06); padding-top: 11px; margin-top: 12px; }
-  .param-row { background: var(--s0); border: 1px solid rgba(255,255,255,.05);
+  .params { border-top: 1px dashed var(--b); padding-top: 11px; margin-top: 12px; }
+  .param-row { background: var(--s0); border: 1px solid var(--b);
                border-radius: 8px; padding: 9px 12px; margin-bottom: 7px; }
   .param-row .p-top { display: flex; align-items: center; gap: 8px; }
   .param-row .p-nm { font: 11.5px var(--mono); color: var(--tm); }
-  .req-badge { font: 10px system-ui; color: var(--am); background: rgba(231,165,58,.09);
+  .req-badge { font: 10px system-ui; color: var(--am);
+               background: color-mix(in srgb, var(--am) 10%, transparent);
                padding: 1px 6px; border-radius: 3px; }
   .param-row textarea { min-height: 54px; padding: 6px 8px; }
   /* #35 — injected param default + hide pill */
@@ -208,37 +298,50 @@
                     text-transform: none; letter-spacing: 0; margin: 0; }
   .param-row.p-hidden .p-nm { opacity: .55; text-decoration: line-through; }
 
+  /* #16 — read-only behavior-hook rows (hand-authored in config.toml) */
+  .hook-row { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+  .hook-row code { font: 11px var(--mono); color: var(--tm); background: var(--s0);
+                   border: 1px solid var(--b); border-radius: 4px; padding: 2px 6px; }
+  .hook-err { display: flex; align-items: center; gap: 6px; margin-top: 7px;
+              font: 11.5px var(--mono); color: var(--rd);
+              background: color-mix(in srgb, var(--rd) 7%, transparent);
+              border: 1px solid color-mix(in srgb, var(--rd) 25%, transparent);
+              border-radius: 6px; padding: 6px 9px; }
+
   .preview { background: var(--s0); border: 1px solid var(--b); border-radius: 7px;
              padding: 9px 11px; white-space: pre-wrap; color: var(--tm); font-size: 12px;
              font-family: var(--mono); max-height: 240px; overflow-y: auto; }
 
-  /* Gateway overview (screen 2b) */
+  /* Gateway overview */
   .gw-head { display: flex; align-items: center; gap: 10px; row-gap: 8px; flex-wrap: wrap;
              padding: 0 0 14px; margin-bottom: 16px;
              border-bottom: 1px solid var(--b); }
-  .gw-head h2 { font: 600 15px system-ui; color: var(--t); margin: 0; }
+  .gw-head h2 { font: 600 15px system-ui; letter-spacing: -0.01em; color: var(--t); margin: 0; }
   .run-badge { display: inline-flex; align-items: center; gap: 5px; font: 11px system-ui;
-               color: var(--gn); background: rgba(72,204,136,.09); border: 1px solid rgba(72,204,136,.22);
+               color: var(--gn); background: color-mix(in srgb, var(--gn) 9%, transparent);
+               border: 1px solid color-mix(in srgb, var(--gn) 25%, transparent);
                padding: 2px 10px; border-radius: 99px; }
   .run-badge .dot6 { width: 6px; height: 6px; border-radius: 50%; background: var(--gn); align-self: center; }
   .gw-head .meta { font: 11px var(--mono); color: var(--td); }
   .stat-grid { display: grid; grid-template-columns: repeat(4,1fr); gap: 10px; margin-bottom: 18px; }
-  .stat { background: var(--s1); border: 1px solid var(--b); border-radius: 9px; padding: 12px 14px; }
-  .stat .s-lbl { font: 10px system-ui; text-transform: uppercase; letter-spacing: .5px;
+  .stat { background: var(--s1); border: 1px solid var(--b); border-radius: 10px;
+          padding: 12px 14px; box-shadow: var(--shadow); }
+  .stat .s-lbl { font: 600 10px system-ui; text-transform: uppercase; letter-spacing: .6px;
                  color: var(--td); margin-bottom: 6px; }
-  .stat .s-val { font: 600 22px system-ui; color: var(--t); }
+  .stat .s-val { font: 600 22px system-ui; letter-spacing: -0.02em; color: var(--t); }
   .stat .s-val.am { color: var(--am); }
   .stat .s-val .unit { font: 600 12px system-ui; color: var(--tm); margin-left: 2px; }
-  .stat .s-sub { font: 11px system-ui; color: var(--tm); margin-top: 3px; }
+  .stat .s-sub { font: 11px system-ui; color: var(--tm); margin-top: 3px;
+                 display: flex; align-items: center; gap: 3px; }
   .stat .s-sub.gn { color: var(--gn); }
   .stat .s-sub.ac { color: var(--ac); }
   .stat .s-sub.rd { color: var(--rd); }
   .ep-grid { display: grid; grid-template-columns: repeat(3,1fr); gap: 10px; margin-bottom: 14px; }
-  .ep { background: var(--s1); border: 1px solid var(--b); border-radius: 9px; padding: 13px 14px; }
-  .ep.near { border-color: rgba(231,165,58,.2); }
+  .ep { background: var(--s1); border: 1px solid var(--b); border-radius: 10px;
+        padding: 13px 14px; box-shadow: var(--shadow); transition: border-color .15s; }
+  .ep:hover { border-color: var(--b2); }
+  .ep.near { border-color: color-mix(in srgb, var(--am) 25%, transparent); }
   .ep .e-top { display: flex; align-items: center; gap: 7px; margin-bottom: 4px; }
-  .ep .dot5 { width: 5px; height: 5px; border-radius: 50%; background: var(--gn); flex-shrink: 0; }
-  .ep .dot5.off { background: var(--rd); }
   .ep .e-nm { font: 600 13px system-ui; color: var(--t); }
   .ep .e-url { font: 10.5px var(--mono); color: var(--td); display: block; margin-bottom: 9px;
                overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -247,8 +350,8 @@
   .ep .e-counts .ac { color: var(--ac); } .ep .e-counts .am { color: var(--am); }
   .ep .e-blabel { font: 10px system-ui; color: var(--td); margin-bottom: 4px; }
   .ep .e-blabel.near { color: var(--am); }
-  .ep .e-bar { height: 3px; background: var(--s2); border-radius: 99px; overflow: hidden; }
-  .ep .e-bar > div { height: 100%; background: var(--gn); }
+  .ep .e-bar { height: 3px; background: var(--s3); border-radius: 99px; overflow: hidden; }
+  .ep .e-bar > div { height: 100%; background: var(--gn); transition: width .3s; }
   .ep.near .e-bar > div { background: var(--am); }
   .fp-row { display: grid; grid-template-columns: 72px 1fr 68px; align-items: center;
             gap: 10px; margin-bottom: 8px; }
@@ -257,7 +360,7 @@
   .fp-row .fp-bar { height: 14px; border-radius: 4px; overflow: hidden; display: flex; background: var(--s3); }
   .fp-row .fp-bar .seg-am { background: var(--am); }
   .fp-row .fp-bar .seg-ac { background: var(--ac); }
-  .fp-row .fp-bar .seg-nm { background: #3b5a7a; }
+  .fp-row .fp-bar .seg-nm { background: var(--nm); }
   .fp-row .fp-kb { font: 10.5px var(--mono); color: var(--td); text-align: right; }
   .legend { display: flex; align-items: center; gap: 12px; margin-left: auto; font: 11px system-ui; color: var(--tm); }
   .legend .sw { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 4px; }
@@ -272,11 +375,13 @@
   .fp-sum .fs-div { width: 1px; height: 14px; background: var(--b2); }
 
   /* Modals + toast */
-  .modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,.6); display: none;
-              align-items: center; justify-content: center; z-index: 10; }
+  .modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,.55); display: none;
+              align-items: center; justify-content: center; z-index: 10;
+              backdrop-filter: blur(2px); -webkit-backdrop-filter: blur(2px); }
   .modal-bg.show { display: flex; }
   .modal { background: var(--s1); border: 1px solid var(--b2); border-radius: 12px;
-           padding: 20px; width: 460px; max-width: 92vw; }
+           padding: 20px; width: 460px; max-width: 92vw; box-shadow: var(--shadow-lg);
+           animation: rise .16s ease; }
   .modal h3 { margin: 0 0 14px; font: 600 14px system-ui; color: var(--t); }
   .modal .foot { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
   .modal .err { color: var(--rd); font-size: 12px; min-height: 16px; margin-top: 8px; }
@@ -284,9 +389,10 @@
                 text-transform: none; letter-spacing: 0; }
   .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
   .toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%);
-           background: var(--s2); border: 1px solid var(--ac); color: var(--t);
-           padding: 10px 16px; border-radius: 8px; display: none; z-index: 11; font-size: 12.5px; }
-  .toast.show { display: block; }
+           background: var(--s1); border: 1px solid var(--ac); color: var(--t);
+           padding: 10px 16px; border-radius: 8px; display: none; z-index: 11; font-size: 12.5px;
+           box-shadow: var(--shadow-lg); }
+  .toast.show { display: block; animation: toast-in .18s ease; }
 </style>
 </head>
 <body>
@@ -295,12 +401,21 @@
   <h1>mcp-gateway</h1>
   <span class="sub">admin</span>
   <span class="spacer"></span>
-  <span id="saved" class="saved">Saved</span>
+  <span id="saved" class="saved"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M13.78 4.22a.75.75 0 0 1 0 1.06l-7.25 7.25a.75.75 0 0 1-1.06 0L2.22 9.28a.75.75 0 0 1 1.06-1.06L6 10.94l6.72-6.72a.75.75 0 0 1 1.06 0Z"/></svg>Saved</span>
   <button class="btn-pri" onclick="openImport()">+ Import MCP</button>
 </header>
 <div class="wrap">
-  <aside id="list"></aside>
-  <main id="detail"><div class="empty">Select an MCP on the left.</div></main>
+  <aside id="list"><!-- skeleton until /admin/api/state resolves -->
+    <div class="skel-item"><span class="skel skel-dot"></span><span class="skel skel-line" style="max-width:60%"></span></div>
+    <div class="skel-item"><span class="skel skel-dot"></span><span class="skel skel-line" style="max-width:75%"></span></div>
+    <div class="skel-item"><span class="skel skel-dot"></span><span class="skel skel-line" style="max-width:50%"></span></div>
+    <div class="skel-item"><span class="skel skel-dot"></span><span class="skel skel-line" style="max-width:68%"></span></div>
+  </aside>
+  <main id="detail">
+    <div class="skel skel-block" style="max-width:720px"></div>
+    <div class="skel skel-block" style="max-width:720px;height:40px"></div>
+    <div class="skel skel-block" style="max-width:720px;height:130px"></div>
+  </main>
 </div>
 
 <div class="modal-bg" id="importBg">
@@ -380,6 +495,15 @@
 
 <script>
 const $ = (s, r=document) => r.querySelector(s);
+// #170 — coherent inline-SVG iconography (Octicons paths, MIT) instead of the
+// old mixed emoji/text affordances. currentColor so both themes just work.
+const ICON = {
+  pin: '<svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M4.456.734a1.75 1.75 0 0 1 2.826.504l.613 1.327a3.081 3.081 0 0 0 2.084 1.707l2.454.584c1.332.317 1.8 1.972.832 2.94L11.06 10l3.72 3.72a.75.75 0 1 1-1.061 1.06L10 11.06l-2.204 2.205c-.968.968-2.623.5-2.94-.832l-.584-2.454a3.081 3.081 0 0 0-1.707-2.084l-1.327-.613a1.75 1.75 0 0 1-.504-2.826L4.456.734Z"/></svg>',
+  warn: '<svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M6.457 1.047c.659-1.234 2.427-1.234 3.086 0l6.082 11.378A1.75 1.75 0 0 1 14.082 15H1.918a1.75 1.75 0 0 1-1.543-2.575Zm1.763.707a.25.25 0 0 0-.44 0L1.698 13.132a.25.25 0 0 0 .22.368h12.164a.25.25 0 0 0 .22-.368Zm.53 3.996v2.5a.75.75 0 0 1-1.5 0v-2.5a.75.75 0 0 1 1.5 0ZM9 11a1 1 0 1 1-2 0 1 1 0 0 1 2 0Z"/></svg>',
+  chev: '<svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M6.22 3.22a.75.75 0 0 1 1.06 0l4.25 4.25a.75.75 0 0 1 0 1.06l-4.25 4.25a.75.75 0 0 1-1.06-1.06L9.94 8 6.22 4.28a.75.75 0 0 1 0-1.06Z"/></svg>',
+  play: '<svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M6.3 2.84A1.5 1.5 0 0 0 4 4.11v7.78a1.5 1.5 0 0 0 2.3 1.27l6.8-3.89a1.5 1.5 0 0 0 0-2.54Z"/></svg>',
+  plug: '<svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 8a4 4 0 0 1 4-4h.75V1.75a.75.75 0 0 1 1.5 0V4h1a2 2 0 0 1 2 2v1.5a3.5 3.5 0 0 1-3.5 3.5h-.5v3.25a.75.75 0 0 1-1.5 0V11H8a4 4 0 0 1-4-4Z" opacity=".85"/></svg>',
+};
 const GATEWAY = '__gateway__';  // sentinel for the gateway pseudo-item
 let STATE = null, SELECTED = null;
 let STATUS = null;  // #23: backend name -> {state, ms, tools, error}, async
@@ -428,7 +552,7 @@ async function load() {
   renderList();
   if (SELECTED === GATEWAY) renderDetail(GATEWAY);
   else if (SELECTED && STATE.backends.find(b => b.name === SELECTED)) renderDetail(SELECTED);
-  else { SELECTED = null; $('#detail').innerHTML = '<div class="empty">Select an MCP on the left.</div>'; }
+  else { SELECTED = null; $('#detail').innerHTML = `<div class="empty">${ICON.plug}Select a backend on the left — or the Gateway row for the system overview.</div>`; }
 }
 
 // --- #23 connection status + #43 dashboard-load refresh -------------------
@@ -540,15 +664,15 @@ function renderList() {
         <span class="tgl-col">
           <input type="checkbox" class="tgl tgl-red" ${b.enabled ? 'checked' : ''}
                  title="${b.enabled ? 'broadcasting — click to disable' : 'disabled — click to enable'}">
-          ${b.always_load ? '<button class="b-pin-ind" title="whole server pinned — click to unpin">📌</button>' : ''}
+          ${b.always_load ? `<button class="b-pin-ind" title="whole server pinned — click to unpin">${ICON.pin}</button>` : ''}
         </span>
         <span class="st-dot st-unk" data-b="${esc(b.name)}"></span>
         <div class="nm" title="${esc(b.name)}">${label}</div>
-        ${(b.dangling && b.dangling.length) ? `<span class="warn" title="${b.dangling.length} stale override(s) — tuned text no longer applies">⚠</span>` : ''}
+        ${(b.dangling && b.dangling.length) ? `<span class="warn" title="${b.dangling.length} stale override(s) — tuned text no longer applies">${ICON.warn}</span>` : ''}
         <span class="chip">${chipT(b.transport)}</span>
       </div>
       <div class="b-sub">
-        <span class="cnt">${b.tools.filter(t => t.enabled).length}/${b.tools.length} tools${pins ? `, ${pins}<span class="pin-mini">📌</span>` : ''}</span>
+        <span class="cnt">${b.tools.filter(t => t.enabled).length}/${b.tools.length} tools${pins ? `, ${pins}<span class="pin-mini">${ICON.pin}</span>` : ''}</span>
         ${!b.introspected ? '<span class="warn">not introspected</span>'
           : overridden ? `<span class="ovr">${overridden} overridden</span>` : ''}
       </div>`;
@@ -577,29 +701,39 @@ function renderDetail(name) {
       <span class="url">${conn}</span>
       <span class="si st-line" data-b="${esc(b.name)}"></span>
       <span class="spacer"></span>
-      <button class="btn" style="font-size:11px" onclick="reintrospect('${escJS(b.name)}')">Re-inspect</button>
-      <button class="btn" style="font-size:11px" onclick="openRename('${escJS(b.name)}')"
-        title="hard-rename: changes the endpoint URL + Claude Code registration (restart)">Rename…</button>
+      <span class="btn-group">
+        <button class="btn" style="font-size:11px" onclick="reintrospect('${escJS(b.name)}')">Re-inspect</button>
+        <button class="btn" style="font-size:11px" onclick="openRename('${escJS(b.name)}')"
+          title="hard-rename: changes the endpoint URL + Claude Code registration (restart)">Rename…</button>
+        <button class="btn" style="font-size:11px" onclick="loadSnapshot('${escJS(b.name)}')"
+          title="restore this backend's field values from a saved JSON file">Load fields</button>
+      </span>
       <button class="btn btn-danger" style="font-size:11px" onclick="delBackend('${escJS(b.name)}')">Remove</button>
     </div>
     <div class="b-sub-line">MCP endpoint <code>http://${esc(STATE.host)}:${STATE.port}${esc(b.endpoint || '')}</code>
       · registers in Claude Code as <code>gateway-${esc(b.name)}</code> — the routing identity
       (display name is cosmetic)</div>
     <div class="ctrl-bar">
-      <label class="lbl" title="enable/disable this backend's broadcast">
-        <input type="checkbox" class="tgl" id="b-bcast" ${b.enabled ? 'checked' : ''}> Broadcasting</label>
-      <span class="div"></span>
-      <label class="lbl" title="pin ALL this backend's tools to load upfront (eager)">
-        <input type="checkbox" class="tgl" id="b-pin" ${b.always_load ? 'checked' : ''}> 📌 all tools</label>
-      <span class="div"></span>
-      <label class="lbl" title="warm session: reuse ONE backend session across calls (auto-recycled if it dies). Off = a fresh session per call (stateless).">
-        <input type="checkbox" class="tgl" id="b-warm" ${b.stateless ? '' : 'checked'}> Warm session</label>
-      <span class="div"></span>
-      <label class="lbl" title="cosmetic label for the sidebar + header; does not change routing" style="cursor:default">
-        Display name <input type="text" class="f-display mono" value="${esc(b.display_name || '')}"
-          placeholder="${esc(b.name)}" style="width:130px;padding:3px 7px;font-size:11px"></label>
-      <span class="div"></span>
-      <span class="lbl" style="cursor:default">
+      <span class="cgroup">
+        <span class="cg-cap">Broadcast</span>
+        <label class="lbl" title="enable/disable this backend's broadcast">
+          <input type="checkbox" class="tgl" id="b-bcast" ${b.enabled ? 'checked' : ''}> On</label>
+        <label class="lbl" title="pin ALL this backend's tools to load upfront (eager)">
+          <input type="checkbox" class="tgl" id="b-pin" ${b.always_load ? 'checked' : ''}> ${ICON.pin} Pin all tools</label>
+      </span>
+      <span class="cgroup">
+        <span class="cg-cap">Session</span>
+        <label class="lbl" title="warm session: reuse ONE backend session across calls (auto-recycled if it dies). Off = a fresh session per call (stateless).">
+          <input type="checkbox" class="tgl" id="b-warm" ${b.stateless ? '' : 'checked'}> Warm</label>
+      </span>
+      <span class="cgroup">
+        <span class="cg-cap">Display name</span>
+        <input type="text" class="f-display mono" value="${esc(b.display_name || '')}"
+          title="cosmetic label for the sidebar + header; does not change routing"
+          placeholder="${esc(b.name)}" style="width:130px;padding:3px 7px;font-size:11px">
+      </span>
+      <span class="cgroup">
+        <span class="cg-cap">Claude Code</span>
         <select id="b-ccscope" title="claude mcp add scope"
           style="width:auto;padding:3px 7px;font-size:11px">
           <option value="local">local</option>
@@ -607,13 +741,10 @@ function renderDetail(name) {
           <option value="project">project</option>
         </select>
         <button class="btn" style="font-size:11px" onclick="registerCC('${escJS(b.name)}')"
-          title="run claude mcp add for this backend's endpoint (gateway-${esc(b.name)})">Register in CC</button>
+          title="run claude mcp add for this backend's endpoint (gateway-${esc(b.name)})">Register</button>
         <span class="chip cc-chip" data-b="${esc(b.name)}" style="display:none"
           title="whether gateway-${esc(b.name)} is registered in Claude Code (claude mcp list)"></span>
       </span>
-      <span class="spacer"></span>
-      <button class="btn" style="font-size:11px" onclick="loadSnapshot('${escJS(b.name)}')"
-        title="restore this backend's field values from a saved JSON file">Load fields</button>
     </div>
     ${danglingBanner(b)}
     ${backendInstrSection(b)}
@@ -713,7 +844,7 @@ function danglingBanner(b) {
     </div>`;
   }).join('');
   return `<div class="card dg-banner">
-    <div class="c-head"><span class="c-title">⚠ ${dangling.length} stale override${dangling.length > 1 ? 's' : ''} — this tuned text no longer applies</span></div>
+    <div class="c-head"><span class="c-title">${ICON.warn} ${dangling.length} stale override${dangling.length > 1 ? 's' : ''} — this tuned text no longer applies</span></div>
     <div class="dg-lead">The backend renamed these tools upstream, so their captured baseline moved out from under the stored overrides. Migrate each to its new tool name, or discard it.</div>
     ${rows}
   </div>`;
@@ -747,6 +878,7 @@ function wireCaps(root) {
     const upd = () => {
       const n = enc.encode(field.value).length;
       count.textContent = n + ' / ' + cap + ' B';
+      count.classList.toggle('warn', n >= cap * 0.8 && n < cap);  // amber near the budget
       count.classList.toggle('over', n >= cap);
     };
     field.addEventListener('input', upd);
@@ -833,7 +965,7 @@ function renderGateway() {
         <span class="e-nm">${esc(b.display_name || b.name)}</span><span class="chip">${chipT(b.transport)}</span></div>
       <span class="e-url">${esc(base + (b.endpoint || ''))}</span>
       <div class="e-counts"><span>${b.tools.length} tools</span>
-        <span><span class="ac">${ovr} over</span> · <span class="am">${pins}📌</span></span></div>
+        <span><span class="ac">${ovr} overridden</span> · <span class="am">${pins} ${ICON.pin}</span></span></div>
       <div class="e-blabel${near ? ' near' : ''}">instructions ${instr} / 2048 B</div>
       <div class="e-bar"><div style="width:${pct}%"></div></div>
     </div>`;
@@ -868,12 +1000,14 @@ function renderGateway() {
       <label style="display:flex;align-items:center;gap:6px;font:11px system-ui;color:var(--tm);cursor:pointer"
         title="on a broadcast-name collision, retry the save once with an auto-suffixed name (_2, _3, …) instead of failing (#22)">
         <input type="checkbox" class="tgl" id="autoUniq"> auto-uniquify name collisions</label>
-      <button class="btn" style="font-size:11px" onclick="exportSettings()"
-        title="download the complete stored settings as one JSON bundle">Export</button>
-      <button class="btn" style="font-size:11px" onclick="importSettings()"
-        title="restore settings from an exported bundle (or a legacy field snapshot)">Import</button>
-      <button class="btn" style="font-size:11px" onclick="reregisterAll()"
-        title="deregister + re-register every enabled backend in Claude Code (e.g. after the bearer token changed)">Re-register all in CC</button>
+      <span class="btn-group">
+        <button class="btn" style="font-size:11px" onclick="exportSettings()"
+          title="download the complete stored settings as one JSON bundle">Export</button>
+        <button class="btn" style="font-size:11px" onclick="importSettings()"
+          title="restore settings from an exported bundle (or a legacy field snapshot)">Import</button>
+        <button class="btn" style="font-size:11px" onclick="reregisterAll()"
+          title="deregister + re-register every enabled backend in Claude Code (e.g. after the bearer token changed)">Re-register all in CC</button>
+      </span>
       <button class="btn btn-danger" style="font-size:11px" onclick="restartGateway()">Restart</button>
     </div>
     <div class="stat-grid">
@@ -887,7 +1021,7 @@ function renderGateway() {
         <div class="s-sub ac">${ovrTot} overridden</div></div>
       <div class="stat"><div class="s-lbl">Upfront per session</div>
         <div class="s-val am">${kb(upfront)}<span class="unit">KB</span></div>
-        <div class="s-sub">instructions + names + ${pinTot}📌</div></div>
+        <div class="s-sub">instructions + names + ${pinTot} pinned ${ICON.pin}</div></div>
       <div class="stat"><div class="s-lbl">Full catalog</div>
         <div class="s-val">${kb(catalog)}<span class="unit">KB</span></div>
         <div class="s-sub">${kb(deferTot)} KB deferred on demand</div></div>
@@ -898,13 +1032,13 @@ function renderGateway() {
         <span class="legend">
           <span><span class="sw" style="background:var(--am)"></span>Pinned</span>
           <span><span class="sw" style="background:var(--ac)"></span>Instructions</span>
-          <span><span class="sw" style="background:#3b5a7a"></span>Tool names</span>
+          <span><span class="sw" style="background:var(--nm)"></span>Tool names</span>
           <span><span class="sw" style="background:var(--s3)"></span>Deferred</span>
         </span></div>
       ${fpRows}
       <div class="fp-sum">
         <span class="fs"><span class="sw" style="background:var(--ac)"></span>Instructions <b>${kb(instrTot)} KB</b></span>
-        <span class="fs"><span class="sw" style="background:#3b5a7a"></span>Tool names <b>${kb(namesTot)} KB</b></span>
+        <span class="fs"><span class="sw" style="background:var(--nm)"></span>Tool names <b>${kb(namesTot)} KB</b></span>
         <span class="fs"><span class="sw" style="background:var(--am)"></span>Pinned <b>${kb(pinnedTot)} KB</b></span>
         <span class="fs-eq">=</span>
         <span class="fs up">Upfront every session <b>${kb(upfront)} KB</b></span>
@@ -964,19 +1098,20 @@ function toolCard(b, t) {
   const pinned = !!t.always_load;
   const dot = k => t[k] ? ' <span class="ovd">·</span>' : '';
   card.innerHTML = `
-    <div class="tc-h" onclick="this.parentElement.classList.toggle('open'); this.querySelector('.chev').textContent = this.parentElement.classList.contains('open') ? '▾' : '›'">
+    <div class="tc-h" onclick="this.parentElement.classList.toggle('open')">
       <span class="orig" title="real MCP tool name (provider-facing, not editable)">${esc(t.original)}</span>
       <span class="arrow">→</span>
       <span class="newname">${esc(name)}</span>
       ${isOvr ? '<span class="ov-badge">overridden</span>' : ''}
+      ${t.hook_error ? `<span class="hk-badge" title="${esc(t.hook_error)}">${ICON.warn} hook error</span>` : ''}
       <span class="spacer"></span>
       <button class="pin-btn${pinned ? ' pinned' : ''}" onclick="event.stopPropagation()"
         ${t.enabled ? '' : 'disabled'}
-        title="${t.enabled ? 'pin: load this tool upfront — exempt from tool-search deferral (anthropic/alwaysLoad)' : 'a switched-off tool can\'t be pinned'}">📌</button>
+        title="${t.enabled ? 'pin: load this tool upfront — exempt from tool-search deferral (anthropic/alwaysLoad)' : 'a switched-off tool can\'t be pinned'}">${ICON.pin}</button>
       <input type="checkbox" class="tgl f-enabled" ${t.enabled ? 'checked' : ''}
         onclick="event.stopPropagation()" title="broadcast this tool">
       <input type="checkbox" class="f-always" ${t.always_load ? 'checked' : ''} style="display:none">
-      <span class="chev">›</span>
+      <span class="chev">${ICON.chev}</span>
     </div>
     <div class="t-body">
       <div class="row2">
@@ -998,10 +1133,11 @@ function toolCard(b, t) {
         <span class="flabel" style="margin-top:0">Parameters</span>
         ${t.params.map(p => paramRow(p)).join('') || '<div class="si">no parameters</div>'}
       </div>
+      ${hooksSection(t)}
       ${schemaSection(t)}
       <div style="margin-top:12px;display:flex;gap:8px;">
         <button class="btn" onclick="resetTool('${escJS(b.name)}','${escJS(t.original)}')">Reset to default</button>
-        <button class="btn" onclick="toggleRun('${escJS(b.name)}','${escJS(t.original)}', this)">▶ Run</button>
+        <button class="btn" onclick="toggleRun('${escJS(b.name)}','${escJS(t.original)}', this)">${ICON.play} Run</button>
       </div>
       <div class="runbox" style="display:none"></div>
     </div>`;
@@ -1054,6 +1190,21 @@ function paramRow(p) {
     </div>
     <div style="margin-top:7px;"><textarea class="p-desc grow${p.description ? ' ov' : ''}" data-default="${esc(p.default_description||'')}">${esc(desc)}</textarea></div>
     </div>`;
+}
+
+// #16 — behavior hooks are hand-authored in config.toml, never admin-editable;
+// show the configured specs + the live load status read-only, so a broken hook
+// (which fails that tool's calls CLOSED) is visible right where it bites.
+function hooksSection(t) {
+  if (!t.validate && !t.post_process && !t.hook_error) return '';
+  const line = (label, spec) => spec
+    ? `<div class="hook-row"><span class="chip">${label}</span><code>${esc(spec)}</code></div>` : '';
+  return `<div style="margin:14px 0 4px">
+    <span class="flabel">Behavior hooks · read-only (hand-authored in config.toml)</span>
+    ${line('validate', t.validate)}
+    ${line('post_process', t.post_process)}
+    ${t.hook_error ? `<div class="hook-err">${ICON.warn} ${esc(t.hook_error)}</div>` : ''}
+  </div>`;
 }
 
 // Read-only schema surface (issue #2) — display only, never editable.
@@ -1114,7 +1265,7 @@ function wireCard(backend, original, card) {
 const rpPending = {};  // key -> save closure, for the beforeunload flush
 
 function rpHeader(idLabel, idText, name, isOvr, enabled, enabledTitle, chip) {
-  return `<div class="tc-h" onclick="this.parentElement.classList.toggle('open'); this.querySelector('.chev').textContent = this.parentElement.classList.contains('open') ? '▾' : '›'">
+  return `<div class="tc-h" onclick="this.parentElement.classList.toggle('open')">
       <span class="orig" title="${idLabel}">${esc(idText)}</span>
       ${chip ? '<span class="chip">' + chip + '</span>' : ''}
       <span class="arrow">→</span>
@@ -1123,7 +1274,7 @@ function rpHeader(idLabel, idText, name, isOvr, enabled, enabledTitle, chip) {
       <span class="spacer"></span>
       <input type="checkbox" class="tgl f-enabled" ${enabled ? 'checked' : ''}
         onclick="event.stopPropagation()" title="${enabledTitle}">
-      <span class="chev">›</span>
+      <span class="chev">${ICON.chev}</span>
     </div>`;
 }
 
