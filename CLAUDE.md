@@ -33,9 +33,10 @@ layout, console script `mcp-gateway`). MIT; distributed via
 - `src/mcp_gateway/admin.py` — admin API + helpers: capture/defaults, override
   diffing, collision + transform-dry-build validation, hot reload, Claude Code
   CLI integration, settings, stale-override migration.
-- `src/mcp_gateway/admin.html` — single-file vanilla-JS admin UI (no build).
-  Guarded by tests: no merge-conflict markers, inline JS must pass
-  `node --check`.
+- `src/mcp_gateway/admin.html` — single-file vanilla-JS admin UI (no build,
+  no external assets; light+dark via prefers-color-scheme, #170). Guarded by
+  tests: no merge-conflict markers, ONE inline `<script>` that must pass
+  `node --check` (the test extracts first `<script>`…first `</script>`).
 - `src/mcp_gateway/config.default.toml` — seed; ships in the wheel.
   `config.example.toml` — annotated schema reference (repo root).
 - `config.toml` — LIVE admin-managed config (gitignored, regenerated on UI
@@ -134,7 +135,7 @@ layout, console script `mcp-gateway`). MIT; distributed via
 - Accepted spec gaps (#92): completions capability not forwarded; tools/list
   served as one page. Framework-level, irrelevant to Claude Code.
 - Backlog: #162 (per-tool output-cap lever),
-  #170 (admin UI revamp), north-star #121. Uninstall is `./install.sh
+  north-star #121. Uninstall is `./install.sh
   --uninstall` (#171; `--purge` adds config+state, `--dry-run` composes).
   The old parked set is resolved (2026-07-14): #10/#25 closed by audit/ADR-0004,
   #15 (resource+prompt rewriting), #16 (behavior hooks), #18 (guarded

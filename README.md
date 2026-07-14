@@ -11,6 +11,9 @@ it here, without forking the server. It runs as one background daemon on your Ma
 shared by every Claude Code session, with a web admin UI at
 **http://127.0.0.1:9100/admin**.
 
+![The admin UI's backend view — live status, grouped controls, stale-override
+repair, and inline tool editing (follows your system's light/dark theme)](docs/img/admin-backend-dark.png)
+
 ## Why this exists
 
 MCP is largely wasted in Claude Code today, and the fault is upstream: server
@@ -47,7 +50,7 @@ curl -s http://127.0.0.1:9100/health   # -> ok mcp-gateway <version> @ /path/to/
 Now open the admin UI at **http://127.0.0.1:9100/admin** and:
 
 1. Click **Import MCP** and add a backend (its URL, or its local command).
-2. Click **Register in CC** on that backend to wire it into Claude Code.
+2. Click **Register** (in the backend's Claude Code cluster) to wire it into Claude Code.
 3. Edit the backend's tool names and descriptions to taste — edits auto-save.
 
 That's it. See [docs/admin-guide.md](docs/admin-guide.md) for the full tour.

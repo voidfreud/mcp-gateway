@@ -22,8 +22,8 @@ separately. To install `uv`:
 curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-To register backends from inside the admin UI (the one-click "Register in CC"
-button), you also need the `claude` command line tool (Claude Code) available.
+To register backends from inside the admin UI (the one-click "Register"
+button (Claude Code cluster)), you also need the `claude` command line tool (Claude Code) available.
 That is optional — you can always register backends by hand.
 
 ## Path A — clone and install as a login service (macOS)

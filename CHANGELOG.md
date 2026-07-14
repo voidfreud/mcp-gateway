@@ -6,6 +6,24 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Admin UI visual revamp** (#170) — the single-file admin page got a
+  deliberate design pass: a light theme (follows `prefers-color-scheme`, dark
+  stays the base), inline-SVG iconography replacing the mixed emoji/text
+  affordances, the backend control bar regrouped into captioned clusters
+  (Broadcast / Session / Display name / Claude Code), a sticky backend
+  header, skeleton placeholders for the async first paint, smooth
+  expand/hover/toggle transitions (honoring `prefers-reduced-motion`), an
+  always-visible byte-budget counter (amber near, red over the 2 KB cap), and
+  a read-only **Behavior hooks** section on tool cards showing the configured
+  `validate`/`post_process` specs plus a live hook-error badge (#16 surfaced
+  in the UI for the first time). Still one hand-editable HTML file — vanilla
+  JS, no build step, no external assets; every control keeps its endpoint and
+  save semantics. The backend detail's **Register in CC** button is now
+  **Register** inside the Claude Code cluster. After-screenshots live in
+  `docs/img/` and the README.
+
 ### Added
 
 - **Age-gated post-mount baseline refresh** (#157) — a new top-level
