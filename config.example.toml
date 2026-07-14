@@ -2,7 +2,10 @@
 # Copy to config.toml and edit. Secrets are never hardcoded: write ${ENV_VAR}
 # and the loader resolves it from the environment (injected by the LaunchAgent).
 
-host = "127.0.0.1"          # bind loopback only — never 0.0.0.0
+host = "127.0.0.1"          # loopback by default. A non-loopback bind (e.g. a
+                            # Tailscale IP) REQUIRES bearer_token or the config
+                            # refuses to load — docs/security.md ("Binding
+                            # beyond loopback").
 port = 9100
 log_file = "~/.local/state/mcp-gateway/gateway.log"
 # introspect_interval = 900 # seconds between scheduled re-captures of every
