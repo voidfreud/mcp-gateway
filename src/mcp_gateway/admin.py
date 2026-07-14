@@ -2631,6 +2631,16 @@ def _composite_routes(ctx: _AdminCtx) -> list[Route]:
         if comp is None:
             return _err("unknown composite")
         comp.enabled = enabled
+        # Build BEFORE committing (dry-build rule, #152): enabling an "llm"
+        # composite whose ${ENV} router secret no longer resolves must be a
+        # 400, never a persisted enabled=true the next boot chokes on.
+        built = None
+        if enabled:
+            try:
+                built = composite_mod.build_composite_tool(comp, ctx.registry, ctx.log)
+            except Exception as exc:
+                ctx.log.error("composite_build_failed", composite=name, error=str(exc))
+                return _err(f"composite {name!r} failed to build: {exc}")
         ctx.commit(cfg)  # backup + atomic save; no backend hot_reload involved
         # Hot-apply on the live composite server (ours, not a proxy — add/remove
         # the tool in place, no remount). Connected sessions see the change after
@@ -2639,9 +2649,7 @@ def _composite_routes(ctx: _AdminCtx) -> list[Route]:
         reloaded = "restart-needed"
         if srv is not None:
             if enabled:
-                srv.add_tool(
-                    composite_mod.build_composite_tool(comp, ctx.registry, ctx.log)
-                )
+                srv.add_tool(built)
             else:
                 try:
                     srv.local_provider.remove_tool(name)

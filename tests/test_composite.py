@@ -583,6 +583,25 @@ def test_disabled_composite_not_served():
     assert anyio.run(go) == []
 
 
+def test_one_broken_composite_does_not_sink_the_rest(monkeypatch):
+    """Per-composite isolation: an llm composite whose ${ENV} secret is gone
+    must be skipped (composite_build_failed), not fail the whole server build."""
+    monkeypatch.delenv("OPENROUTER_KEY", raising=False)
+    monkeypatch.setenv("MCP_GATEWAY_SECRETS", "/nonexistent/secrets.env")
+    raw = _routed_raw("llm")
+    healthy = dict(_base_raw()["composites"][0], name="healthy_search")
+    raw["composites"].append(healthy)
+    server = composite.build_composite_server(
+        cl.GatewayConfig.model_validate(raw), _registry(), log
+    )
+
+    async def go():
+        async with Client(server) as c:
+            return [t.name for t in await c.list_tools()]
+
+    assert anyio.run(go) == ["healthy_search"]
+
+
 # --- admin routes ------------------------------------------------------------
 
 
@@ -636,6 +655,31 @@ def test_admin_toggle_unknown_composite_400(admin_app):
         "/admin/api/composite/nope/enabled", json={"enabled": True}
     )
     assert res.status_code == 400
+
+
+def test_admin_toggle_enable_unbuildable_is_400_and_not_persisted(
+    tmp_path, monkeypatch
+):
+    """Dry-build rule (#152): enabling an llm composite with an unresolvable
+    router secret is a 400 and the config on disk keeps enabled=false — never
+    a persisted enabled=true that poisons the next boot."""
+    monkeypatch.delenv("OPENROUTER_KEY", raising=False)
+    monkeypatch.setenv("MCP_GATEWAY_SECRETS", "/nonexistent/secrets.env")
+    raw = _routed_raw("llm")
+    raw["composites"][0]["enabled"] = False
+    cfg = cl.GatewayConfig.model_validate(raw)
+    path = tmp_path / "config.toml"
+    cl.save(cfg, path)
+    app = Starlette()
+    hooks = {"composite_server": composite.build_composite_server(cfg, {}, log)}
+    admin.register(app, str(path), log, {}, {}, hooks)
+
+    res = TestClient(app).post(
+        "/admin/api/composite/web_search/enabled", json={"enabled": True}
+    )
+    assert res.status_code == 400
+    assert "failed to build" in res.json()["error"]
+    assert cl.load(path).composites[0].enabled is False
 
 
 def test_admin_toggle_validates_body(admin_app):

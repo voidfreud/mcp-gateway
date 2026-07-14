@@ -432,6 +432,13 @@ def build_composite_server(cfg: GatewayConfig, registry: dict, log) -> FastMCP:
     """
     server = FastMCP(name="mcp-gateway-composite")
     for comp in cfg.composites:
-        if comp.enabled:
+        if not comp.enabled:
+            continue
+        # Per-composite isolation (mirrors the per-backend rule, #61): one
+        # broken composite — typically an "llm" router whose ${ENV} secret no
+        # longer resolves — must not sink its siblings or the whole mount.
+        try:
             server.add_tool(build_composite_tool(comp, registry, log))
+        except Exception as exc:
+            log.error("composite_build_failed", composite=comp.name, error=str(exc))
     return server
