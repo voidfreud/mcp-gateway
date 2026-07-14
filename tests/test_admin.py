@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import re
 import string
+import time
 
 import anyio
 import pytest
@@ -431,6 +432,63 @@ def test_apply_always_load_alone_is_an_override(defaults_dir):
     )
     assert len(cfg.backends[0].tools) == 1
     assert cfg.backends[0].tools[0].always_load is True
+
+
+def test_apply_max_result_chars_roundtrip(defaults_dir):
+    # #162: cap alone is an override; sending null clears it back to minimal.
+    _write_defaults(defaults_dir, "b", "t")
+    cfg = _single_cfg()
+    admin.apply_tool_override(
+        cfg,
+        "b",
+        {"tool_original": "t", "override": {"max_result_chars": 80000}},
+    )
+    assert cfg.backends[0].tools[0].max_result_chars == 80000
+    admin.apply_tool_override(
+        cfg,
+        "b",
+        {"tool_original": "t", "override": {"max_result_chars": None}},
+    )
+    assert cfg.backends[0].tools == []  # back to minimal config
+
+
+def test_apply_partial_put_preserves_max_result_chars(defaults_dir):
+    # #139 merge semantics: an absent max_result_chars key keeps the stored cap.
+    _write_defaults(defaults_dir, "b", "t")
+    cfg = _single_cfg()
+    admin.apply_tool_override(
+        cfg, "b", {"tool_original": "t", "override": {"max_result_chars": 4096}}
+    )
+    admin.apply_tool_override(
+        cfg, "b", {"tool_original": "t", "override": {"name": "renamed"}}
+    )
+    ov = cfg.backends[0].tools[0]
+    assert ov.name == "renamed" and ov.max_result_chars == 4096
+
+
+@pytest.mark.parametrize("bad", [0, -1, "abc", 1.5, True, [1]])
+def test_apply_rejects_bad_max_result_chars(defaults_dir, bad):
+    _write_defaults(defaults_dir, "b", "t")
+    cfg = _single_cfg()
+    with pytest.raises(cl.ConfigError):
+        admin.apply_tool_override(
+            cfg, "b", {"tool_original": "t", "override": {"max_result_chars": bad}}
+        )
+    assert cfg.backends[0].tools == []  # nothing persisted
+
+
+def test_export_import_round_trips_max_result_chars(defaults_dir):
+    _write_defaults(defaults_dir, "b", "t")
+    cfg = _single_cfg()
+    admin.apply_tool_override(
+        cfg, "b", {"tool_original": "t", "override": {"max_result_chars": 12345}}
+    )
+    bundle = admin.export_settings(cfg)
+    assert bundle["backends"]["b"]["tools"]["t"]["max_result_chars"] == 12345
+    clean = _single_cfg()
+    affected, errors = admin.import_settings(clean, bundle, mode="replace")
+    assert errors == []
+    assert clean.backends[0].tools[0].max_result_chars == 12345
 
 
 def test_apply_param_hide_stored(defaults_dir):
@@ -1914,3 +1972,162 @@ def test_refresh_defaults_flags_rp_only_changes(defaults_dir, monkeypatch):
         admin.refresh_defaults(b, structlog.get_logger("test"), force=True)
     )
     assert res["status"] == "refreshed" and res["changed"] is True
+
+
+# --- #157: age-gated post-mount baseline refresh ------------------------------
+
+
+def _stamp_defaults(d, backend, captured_at):
+    """Set (or add) the persisted ``captured_at`` on an existing defaults file."""
+    p = d / f"{backend}.json"
+    data = json.loads(p.read_text())
+    data["captured_at"] = captured_at
+    p.write_text(json.dumps(data))
+
+
+def _counting_capture(tools=("t1",)):
+    calls = []
+
+    async def capture(b):
+        calls.append(b.name)
+        return await _fake_capture(tools)(b)
+
+    return calls, capture
+
+
+def test_refresh_defaults_age_gate_skips_fresh_baseline(defaults_dir, monkeypatch):
+    _write_defaults(defaults_dir, "b", "t1")
+    _stamp_defaults(defaults_dir, "b", time.time() - 10)
+    calls, capture = _counting_capture(("t1", "t2"))
+    monkeypatch.setattr(admin, "capture_defaults", capture)
+    log = structlog.get_logger("test")
+    res = anyio.run(lambda: admin.refresh_defaults(_b(), log, max_age=3600))
+    assert res["status"] == "fresh"
+    assert calls == []  # backend was never probed
+    # the stored baseline is untouched
+    assert {t["original"] for t in admin.load_defaults("b")["tools"]} == {"t1"}
+
+
+def test_refresh_defaults_age_gate_refreshes_stale_baseline(defaults_dir, monkeypatch):
+    _write_defaults(defaults_dir, "b", "t1")
+    _stamp_defaults(defaults_dir, "b", time.time() - 7200)
+    calls, capture = _counting_capture(("t1", "t2"))
+    monkeypatch.setattr(admin, "capture_defaults", capture)
+    log = structlog.get_logger("test")
+    res = anyio.run(lambda: admin.refresh_defaults(_b(), log, max_age=3600))
+    assert res["status"] == "refreshed" and calls == ["b"]
+
+
+def test_refresh_defaults_age_gate_zero_is_ungated(defaults_dir, monkeypatch):
+    # max_age=0 preserves the pre-#157 behavior: refresh even a seconds-old file
+    _write_defaults(defaults_dir, "b", "t1")
+    _stamp_defaults(defaults_dir, "b", time.time())
+    calls, capture = _counting_capture()
+    monkeypatch.setattr(admin, "capture_defaults", capture)
+    log = structlog.get_logger("test")
+    res = anyio.run(lambda: admin.refresh_defaults(_b(), log, max_age=0))
+    assert res["status"] == "refreshed" and calls == ["b"]
+
+
+@pytest.mark.parametrize("stamp", [None, "not-a-number", True])
+def test_refresh_defaults_age_gate_treats_bad_stamp_as_stale(
+    defaults_dir, monkeypatch, stamp
+):
+    # missing / non-numeric / bool captured_at (pre-#43 or hand-edited files)
+    # must refresh, never skip
+    _write_defaults(defaults_dir, "b", "t1")
+    if stamp is not None:
+        _stamp_defaults(defaults_dir, "b", stamp)
+    calls, capture = _counting_capture()
+    monkeypatch.setattr(admin, "capture_defaults", capture)
+    log = structlog.get_logger("test")
+    res = anyio.run(lambda: admin.refresh_defaults(_b(), log, max_age=10**9))
+    assert res["status"] == "refreshed" and calls == ["b"]
+
+
+def test_refresh_defaults_age_gate_future_stamp_is_stale(defaults_dir, monkeypatch):
+    # a captured_at in the future (clock went backwards) must not skip forever
+    _write_defaults(defaults_dir, "b", "t1")
+    _stamp_defaults(defaults_dir, "b", time.time() + 9999)
+    calls, capture = _counting_capture()
+    monkeypatch.setattr(admin, "capture_defaults", capture)
+    log = structlog.get_logger("test")
+    res = anyio.run(lambda: admin.refresh_defaults(_b(), log, max_age=3600))
+    assert res["status"] == "refreshed" and calls == ["b"]
+
+
+def test_refresh_defaults_age_gate_missing_baseline_refreshes(
+    defaults_dir, monkeypatch
+):
+    calls, capture = _counting_capture()
+    monkeypatch.setattr(admin, "capture_defaults", capture)
+    log = structlog.get_logger("test")
+    res = anyio.run(lambda: admin.refresh_defaults(_b(), log, max_age=10**9))
+    assert res["status"] == "refreshed" and calls == ["b"]
+
+
+def test_refresh_defaults_force_bypasses_age_gate(defaults_dir, monkeypatch):
+    _write_defaults(defaults_dir, "b", "t1")
+    _stamp_defaults(defaults_dir, "b", time.time())
+    calls, capture = _counting_capture()
+    monkeypatch.setattr(admin, "capture_defaults", capture)
+    log = structlog.get_logger("test")
+    res = anyio.run(
+        lambda: admin.refresh_defaults(_b(), log, force=True, max_age=10**9)
+    )
+    assert res["status"] == "refreshed" and calls == ["b"]
+
+
+def test_refresh_defaults_fresh_skip_leaves_event_triggers_live(
+    defaults_dir, monkeypatch
+):
+    # an age-gate skip must NOT stamp the in-process throttle: a subsequent
+    # ungated (event-driven) trigger still refreshes immediately
+    _write_defaults(defaults_dir, "b", "t1")
+    _stamp_defaults(defaults_dir, "b", time.time())
+    calls, capture = _counting_capture()
+    monkeypatch.setattr(admin, "capture_defaults", capture)
+    log = structlog.get_logger("test")
+
+    async def go():
+        gated = await admin.refresh_defaults(_b(), log, max_age=3600)
+        event = await admin.refresh_defaults(_b(), log)  # e.g. admin page load
+        return gated, event
+
+    gated, event = anyio.run(go)
+    assert gated["status"] == "fresh"
+    assert event["status"] == "refreshed" and calls == ["b"]
+
+
+# --- #157: orphan-sweep disjoint-config guard ---------------------------------
+
+
+def test_sweep_orphan_refuses_majority_wipe(defaults_dir):
+    # a scratch/test config sharing the real state dir must NOT wipe the real
+    # baselines: >half orphaned -> loud refusal, nothing deleted
+    for n in ("real1", "real2", "real3"):
+        _write_defaults(defaults_dir, n, "t")
+    cfg = cl.GatewayConfig.model_validate(
+        {"backends": [{"name": "scratch", "transport": "stdio", "command": "/bin/x"}]}
+    )
+    removed = admin.sweep_orphan_defaults(cfg, structlog.get_logger("test"))
+    assert removed == []
+    for n in ("real1", "real2", "real3"):
+        assert (defaults_dir / f"{n}.json").exists()
+
+
+def test_sweep_orphan_exactly_half_still_sweeps(defaults_dir):
+    for n in ("keep1", "keep2", "gone1", "gone2"):
+        _write_defaults(defaults_dir, n, "t")
+    cfg = cl.GatewayConfig.model_validate(
+        {
+            "backends": [
+                {"name": "keep1", "transport": "stdio", "command": "/bin/x"},
+                {"name": "keep2", "transport": "stdio", "command": "/bin/x"},
+            ]
+        }
+    )
+    removed = admin.sweep_orphan_defaults(cfg, structlog.get_logger("test"))
+    assert removed == ["gone1", "gone2"]
+    assert not (defaults_dir / "gone1.json").exists()
+    assert (defaults_dir / "keep1.json").exists()

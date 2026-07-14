@@ -4,12 +4,15 @@
 
 A local service that sits between Claude Code and the MCP servers it talks to, and
 **rewrites everything those servers broadcast** — tool names, titles,
-descriptions, parameter docs, and the server's own instructions — while passing
-the actual tool calls through untouched. When an MCP server is written badly
+descriptions, parameter docs, resource and prompt text, and the server's own
+instructions — while passing the actual tool calls through untouched. When an MCP server is written badly
 enough that Claude can't tell what its tools do, you fix what Claude reads about
 it here, without forking the server. It runs as one background daemon on your Mac,
 shared by every Claude Code session, with a web admin UI at
 **http://127.0.0.1:9100/admin**.
+
+![The admin UI's backend view — live status, grouped controls, stale-override
+repair, and inline tool editing (follows your system's light/dark theme)](docs/img/admin-backend-dark.png)
 
 ## Why this exists
 
@@ -35,7 +38,10 @@ cd mcp-gateway
 ```
 
 `./install.sh` sets everything up: it builds the environment, installs a login
-service so the gateway starts with your Mac, and starts it now. Confirm it's up:
+service so the gateway starts with your Mac, and starts it now. Removal is just
+as easy: `./install.sh --uninstall` reverses it all, keeping your config and
+state unless you add `--purge` (see
+[docs/installation.md](docs/installation.md)). Confirm it's up:
 
 ```bash
 curl -s http://127.0.0.1:9100/health   # -> ok mcp-gateway <version> @ /path/to/clone
@@ -44,7 +50,7 @@ curl -s http://127.0.0.1:9100/health   # -> ok mcp-gateway <version> @ /path/to/
 Now open the admin UI at **http://127.0.0.1:9100/admin** and:
 
 1. Click **Import MCP** and add a backend (its URL, or its local command).
-2. Click **Register in CC** on that backend to wire it into Claude Code.
+2. Click **Register** (in the backend's Claude Code cluster) to wire it into Claude Code.
 3. Edit the backend's tool names and descriptions to taste — edits auto-save.
 
 That's it. See [docs/admin-guide.md](docs/admin-guide.md) for the full tour.
@@ -68,8 +74,15 @@ That's it. See [docs/admin-guide.md](docs/admin-guide.md) for the full tour.
   from the UI, at the scope you choose, no terminal.
 - **Collision handling** — two tools can never share a broadcast name; bulk
   renames can auto-uniquify with a suffix.
+- **Resource & prompt rewriting** — the same override story for everything else
+  a backend broadcasts: resource names and descriptions, prompt renames (calls
+  reverse-map to the original), prompt argument docs.
+- **Behavior hooks** — attach your own `validate` (reject bad calls with a clear
+  message) or `post_process` (reshape noisy output) Python function to any tool,
+  without forking the backend.
 - **Optional bearer token** — require an `Authorization` header on every endpoint
-  and the admin API, for defense against other local processes.
+  and the admin API, for defense against other local processes. With it set, the
+  gateway may also bind beyond loopback (e.g. a Tailscale IP) — refused otherwise.
 - **Export / import** — round-trip all your overrides as one JSON bundle.
 
 ## Alternative install (any platform)

@@ -271,6 +271,18 @@ def save_defaults(data: dict) -> None:
     )
 
 
+def baseline_age(name: str) -> float | None:
+    """Age in seconds of *name*'s captured baseline, or ``None`` when there is
+    no baseline, no ``captured_at`` stamp (pre-#43 file), or the stamp lies in
+    the future (clock went backwards) — all of which mean "treat as stale,
+    refresh" to the #157 age gate."""
+    ts = (load_defaults(name) or {}).get("captured_at")
+    if not isinstance(ts, (int, float)) or isinstance(ts, bool):
+        return None
+    age = time.time() - ts
+    return age if age >= 0 else None
+
+
 def sweep_orphan_defaults(cfg: GatewayConfig, log) -> list[str]:
     """Delete captured-defaults files whose stem is not a configured backend name.
 
@@ -280,14 +292,33 @@ def sweep_orphan_defaults(cfg: GatewayConfig, log) -> list[str]:
     each orphan, logs one line per file, returns the removed stems. A DISABLED
     backend is still configured (it stays in ``cfg.backends``) so its file is
     kept; a missing defaults dir is tolerated (nothing to sweep).
+
+    Disjoint-config guard (#157): if MORE THAN HALF the defaults files would
+    be deleted, the loaded config almost certainly isn't the one that captured
+    them — e.g. a scratch daemon booted against a test config while sharing
+    the real state dir (this wiped every real baseline on 2026-07-14). Real
+    orphans are removed one backend at a time by prune-on-remove (#54); a
+    majority sweep is refused LOUDLY (one warning naming every would-be
+    orphan) and nothing is deleted.
     """
     if not DEFAULTS_DIR.is_dir():
         return []
     configured = {b.name for b in cfg.backends}
+    files = sorted(DEFAULTS_DIR.glob("*.json"))
+    orphans = [p for p in files if p.stem not in configured]
+    if orphans and len(orphans) * 2 > len(files):
+        log.warning(
+            "orphan_sweep_refused",
+            reason="more than half the captured baselines would be deleted — "
+            "loaded config looks disjoint from the state dir (scratch/test "
+            "config?); nothing was removed",
+            would_remove=[p.stem for p in orphans],
+            configured=sorted(configured),
+            defaults_dir=str(DEFAULTS_DIR),
+        )
+        return []
     removed: list[str] = []
-    for p in sorted(DEFAULTS_DIR.glob("*.json")):
-        if p.stem in configured:
-            continue
+    for p in orphans:
         p.unlink(missing_ok=True)
         removed.append(p.stem)
         log.info("orphan_defaults_swept", backend=p.stem, file=str(p))
@@ -333,10 +364,15 @@ async def ensure_defaults(cfg: GatewayConfig, log, force: str | None = None) -> 
 
 
 async def refresh_defaults(
-    b: Backend, log, *, force: bool = False, throttle: float = REFRESH_THROTTLE
+    b: Backend,
+    log,
+    *,
+    force: bool = False,
+    throttle: float = REFRESH_THROTTLE,
+    max_age: float = 0.0,
 ) -> dict:
     """Re-capture ONE backend's baseline, throttled (#43). Returns a result
-    dict: ``{"status": "refreshed"|"throttled"|"error", ...}``; on refresh it
+    dict: ``{"status": "refreshed"|"throttled"|"fresh"|"error", ...}``; on refresh it
     carries ``added``/``removed`` (original tool names vs the previous baseline)
     and ``changed`` (tools OR server instructions differ).
 
@@ -347,7 +383,25 @@ async def refresh_defaults(
     The throttle stamp is set BEFORE the capture await (storms coalesce) and
     kept on failure (a down backend is retried at the throttle cadence, not on
     every trigger).
+
+    Age gate (#157): a non-zero *max_age* skips the re-capture entirely when
+    the STORED baseline (its persisted ``captured_at``) is younger than that
+    many seconds — ``{"status": "fresh"}``. Only the post-mount trigger passes
+    it (a boot seconds after the last capture learns nothing new, and slow
+    stdio backends pay a full second cold start); the event-driven triggers
+    (tools/list_changed, admin page load, manual Re-inspect) never do. A
+    skip does NOT stamp the in-process throttle — those triggers stay live.
     """
+    if max_age > 0 and not force:
+        age = baseline_age(b.name)
+        if age is not None and age < max_age:
+            log.info(
+                "baseline_fresh_skipped",
+                backend=b.name,
+                age_s=round(age),
+                max_age_s=round(max_age),
+            )
+            return {"status": "fresh", "age": age}
     now = time.monotonic()
     last = _last_refresh.get(b.name)
     if not force and last is not None and now - last < throttle:
@@ -684,6 +738,8 @@ def build_state(cfg: GatewayConfig) -> dict:
                     "description": ov.description if ov else None,
                     "enabled": ov.enabled if ov else True,
                     "always_load": ov.always_load if ov else False,
+                    # #162: per-tool output cap (chars) — None = client default
+                    "max_result_chars": ov.max_result_chars if ov else None,
                     # #16: behavior hooks — hand-authored in config.toml, shown
                     # read-only (specs + current load status; None = no hooks /
                     # loading fine).
@@ -802,6 +858,22 @@ def _clean_param_default(v, param: str):
         f"parameter {param!r}: injected default must be a string, number, or "
         f"boolean (got {type(v).__name__})"
     )
+
+
+def _clean_max_result_chars(v) -> int | None:
+    """Validate a per-tool output cap (#162): a positive integer or None. The
+    UI's cleared number field sends null/""; a whole-number float (JSON has no
+    int type) is accepted; anything else is a clean 400 — mirroring the model
+    validator so nonsense never reaches a persisted config."""
+    if v is None or v == "":
+        return None
+    if isinstance(v, str) and v.strip().isdigit():
+        v = int(v.strip())
+    if isinstance(v, float) and v.is_integer():
+        v = int(v)
+    if isinstance(v, bool) or not isinstance(v, int) or v < 1:
+        raise cl.ConfigError(f"max_result_chars must be a positive integer (got {v!r})")
+    return v
 
 
 _NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
@@ -930,6 +1002,11 @@ def apply_tool_override(cfg: GatewayConfig, backend: str, payload: dict) -> str 
         lambda: bool(ov["always_load"]),
         prev.always_load if prev else False,
     )
+    max_result_chars = _field(
+        "max_result_chars",
+        lambda: _clean_max_result_chars(ov["max_result_chars"]),
+        prev.max_result_chars if prev else None,
+    )
     new = ToolOverride(
         original=original,
         name=name,
@@ -937,6 +1014,7 @@ def apply_tool_override(cfg: GatewayConfig, backend: str, payload: dict) -> str 
         description=description,
         enabled=enabled,
         always_load=always_load,
+        max_result_chars=max_result_chars,
         # #16: hooks are hand-authored in config.toml, not admin-editable — a UI
         # save must carry them through unchanged, never silently drop them.
         validate_=prev.validate_ if prev else None,
@@ -975,6 +1053,7 @@ def apply_tool_override(cfg: GatewayConfig, backend: str, payload: dict) -> str 
         or description
         or not enabled
         or always_load
+        or max_result_chars is not None
         or params
         or new.validate_
         or new.post_process
@@ -1212,6 +1291,7 @@ def migrate_override(cfg: GatewayConfig, backend: str, frm: str, to: str) -> dic
         "description": src.description,
         "enabled": src.enabled,
         "always_load": src.always_load,
+        "max_result_chars": src.max_result_chars,
         "params": kept,
     }
     # Drop the dangling entry BEFORE applying, so its (soon-obsolete) transform
@@ -1233,7 +1313,7 @@ EXPORT_KIND = "mcp-gateway-settings"
 EXPORT_VERSION = 1
 
 
-def export_settings(  # noqa: PLR0912 — one branch per serialized override field
+def export_settings(  # noqa: PLR0912, PLR0915 — one branch per serialized override field
     cfg: GatewayConfig, full: bool = False
 ) -> dict:
     """The COMPLETE stored settings as one JSON-safe bundle: per-backend
@@ -1267,6 +1347,8 @@ def export_settings(  # noqa: PLR0912 — one branch per serialized override fie
                 td["enabled"] = False
             if t.always_load:
                 td["always_load"] = True
+            if t.max_result_chars is not None:  # #162
+                td["max_result_chars"] = t.max_result_chars
             if t.params:
                 td["params"] = [
                     {
@@ -1493,12 +1575,17 @@ async def refresh_and_reload(  # noqa: PLR0913 — mirrors hot_reload's plumbing
     *,
     force: bool = False,
     throttle: float = REFRESH_THROTTLE,
+    max_age: float = 0.0,
 ) -> dict:
     """Re-capture one backend's baseline and, if it changed, hot-reload its
     live transforms + instructions so pins/enabled reconcile with the fresh
     tool list (#43). The shared tail of every auto-refresh trigger (post-mount,
-    tools/list_changed, dashboard load, interval, manual Re-inspect)."""
-    res = await refresh_defaults(b, log, force=force, throttle=throttle)
+    tools/list_changed, dashboard load, interval, manual Re-inspect). A
+    non-zero *max_age* age-gates the capture (#157) — only the post-mount
+    trigger passes one."""
+    res = await refresh_defaults(
+        b, log, force=force, throttle=throttle, max_age=max_age
+    )
     if res.get("changed"):
         cfg = cl.load(config_path)
         hot_reload(registry, holders, cfg, b.name, log)

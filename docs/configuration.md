@@ -25,6 +25,7 @@ host = "127.0.0.1"
 port = 9100
 log_file = "~/.local/state/mcp-gateway/gateway.log"
 # introspect_interval = 0
+# baseline_max_age = 86400
 # bearer_token = "${MCP_GATEWAY_TOKEN}"
 
 [[backends]]
@@ -65,6 +66,7 @@ diff-vs-default model (see below).
 | `port` | integer | `9100` | The port the gateway listens on. |
 | `log_file` | string | `"~/.local/state/mcp-gateway/gateway.log"` | Where the structured log is written. Rotates automatically (5 MB × 5 files). |
 | `introspect_interval` | integer (seconds) | `0` (off) | How often to re-scan every backend's tool list on a timer. `0` means off, which is the recommended default — the gateway already refreshes on reconnect, on a backend's own change notification, and on admin page load. Set an interval only for a long-lived remote backend that silently swaps its tools. |
+| `baseline_max_age` | integer (seconds) | `86400` (24 h) | How long a captured baseline counts as fresh for the **post-mount** refresh: at boot (or remount) a backend whose stored baseline is younger than this is not re-introspected, sparing slow stdio backends a second cold start per boot. `0` disables the gate (re-capture on every mount). Only the mount-time trigger is gated — a backend's own change notification, an admin page load, and the manual Re-inspect button always refresh. |
 | `bearer_token` | string or unset | unset | Optional access token. When set (as a `${ENV}` reference), every backend endpoint **and** the admin API require `Authorization: Bearer <token>`. See [security.md](security.md#the-optional-bearer-token). |
 | `backends` | list | required | One `[[backends]]` block per backend. At least one is required. |
 
@@ -105,6 +107,7 @@ backend's original.
 | `description` | string or unset | unset | The description Claude reads to decide when and how to call the tool. |
 | `enabled` | boolean | `true` | `false` drops the tool from the listing entirely. |
 | `always_load` | boolean | `false` | Pin this one tool to load upfront (eager). |
+| `max_result_chars` | positive integer or unset | unset | Per-tool output budget: broadcast as `_meta["anthropic/maxResultSizeChars"]`, which Claude Code honors over its global 25k-token output cap (`MAX_MCP_OUTPUT_TOKENS`) for text content. Raise it for bulk readers, lower it for chatty tools. Unset = the client default. |
 | `validate` | string or unset | unset | A behavior hook, `module:function` (see [Behavior hooks](#behavior-hooks-validate--post_process)). Runs before every call; raise `ValueError("why")` to reject it. |
 | `post_process` | string or unset | unset | A behavior hook, `module:function`. Runs on every result before the caller sees it. |
 | `params` | list | empty | One `[[backends.tools.params]]` block per parameter you override. |
