@@ -146,6 +146,12 @@ class ToolOverride(BaseModel, extra="forbid", populate_by_name=True):
     # Pin this tool to load UPFRONT (exempt from Claude Code tool-search deferral)
     # via the tool's `_meta["anthropic/alwaysLoad"]`.
     always_load: bool = False
+    # #162: per-tool output budget, broadcast as
+    # `_meta["anthropic/maxResultSizeChars"]`. Claude Code caps MCP tool output
+    # at 25k tokens (MAX_MCP_OUTPUT_TOKENS) but honors this per-tool char cap
+    # for text content — raise it for bulk readers, lower it for chatty tools.
+    # None = no cap override (the client default applies).
+    max_result_chars: int | None = None
     # #16: behavior hooks — "module:function" specs resolved in the hooks dir
     # (see hooks.py; NEVER evaluated as code). The TOML key is `validate`; the
     # field is aliased because `validate` shadows a pydantic BaseModel attr.
@@ -155,6 +161,20 @@ class ToolOverride(BaseModel, extra="forbid", populate_by_name=True):
     validate_: str | None = Field(default=None, alias="validate")
     post_process: str | None = None
     params: list[ParamOverride] = Field(default_factory=list)
+
+    @field_validator("max_result_chars", mode="before")
+    @classmethod
+    def _check_max_result_chars(cls, v):
+        # Positive integer or nothing — a zero/negative cap would blank every
+        # result. mode="before" so pydantic's lax coercion can't launder a
+        # bool/float/string into an int first (bool is an int subclass).
+        if v is None:
+            return None
+        if isinstance(v, bool) or not isinstance(v, int) or v < 1:
+            raise ConfigError(
+                f"max_result_chars must be a positive integer (got {v!r})"
+            )
+        return v
 
     @field_validator("validate_", "post_process")
     @classmethod
@@ -479,6 +499,11 @@ def to_proxy_config(cfg: GatewayConfig) -> dict:
 # (loads it upfront). See references/mcp.md (anthropic/alwaysLoad).
 ALWAYS_LOAD_META = {"anthropic/alwaysLoad": True}
 
+# Tool `_meta` hint Claude Code honors as a per-tool output budget (chars of
+# text content), overriding its global 25k-token MAX_MCP_OUTPUT_TOKENS cap
+# (#162). See the mcp-tool-design skill's references/discovery.md.
+MAX_RESULT_CHARS_META_KEY = "anthropic/maxResultSizeChars"
+
 
 def tool_hook_fn(backend_name: str, tool: ToolOverride):
     """Resolve one override's hook specs (#16) into ``(transform_fn, error)``.
@@ -569,9 +594,16 @@ def build_transforms(  # noqa: PLR0912 — one branch per override field; splitt
         # "disabled wins over pin" holds at the per-tool level too (#116) — else a
         # disabled backend's overridden tool would emit {enabled: False, meta:
         # alwaysLoad} (off, yet flagged eager). Mirrors the b.enabled gate on the
-        # per-backend pin below.
+        # per-backend pin below. The output cap (#162) rides the same merged
+        # meta: FastMCP's ToolTransformConfig.meta REPLACES the tool's meta, so
+        # both flags must land in ONE dict on top of the captured original.
+        meta_flags: dict = {}
         if b.enabled and (tool.always_load or b.always_load):
-            tc_kwargs["meta"] = pin_meta(key)
+            meta_flags.update(ALWAYS_LOAD_META)
+        if b.enabled and tool.max_result_chars is not None:
+            meta_flags[MAX_RESULT_CHARS_META_KEY] = tool.max_result_chars
+        if meta_flags:
+            tc_kwargs["meta"] = {**(bmeta.get(key) or {}), **meta_flags}
         # #16: behavior hooks ride the same transform (FastMCP's config model
         # has no transform_fn field, so a hooked tool uses the gateway's
         # subclass). Hooks are loaded here — every transform (re)build picks up
@@ -866,6 +898,8 @@ def to_raw(cfg: GatewayConfig) -> dict:  # noqa: PLR0915 — field-by-field TOML
         d["enabled"] = t.enabled
         if t.always_load:
             d["always_load"] = True
+        if t.max_result_chars is not None:  # #162: per-tool output cap
+            d["max_result_chars"] = t.max_result_chars
         if t.validate_ is not None:  # #16: TOML key is `validate` (field aliased)
             d["validate"] = t.validate_
         if t.post_process is not None:

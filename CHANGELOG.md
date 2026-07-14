@@ -8,6 +8,16 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Per-tool output-cap lever** (#162) — a tool override can set
+  `max_result_chars` (positive integer), broadcast as
+  `_meta["anthropic/maxResultSizeChars"]`, which Claude Code honors over its
+  global 25k-token `MAX_MCP_OUTPUT_TOKENS` cap for text content. It merges
+  into the tool's captured `_meta` alongside the `always_load` pin flag, is
+  editable in the admin UI (an "Output cap (chars)" field on the tool card)
+  and via `PUT /admin/api/override` (`max_result_chars`; `null` clears; #139
+  merge semantics), round-trips through export/import and override
+  migration, and hot-reloads like every other broadcast edit.
+
 - **Per-tool behavior hooks** (#16) — a tool override can name two
   user-authored Python hooks: `validate = "module:function"` and
   `post_process = "module:function"`, resolved in a dedicated hooks directory

@@ -105,6 +105,7 @@ backend's original.
 | `description` | string or unset | unset | The description Claude reads to decide when and how to call the tool. |
 | `enabled` | boolean | `true` | `false` drops the tool from the listing entirely. |
 | `always_load` | boolean | `false` | Pin this one tool to load upfront (eager). |
+| `max_result_chars` | positive integer or unset | unset | Per-tool output budget: broadcast as `_meta["anthropic/maxResultSizeChars"]`, which Claude Code honors over its global 25k-token output cap (`MAX_MCP_OUTPUT_TOKENS`) for text content. Raise it for bulk readers, lower it for chatty tools. Unset = the client default. |
 | `validate` | string or unset | unset | A behavior hook, `module:function` (see [Behavior hooks](#behavior-hooks-validate--post_process)). Runs before every call; raise `ValueError("why")` to reject it. |
 | `post_process` | string or unset | unset | A behavior hook, `module:function`. Runs on every result before the caller sees it. |
 | `params` | list | empty | One `[[backends.tools.params]]` block per parameter you override. |

@@ -433,6 +433,63 @@ def test_apply_always_load_alone_is_an_override(defaults_dir):
     assert cfg.backends[0].tools[0].always_load is True
 
 
+def test_apply_max_result_chars_roundtrip(defaults_dir):
+    # #162: cap alone is an override; sending null clears it back to minimal.
+    _write_defaults(defaults_dir, "b", "t")
+    cfg = _single_cfg()
+    admin.apply_tool_override(
+        cfg,
+        "b",
+        {"tool_original": "t", "override": {"max_result_chars": 80000}},
+    )
+    assert cfg.backends[0].tools[0].max_result_chars == 80000
+    admin.apply_tool_override(
+        cfg,
+        "b",
+        {"tool_original": "t", "override": {"max_result_chars": None}},
+    )
+    assert cfg.backends[0].tools == []  # back to minimal config
+
+
+def test_apply_partial_put_preserves_max_result_chars(defaults_dir):
+    # #139 merge semantics: an absent max_result_chars key keeps the stored cap.
+    _write_defaults(defaults_dir, "b", "t")
+    cfg = _single_cfg()
+    admin.apply_tool_override(
+        cfg, "b", {"tool_original": "t", "override": {"max_result_chars": 4096}}
+    )
+    admin.apply_tool_override(
+        cfg, "b", {"tool_original": "t", "override": {"name": "renamed"}}
+    )
+    ov = cfg.backends[0].tools[0]
+    assert ov.name == "renamed" and ov.max_result_chars == 4096
+
+
+@pytest.mark.parametrize("bad", [0, -1, "abc", 1.5, True, [1]])
+def test_apply_rejects_bad_max_result_chars(defaults_dir, bad):
+    _write_defaults(defaults_dir, "b", "t")
+    cfg = _single_cfg()
+    with pytest.raises(cl.ConfigError):
+        admin.apply_tool_override(
+            cfg, "b", {"tool_original": "t", "override": {"max_result_chars": bad}}
+        )
+    assert cfg.backends[0].tools == []  # nothing persisted
+
+
+def test_export_import_round_trips_max_result_chars(defaults_dir):
+    _write_defaults(defaults_dir, "b", "t")
+    cfg = _single_cfg()
+    admin.apply_tool_override(
+        cfg, "b", {"tool_original": "t", "override": {"max_result_chars": 12345}}
+    )
+    bundle = admin.export_settings(cfg)
+    assert bundle["backends"]["b"]["tools"]["t"]["max_result_chars"] == 12345
+    clean = _single_cfg()
+    affected, errors = admin.import_settings(clean, bundle, mode="replace")
+    assert errors == []
+    assert clean.backends[0].tools[0].max_result_chars == 12345
+
+
 def test_apply_param_hide_stored(defaults_dir):
     _write_defaults(
         defaults_dir, "b", "t", params=[{"original": "p", "description": "pd"}]

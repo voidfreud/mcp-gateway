@@ -68,6 +68,10 @@ stateless = true                   # parsed; shared-session reuse is a
   description = "Exactly what Claude should read for this tool."
   enabled = true                   # false -> tool is dropped from the listing
   always_load = true               # pin THIS tool to load upfront (eager)
+  # max_result_chars = 100000      # per-tool output budget (#162): broadcast as
+  #                                # _meta "anthropic/maxResultSizeChars" — Claude
+  #                                # Code honors it over its global 25k-token cap.
+  #                                # Positive integer; omit for the client default.
   # Behavior hooks (#16): user-authored Python, "module:function" resolved in
   # the hooks dir (MCP_GATEWAY_HOOKS > ./hooks/ > ~/.config/mcp-gateway/hooks/).
   # ARBITRARY CODE EXECUTION in the daemon, by design — same trust as a stdio

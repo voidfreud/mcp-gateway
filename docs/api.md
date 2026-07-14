@@ -45,7 +45,7 @@ of this — but it is here when you want it.
 
 | Method | Path | Body | Response |
 |--------|------|------|----------|
-| PUT | `/admin/api/override` | `{backend, original, name?, title?, description?, enabled?, always_load?, params?, on_collision?}` | `{ok, reloaded: "in-process"}`. If `on_collision: "uniquify"` was set and a name collided, also `{name: "<final>", uniquified: true}`. A collision without uniquify, or an invalid field, returns `{ok:false, error}`. Merge semantics: a key absent from the body preserves the stored value rather than clearing it. |
+| PUT | `/admin/api/override` | `{backend, original, name?, title?, description?, enabled?, always_load?, max_result_chars?, params?, on_collision?}` | `{ok, reloaded: "in-process"}`. `max_result_chars` (a positive integer, or `null` to clear) sets the tool's `_meta["anthropic/maxResultSizeChars"]` output budget; anything else is a 400. If `on_collision: "uniquify"` was set and a name collided, also `{name: "<final>", uniquified: true}`. A collision without uniquify, or an invalid field, returns `{ok:false, error}`. Merge semantics: a key absent from the body preserves the stored value rather than clearing it. |
 | POST | `/admin/api/reset` | `{backend, tool_original}` | `{ok}`. Clears every override for that one tool (reverts to the backend default). |
 | PUT | `/admin/api/resource-override` | `{backend, uri, override: {name?, title?, description?, enabled?}}` | `{ok, reloaded: "in-process"}`. Rewrites a resource's (or resource template's) display text; `uri` is the identity and is never rewritten. Same merge semantics as tool overrides. |
 | POST | `/admin/api/resource-reset` | `{backend, uri}` | `{ok}`. Clears every override for that one resource. |
