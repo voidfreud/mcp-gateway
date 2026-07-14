@@ -231,6 +231,126 @@ class Backend(BaseModel, extra="forbid"):
         return v
 
 
+# The reserved mount path for the composite endpoint (#14): all composite
+# tools are served together at /<COMPOSITE_ROUTE>/mcp, so no backend may claim
+# that name while composites are configured.
+COMPOSITE_ROUTE = "composite"
+
+_NAME_RE = r"[A-Za-z0-9_-]{1,64}"
+
+
+class CompositeParam(BaseModel, extra="forbid"):
+    """One exposed parameter of a composite tool (#14).
+
+    This is authored surface, not a rewrite: the composite tool's schema is
+    built entirely from these entries (there is no backend schema to diff
+    against). Members map their own params onto these names via
+    ``CompositeMember.args``.
+    """
+
+    name: str
+    type: Literal["string", "integer", "number", "boolean"] = "string"
+    description: str | None = None
+    required: bool = True
+    # Optional params only: the schema default Claude sees when it omits the
+    # param (a defaulted required param is a contradiction — rejected below).
+    default: str | int | float | bool | None = None
+
+    @model_validator(mode="after")
+    def _check(self) -> CompositeParam:
+        if not re.fullmatch(_NAME_RE, self.name):
+            raise ConfigError(
+                f"invalid composite param name {self.name!r}: use only letters, "
+                f"digits, '_' or '-' (max 64 chars)"
+            )
+        if self.required and self.default is not None:
+            raise ConfigError(
+                f"composite param {self.name!r}: a required param cannot take a "
+                f"default — set required = false"
+            )
+        return self
+
+
+class CompositeMember(BaseModel, extra="forbid"):
+    """One member tool a composite fans out to (#14).
+
+    ``tool`` is the EXPOSED tool name on the backend's gateway endpoint (i.e.
+    post-rename, exactly what Claude sees) — member calls go through the
+    gateway's own live proxy, so every override applies.
+    """
+
+    backend: str
+    tool: str
+    # Label used in the merged output ("## <label> — ok"); default backend/tool.
+    label: str | None = None
+    # member param name -> composite param name (the value Claude supplied for
+    # that composite param is forwarded under the member's own param name).
+    args: dict[str, str] = Field(default_factory=dict)
+    # member param name -> fixed value injected on every call (scalars only,
+    # mirroring ParamOverride.default).
+    static_args: dict[str, str | int | float | bool] = Field(default_factory=dict)
+    # Per-member deadline in seconds; a member that misses it reports itself as
+    # timed out in the merged output and never sinks the composite call.
+    timeout: float = Field(default=30.0, gt=0)
+
+    @model_validator(mode="after")
+    def _check(self) -> CompositeMember:
+        overlap = set(self.args) & set(self.static_args)
+        if overlap:
+            raise ConfigError(
+                f"composite member {self.backend}/{self.tool}: param(s) "
+                f"{sorted(overlap)} appear in both args and static_args"
+            )
+        return self
+
+
+class Composite(BaseModel, extra="forbid"):
+    """One synthetic multi-backend tool (#14, spec §17.4).
+
+    Exposed as a single tool on the shared ``/composite/mcp`` endpoint; a call
+    fans out to every selected member concurrently, gathers per-member results
+    (status, latency, text — a failed member reports itself instead of sinking
+    the call), and returns one labeled merge.
+    """
+
+    name: str
+    description: str
+    enabled: bool = True
+    # Pin the composite tool to load upfront (same lever as ToolOverride).
+    always_load: bool = False
+    # Member-selection strategy — THE dispatch seam smart routing (#21) plugs
+    # into. "all" = fan out to every member; a future router strategy picks a
+    # subset per call. Only "all" exists today.
+    strategy: Literal["all"] = "all"
+    params: list[CompositeParam] = Field(default_factory=list)
+    members: list[CompositeMember]
+
+    @model_validator(mode="after")
+    def _check(self) -> Composite:
+        if not re.fullmatch(_NAME_RE, self.name):
+            raise ConfigError(
+                f"invalid composite name {self.name!r}: use only letters, "
+                f"digits, '_' or '-' (max 64 chars)"
+            )
+        if not self.members:
+            raise ConfigError(f"composite {self.name!r} has no members")
+        pnames = [p.name for p in self.params]
+        dupes = {n for n in pnames if pnames.count(n) > 1}
+        if dupes:
+            raise ConfigError(
+                f"composite {self.name!r}: duplicate param name(s): {sorted(dupes)}"
+            )
+        declared = set(pnames)
+        for m in self.members:
+            unknown = [cp for cp in m.args.values() if cp not in declared]
+            if unknown:
+                raise ConfigError(
+                    f"composite {self.name!r}: member {m.backend}/{m.tool} maps "
+                    f"undeclared composite param(s): {sorted(set(unknown))}"
+                )
+        return self
+
+
 class GatewayConfig(BaseModel, extra="forbid"):
     """Top-level gateway configuration."""
 
@@ -249,6 +369,8 @@ class GatewayConfig(BaseModel, extra="forbid"):
     # (see server.BearerAuthMiddleware).
     bearer_token: str | None = None
     backends: list[Backend] = Field(default_factory=list)
+    # #14: synthetic multi-backend tools, all served at /composite/mcp.
+    composites: list[Composite] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _check_backends(self) -> GatewayConfig:
@@ -258,6 +380,27 @@ class GatewayConfig(BaseModel, extra="forbid"):
         dupes = {n for n in names if names.count(n) > 1}
         if dupes:
             raise ConfigError(f"duplicate backend name(s): {sorted(dupes)}")
+        cnames = [c.name for c in self.composites]
+        cdupes = {n for n in cnames if cnames.count(n) > 1}
+        if cdupes:
+            raise ConfigError(f"duplicate composite name(s): {sorted(cdupes)}")
+        if self.composites:
+            # The shared composite endpoint mounts at /composite/mcp — a backend
+            # of that name would collide with the route. Gated on composites
+            # actually existing so a legacy config without them keeps loading.
+            if COMPOSITE_ROUTE in names:
+                raise ConfigError(
+                    f"backend name {COMPOSITE_ROUTE!r} is reserved for the "
+                    f"composite endpoint while [[composites]] are configured"
+                )
+            known = set(names)
+            for c in self.composites:
+                for m in c.members:
+                    if m.backend not in known:
+                        raise ConfigError(
+                            f"composite {c.name!r}: member references unknown "
+                            f"backend {m.backend!r}"
+                        )
         return self
 
 
@@ -564,6 +707,41 @@ def to_raw(cfg: GatewayConfig) -> dict:  # noqa: PLR0915 — field-by-field TOML
             d["default"] = p.default
         return d
 
+    def _composite(c: Composite) -> dict:  # noqa: PLR0912 — one branch per optional config field
+        d: dict = {"name": c.name, "description": c.description}
+        if not c.enabled:  # default True — only persist the off state
+            d["enabled"] = False
+        if c.always_load:
+            d["always_load"] = True
+        if c.strategy != "all":  # future-proof; only "all" exists today
+            d["strategy"] = c.strategy
+        params = []
+        for p in c.params:
+            pd: dict = {"name": p.name, "type": p.type}
+            if p.description is not None:
+                pd["description"] = p.description
+            if not p.required:
+                pd["required"] = False
+            if p.default is not None:
+                pd["default"] = p.default
+            params.append(pd)
+        if params:
+            d["params"] = params
+        members = []
+        for m in c.members:
+            md: dict = {"backend": m.backend, "tool": m.tool}
+            if m.label:
+                md["label"] = m.label
+            if m.args:
+                md["args"] = dict(m.args)
+            if m.static_args:
+                md["static_args"] = dict(m.static_args)
+            if m.timeout != 30.0:  # noqa: PLR2004 — the field default above
+                md["timeout"] = m.timeout
+            members.append(md)
+        d["members"] = members
+        return d
+
     out: dict = {
         "host": cfg.host,
         "port": cfg.port,
@@ -574,6 +752,8 @@ def to_raw(cfg: GatewayConfig) -> dict:  # noqa: PLR0915 — field-by-field TOML
     if cfg.bearer_token is not None:  # default None — only persist when set (#26)
         out["bearer_token"] = cfg.bearer_token
     out["backends"] = [_backend(b) for b in cfg.backends]
+    if cfg.composites:  # #14 — only persist when configured
+        out["composites"] = [_composite(c) for c in cfg.composites]
     return out
 
 

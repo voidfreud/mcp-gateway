@@ -114,6 +114,61 @@ Each block rewrites (or hides) one parameter of a tool.
 | `hide` | boolean | `false` | Remove the parameter from the schema Claude sees. A **required** parameter can only be hidden if you also set `default` (below); otherwise the save is rejected. |
 | `default` | string, number, or boolean, or unset | unset | A fixed value the gateway injects into every call to the backend. Scalars only. Setting it makes hiding a required parameter safe: Claude never sees the parameter, and the backend always receives this value. An optional parameter may take a `default` without being hidden. |
 
+## Composite tools (`[[composites]]`)
+
+A composite is a synthetic tool the gateway itself serves — one exposed
+name/description/parameter schema, backed by a list of **member** tools on one
+or many backends. A call fans out to every member concurrently (each bounded
+by its own timeout) and returns one labeled merge; a failed or timed-out
+member reports itself inside the merge instead of failing the call (only
+all-members-failed raises a tool error). Canonical example: a `web_search`
+composite fanning out to an Exa search and a Tavily search.
+
+All composites are served together on one endpoint, `/composite/mcp` (register
+it in Claude Code like any backend endpoint). The backend name `composite` is
+reserved while composites are configured. Members are called through the
+gateway's own per-backend endpoints, so every override applies — a member's
+`tool` is the **exposed** (post-rename) tool name, and warm/stateless session
+behavior is the member backend's own.
+
+Composites are hand-authored in `config.toml` (the admin API lists and
+enables/disables them — see [api.md](api.md#composites)). Adding the *first*
+composite (or editing members/params by hand) needs a daemon restart; the
+enable/disable toggle applies live.
+
+| Key | Type | Default | Meaning |
+|-----|------|---------|---------|
+| `name` | string | required | The tool name Claude sees (letters, digits, `_`, `-`; max 64). Unique across composites. |
+| `description` | string | required | What Claude reads to decide when to call it. |
+| `enabled` | boolean | `true` | `false` drops the composite from the listing. |
+| `always_load` | boolean | `false` | Pin the composite tool to load upfront (eager). |
+| `strategy` | string | `"all"` | Member selection per call. `"all"` fans out to every member; this is the seam a future smart router plugs into. |
+| `params` | list | empty | The composite's own parameter schema (`[[composites.params]]`, below). |
+| `members` | list | required, min 1 | The member tools (`[[composites.members]]`, below). |
+
+### Composite parameters (`[[composites.params]]`)
+
+Authored schema, not a rewrite — there is no backend schema behind these.
+
+| Key | Type | Default | Meaning |
+|-----|------|---------|---------|
+| `name` | string | required | The parameter name Claude sees. |
+| `type` | string | `"string"` | `string`, `integer`, `number`, or `boolean`. |
+| `description` | string or unset | unset | What Claude reads about the parameter. |
+| `required` | boolean | `true` | Optional parameters may set `default`. |
+| `default` | scalar or unset | unset | Schema default for an *optional* parameter (a required parameter with a default is rejected). |
+
+### Composite members (`[[composites.members]]`)
+
+| Key | Type | Default | Meaning |
+|-----|------|---------|---------|
+| `backend` | string | required | A configured backend's `name`. |
+| `tool` | string | required | The **exposed** tool name on that backend's gateway endpoint (post-rename, exactly what Claude sees). |
+| `label` | string or unset | `backend/tool` | Section label in the merged output. |
+| `args` | table | empty | `member_param = "composite_param"` — the value Claude supplied for the composite param is forwarded under the member's own parameter name. An omitted optional composite param is simply not forwarded. |
+| `static_args` | table | empty | `member_param = value` — a fixed scalar injected on every call (same idea as a hidden param's injected `default`). |
+| `timeout` | number | `30.0` | Seconds this member gets before it reports `timeout` in the merge. |
+
 ## Secrets
 
 Secrets are never written into `config.toml`. Instead you write a reference —

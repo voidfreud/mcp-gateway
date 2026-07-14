@@ -81,6 +81,17 @@ added to the registration and redacted from the response.
 | GET | `/admin/api/cc-registrations` | — (`?fresh=1` busts the 60s cache) | Which configured backends are registered in Claude Code, parsed from `claude mcp list`. `{available, registered: {<backend>: bool}}`; `{available:false}` without the CLI. |
 | POST | `/admin/api/cc-reregister-all` | `{scope}` | Deregister + register every **enabled** backend, sequentially; one failure doesn't stop the rest. `{ok, count, ok_count, backends: [...]}`. |
 
+## Composites
+
+Composite tools (#14) are hand-authored in `config.toml`
+([configuration.md](configuration.md#composite-tools-composites)); the API
+surface is list + toggle.
+
+| Method | Path | Body | Response |
+|--------|------|------|----------|
+| GET | `/admin/api/composites` | — | `{mounted, composites: [{name, description, enabled, strategy, always_load, params, members}]}`. `mounted` is whether the shared `/composite/mcp` endpoint is live (composites existed at boot). |
+| POST | `/admin/api/composite/{name}/enabled` | `{enabled: bool}` | Persists the toggle and hot-applies it on the live composite server (`reloaded: "hot"`, or `"restart-needed"` when the endpoint isn't mounted). Connected sessions see the change after reconnect (`/mcp`). |
+
 ## Operations
 
 | Method | Path | Body | Response |

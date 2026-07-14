@@ -40,7 +40,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse
 from starlette.routing import Mount, Route
 
-from mcp_gateway import admin, config_loader
+from mcp_gateway import admin, composite, config_loader
 
 
 def default_config_path() -> str:
@@ -791,6 +791,47 @@ def _build_app(  # noqa: PLR0913, PLR0915 — composition root; takes what it wi
                 stops.pop(b.name, None)
                 _unmount(app, b.name, registry, holders)
 
+        async def composite_runner(*, task_status=anyio.TASK_STATUS_IGNORED):
+            """Own the shared ``/composite/mcp`` mount's lifecycle (#14) — one
+            more runner task, same LIFO stack ownership as the backend runners.
+            The composite server holds NO backend connection of its own (member
+            proxies resolve from ``registry`` at call time), so its lifespan is
+            just FastMCP's session manager; a build/mount failure logs and skips,
+            never blocking the per-backend mounts."""
+            ev = anyio.Event()
+            stops[composite.COMPOSITE_ROUTE] = ev
+            try:
+                async with AsyncExitStack() as stack:
+                    try:
+                        srv = composite.build_composite_server(cfg, registry, log)
+                        sub = srv.http_app(path="/mcp")
+                        await stack.enter_async_context(sub.lifespan(sub))
+                        app.router.routes.append(
+                            Mount(f"/{composite.COMPOSITE_ROUTE}", app=sub)
+                        )
+                        # Admin hot-toggles composites on this live server (#14).
+                        hooks["composite_server"] = srv
+                        log.info(
+                            "composites_mounted",
+                            path=f"/{composite.COMPOSITE_ROUTE}/mcp",
+                            composites=[c.name for c in cfg.composites if c.enabled],
+                        )
+                        ok = True
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning("composite_mount_failed", error=str(exc))
+                        ok = False
+                    task_status.started(ok)
+                    if ok:
+                        await ev.wait()
+            finally:
+                stops.pop(composite.COMPOSITE_ROUTE, None)
+                hooks.pop("composite_server", None)
+                app.router.routes[:] = [
+                    r
+                    for r in app.router.routes
+                    if getattr(r, "path", None) != f"/{composite.COMPOSITE_ROUTE}"
+                ]
+
         async def hot_recycle(name: str) -> None:
             """Tear a warm backend's runner down like hot_remove AND immediately
             re-run it — fresh AsyncExitStack, fresh client, re-mount (#161). This
@@ -853,6 +894,11 @@ def _build_app(  # noqa: PLR0913, PLR0915 — composition root; takes what it wi
                     tg.start_soon(
                         runner, b, cfg, all_tools, captured_meta, captured_instr
                     )
+            # #14: the shared composite endpoint. Mounted whenever composites
+            # are CONFIGURED (even all-disabled — the admin enable toggle then
+            # hot-applies without a restart); absent otherwise (404, zero cost).
+            if cfg.composites:
+                tg.start_soon(composite_runner)
 
             async def hot_add(b: config_loader.Backend) -> bool:
                 """Mount a just-imported backend live (#7). Config is already

@@ -4,6 +4,19 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project aims to
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Composite tools** — config-defined synthetic tools (`[[composites]]`) served
+  on a shared `/composite/mcp` endpoint: one call fans out to member tools
+  across one or many backends concurrently (per-member timeout), and returns a
+  labeled merge with honest per-member status — a failed member never sinks the
+  call. Members are called through the gateway's own per-backend proxies, so
+  every override applies. Member selection is a pluggable strategy (`"all"`
+  today) — the dispatch seam smart routing (#21) will build on. Admin API:
+  `GET /admin/api/composites` and a live enable/disable toggle. (#14)
+
 ## [1.0.0] - 2026-07-12
 
 The first feature-complete release. This wave (#150) turns the gateway from a

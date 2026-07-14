@@ -32,6 +32,7 @@ from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse
 from starlette.routing import Route
 
+from mcp_gateway import composite as composite_mod
 from mcp_gateway import config_loader as cl
 from mcp_gateway.config_loader import (
     Backend,
@@ -2117,6 +2118,84 @@ def _ops_routes(ctx: _AdminCtx) -> list[Route]:  # noqa: PLR0915 — nested hand
     ]
 
 
+def _composite_routes(ctx: _AdminCtx) -> list[Route]:
+    """#14: composite tools — list + enable/disable. Definitions themselves are
+    hand-authored in config.toml (docs/configuration.md); the admin surface is
+    read + toggle for now (UI can come later)."""
+
+    async def list_composites(_request: Request):
+        cfg = ctx.load()
+        return JSONResponse(
+            {
+                # The shared endpoint is mounted iff composites existed at boot;
+                # a hand-added first composite needs a restart to mount it.
+                "mounted": "composite_server" in ctx.hooks,
+                "composites": [
+                    {
+                        "name": c.name,
+                        "description": c.description,
+                        "enabled": c.enabled,
+                        "strategy": c.strategy,
+                        "always_load": c.always_load,
+                        "params": [p.name for p in c.params],
+                        "members": [
+                            {
+                                "backend": m.backend,
+                                "tool": m.tool,
+                                "label": composite_mod.member_label(m),
+                                "timeout": m.timeout,
+                            }
+                            for m in c.members
+                        ],
+                    }
+                    for c in cfg.composites
+                ],
+            }
+        )
+
+    async def enable_composite(request: Request):
+        name = request.path_params["name"]
+        payload = await request.json()
+        enabled = payload.get("enabled")
+        if not isinstance(enabled, bool):
+            return _err("enabled must be a boolean")
+        cfg = ctx.load()
+        comp = next((c for c in cfg.composites if c.name == name), None)
+        if comp is None:
+            return _err("unknown composite")
+        comp.enabled = enabled
+        ctx.commit(cfg)  # backup + atomic save; no backend hot_reload involved
+        # Hot-apply on the live composite server (ours, not a proxy — add/remove
+        # the tool in place, no remount). Connected sessions see the change after
+        # reconnect (/mcp), same as text edits.
+        srv = ctx.hooks.get("composite_server")
+        reloaded = "restart-needed"
+        if srv is not None:
+            if enabled:
+                srv.add_tool(
+                    composite_mod.build_composite_tool(comp, ctx.registry, ctx.log)
+                )
+            else:
+                try:
+                    srv.local_provider.remove_tool(name)
+                except Exception:  # noqa: BLE001 — already absent
+                    pass
+            reloaded = "hot"
+        ctx.log.info("composite_toggled", composite=name, enabled=enabled)
+        return JSONResponse(
+            {"ok": True, "composite": name, "enabled": enabled, "reloaded": reloaded}
+        )
+
+    return [
+        Route("/admin/api/composites", list_composites, methods=["GET"]),
+        Route(
+            "/admin/api/composite/{name}/enabled",
+            _needs_json(ctx.locked(enable_composite)),
+            methods=["POST"],
+        ),
+    ]
+
+
 def register(  # noqa: PLR0913 — public API; callers pass the lifespan plumbing
     app,
     config_path: str,
@@ -2147,6 +2226,7 @@ def register(  # noqa: PLR0913 — public API; callers pass the lifespan plumbin
             *_gateway_settings_routes(ctx),
             *_backend_routes(ctx),
             *_claude_routes(ctx),
+            *_composite_routes(ctx),
             *_ops_routes(ctx),
         ]
     )

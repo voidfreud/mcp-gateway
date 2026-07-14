@@ -92,3 +92,47 @@ stateless = true                   # parsed; shared-session reuse is a
 # args = ["serena-mcp"]
 # env = { SOME_KEY = "${SOME_ENV}" }
 # stateless = false
+
+# ── Composite tools (#14) ────────────────────────────────────────────────────
+# A composite is a synthetic tool the gateway itself serves at /composite/mcp:
+# one call fans out to every member tool CONCURRENTLY (each member bounded by
+# its own timeout) and returns a single labeled merge. A failed/timed-out
+# member reports itself inside the merge; only all-members-failed errors the
+# call. Members are called through the gateway's own per-backend endpoints, so
+# every override applies — `tool` is the EXPOSED (post-rename) tool name.
+# The backend name "composite" is reserved while composites are configured.
+#
+# [[composites]]
+# name = "web_search"                # the tool name Claude sees (letters/digits/_/-)
+# description = "Search the web across every provider at once."
+# enabled = true                     # false -> not broadcast (toggle via admin API)
+# always_load = true                 # pin the composite to load upfront (eager)
+# strategy = "all"                   # member selection; "all" = fan out to every
+#                                    # member (the seam smart routing will plug into)
+#
+#   # The composite's OWN parameter schema (authored, not captured):
+#   [[composites.params]]
+#   name = "query"
+#   type = "string"                  # string | integer | number | boolean
+#   description = "The search query."
+#   # required = true                # default; optional params may set `default`
+#
+#   [[composites.params]]
+#   name = "limit"
+#   type = "integer"
+#   required = false
+#   default = 5
+#
+#   # Members: backend + EXPOSED tool name + how composite params map on:
+#   [[composites.members]]
+#   backend = "Exa"
+#   tool = "search_web"
+#   label = "exa"                    # section label in the merged output
+#   timeout = 30.0                   # seconds; this member alone times out
+#   args = { query = "query" }      # member param = composite param
+#
+#   [[composites.members]]
+#   backend = "Tavily"
+#   tool = "search_web_filtered"
+#   args = { query = "query", max_results = "limit" }
+#   static_args = { search_depth = "basic" }   # fixed value injected every call

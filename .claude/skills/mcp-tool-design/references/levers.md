@@ -15,6 +15,9 @@ The gateway rewrites broadcast text and forwards calls untouched. Every lever, i
 | Injected param default (#35) | `ToolOverride.params[].default` (scalar: str/int/float/bool) — the gateway injects it on every call; setting one is the ONLY way to hide a *required* param (hide without a default is rejected for required params) | same `params[]` entry (`{original, hide, default}`) | hot-reload |
 | Backend on/off | `Backend.enabled` | `POST /admin/api/backend/{name}/enabled` `{value}` | mounts/unmounts live |
 | Reset a tool to captured defaults | — | `POST /admin/api/reset` `{backend, tool_original}` | hot-reload |
+| Composite tool (#14) — name, description, FULL param schema (names, types, descriptions, required/default), member set, per-member arg mapping + injected `static_args`, per-member timeout, pin | `[[composites]]` in config.toml (models: `Composite`/`CompositeParam`/`CompositeMember`) — served together at `/composite/mcp`; member `tool` is the EXPOSED (post-rename) name, so backend overrides apply under it | hand-edit config.toml + restart (`POST /admin/api/restart`); enable/disable only: `POST /admin/api/composite/{name}/enabled` `{enabled}` (hot) | restart (toggle is hot) |
+
+Composite text is fully AUTHORED surface, not a rewrite: there are no captured defaults behind a composite (nothing to diff against or reset to), so `surface.py`-style budget thinking applies but the reset/migrate machinery does not. `GET /admin/api/composites` lists them. Grade a composite's cold read like any tool, plus the merge behavior its description promises (labeled per-member sections; failed members reported inline).
 
 Deprecation heads-up: **param renaming (`params[].name`) is scheduled to stop being editable.** Don't build tuning on param renames — carry the fix in the param description instead. Tool broadcast names stay editable.
 
