@@ -53,6 +53,9 @@ stateless = true
 `[[backends]]` repeats once per backend; `[[backends.tools]]` repeats per tool
 you override; `[[backends.tools.params]]` repeats per parameter you override. You
 only add tool and param blocks for the tools and params you actually change.
+Backends that broadcast **resources** or **prompts** can have those rewritten
+too — `[[backends.resources]]` and `[[backends.prompts]]` blocks, same
+diff-vs-default model (see below).
 
 ## Gateway settings (top level)
 
@@ -86,6 +89,8 @@ only add tool and param blocks for the tools and params you actually change.
 | `enabled` | boolean | `true` | Whether the backend is broadcast at all. `false` disables every tool, drops its server instructions, and unmounts the endpoint. Toggles live in the admin UI without a restart. |
 | `instructions` | string or unset | unset | Overrides the backend's server-level instructions (the always-loaded blurb Claude reads at connect). Unset inherits the backend's captured original. Set it even when the backend sends none, to add your own. Capped at Claude Code's ~2KB budget. |
 | `tools` | list | empty | One `[[backends.tools]]` block per tool you override. |
+| `resources` | list | empty | One `[[backends.resources]]` block per resource or resource template you override. |
+| `prompts` | list | empty | One `[[backends.prompts]]` block per prompt you override. |
 
 ## Tool overrides (`[[backends.tools]]`)
 
@@ -113,6 +118,34 @@ Each block rewrites (or hides) one parameter of a tool.
 | `description` | string or unset | unset | What Claude reads about the parameter. |
 | `hide` | boolean | `false` | Remove the parameter from the schema Claude sees. A **required** parameter can only be hidden if you also set `default` (below); otherwise the save is rejected. |
 | `default` | string, number, or boolean, or unset | unset | A fixed value the gateway injects into every call to the backend. Scalars only. Setting it makes hiding a required parameter safe: Claude never sees the parameter, and the backend always receives this value. An optional parameter may take a `default` without being hidden. |
+
+## Resource overrides (`[[backends.resources]]`)
+
+Each block rewrites the display text of one resource **or resource template**.
+The `uri` is the identity Claude reads by — it is never rewritten.
+
+| Key | Type | Default | Meaning |
+|-----|------|---------|---------|
+| `uri` | string | required | The resource's URI (or a template's `uriTemplate`). The key that ties the override to the resource; never changed. |
+| `name` | string or unset | unset | The display name Claude sees. Free-form text (resources have no identifier charset). |
+| `title` | string or unset | unset | A human-readable display title. |
+| `description` | string or unset | unset | The description Claude reads. |
+| `enabled` | boolean | `true` | `false` drops the resource from the listing **and** blocks reads through the gateway. |
+
+## Prompt overrides (`[[backends.prompts]]`)
+
+Each block rewrites one of the backend's prompts. Renames are real: Claude sees
+the new name and a `prompts/get` for it is forwarded to the backend under its
+original name.
+
+| Key | Type | Default | Meaning |
+|-----|------|---------|---------|
+| `original` | string | required | The backend's own (real) name for the prompt. Never changed. |
+| `name` | string or unset | unset | The broadcast name Claude sees. Must be a valid identifier and unique within the backend's prompts. |
+| `title` | string or unset | unset | A human-readable display title. |
+| `description` | string or unset | unset | The description Claude reads. |
+| `enabled` | boolean | `true` | `false` drops the prompt from the listing and blocks `prompts/get`. |
+| `args` | list | empty | One `[[backends.prompts.args]]` block per argument whose **description** you override. Argument *names* are not renameable — the call forwards the arguments to the backend verbatim. Each block: `original` (the argument name) + `description`. |
 
 ## Secrets
 
