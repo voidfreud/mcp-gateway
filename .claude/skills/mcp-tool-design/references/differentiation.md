@@ -22,6 +22,8 @@ The hard half of tuning. Several enabled backends can serve adjacent intents (do
 
    `TURN0_SURFACE` is exactly `surface.py --turn0` (instructions + full callables, descriptions withheld); `INTENTS` is the step-2 cluster list with the expected route per intent. Report per-string defects; fix the string, rerun until clean.
 
+   **Harness caveat (learned 2026-07-14):** eval seats inherit the RUNNING session's real MCP context, and that system-level context beats the simulated surface in the prompt — a backend enabled mid-session reads to the seats as nonexistent ("no such tool is exposed") no matter what the pasted surface says, and seats may even cite the session's CLAUDE.md or teammates. Only intents whose servers were connected when the session STARTED produce valid verdicts. After enabling or renaming backends, run the cold-eval from a fresh session that picked up the new field — treat same-session scores for new arrivals as noise, not defects.
+
 ## Harmonization
 
 The field is a system: adding, removing, enabling, or disabling a backend changes every neighbour's boundary. On any field change, redo steps 1–2, then rewrite the boundaries of the affected cluster(s) — including removing a departed sibling from the texts that name it. A boundary clause referencing a disabled backend is noise at best, misdirection at worst.
