@@ -8,6 +8,18 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`./install.sh --uninstall`** (#171) — one-command removal, symmetric with
+  the install: boots out the LaunchAgent (tolerating not-loaded), removes the
+  installed plist and the `~/.local/opt/mcp-gateway` symlink, and prints what
+  was removed vs deliberately kept. User data is kept by default — config
+  (`./config.toml` / `~/.config/mcp-gateway/`) and state/logs/backups
+  (`~/.local/state/mcp-gateway/`); add `--purge` to delete the config and
+  state directories too, after an explicit confirmation. Claude Code
+  registrations are never touched (the script prints the
+  `claude mcp remove gateway-<name>` hint). Idempotent — with nothing
+  installed it says so and exits 0 — and `--dry-run` composes with both
+  flags, like the installer. Also available as `just uninstall`.
+
 - **Per-tool behavior hooks** (#16) — a tool override can name two
   user-authored Python hooks: `validate = "module:function"` and
   `post_process = "module:function"`, resolved in a dedicated hooks directory

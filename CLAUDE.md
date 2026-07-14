@@ -128,7 +128,8 @@ layout, console script `mcp-gateway`). MIT; distributed via
 - Accepted spec gaps (#92): completions capability not forwarded; tools/list
   served as one page. Framework-level, irrelevant to Claude Code.
 - Backlog: #162 (per-tool output-cap lever), #157 (age-gate boot refresh),
-  #170 (admin UI revamp), #171 (install.sh --uninstall), north-star #121.
+  #170 (admin UI revamp), north-star #121. Uninstall is `./install.sh
+  --uninstall` (#171; `--purge` adds config+state, `--dry-run` composes).
   The old parked set is resolved (2026-07-14): #10/#25 closed by audit/ADR-0004,
   #15 (resource+prompt rewriting), #16 (behavior hooks), #18 (guarded
   non-loopback bind) merged; #14/#21/#13 built as STACKED DRAFT PRs
