@@ -161,6 +161,24 @@ want Claude to select reliably. There is also a **pin all tools** checkbox in th
 backend header that pins every tool the backend exposes. Pinning takes effect
 for Claude on a fresh session.
 
+### Resource and prompt cards
+
+If a backend broadcasts MCP **resources** or **prompts**, they appear in their
+own sections below the tool cards (backends without any — most — show nothing).
+The editing model is identical to tools: fields prefill with effective values,
+edits save automatically, and only differences from the captured original are
+stored.
+
+- **Resources** (and resource templates) are keyed by their **URI**, which is
+  the identity Claude reads by and is never rewritten. You can edit the display
+  name (free-form text), title, and description, or switch the resource off —
+  which both drops it from the listing and blocks reads through the gateway.
+- **Prompts** can be **renamed** (same identifier rule as tools, unique within
+  the backend's prompts): Claude sees the new name and the gateway forwards a
+  `prompts/get` to the backend under the original. Title, description, and each
+  **argument's description** are editable too. Argument *names* are read-only —
+  a prompt call carries its arguments verbatim to the backend.
+
 ### Run tool (mini-inspector)
 
 Each tool card has a **Run tool** control. It executes the tool through the

@@ -617,7 +617,8 @@ function renderDetail(name) {
     </div>
     ${danglingBanner(b)}
     ${backendInstrSection(b)}
-    <div id="tools"></div>`;
+    <div id="tools"></div>
+    <div id="rp"></div>`;
   $('#b-bcast', m).addEventListener('change', e => enableBackend(b.name, e.target.checked));
   $('#b-pin', m).addEventListener('change', e => pinBackend(b.name, e.target.checked));
   // #161: warm toggle checked = warm session; stateless = !warm.
@@ -641,7 +642,29 @@ function renderDetail(name) {
     || t.params.some(p => p.name || p.description || p.hide || p.default != null)) ? 0 : 1;
   [...b.tools].sort((a, z) => grpOf(a) - grpOf(z) || ovrOf(a) - ovrOf(z))
     .forEach(t => tw.appendChild(toolCard(b, t)));
+  renderResourcesPrompts(b, $('#rp', m));  // #15 — empty when the backend has none
   wireGrow(m);
+}
+
+// #15 — resources + prompts sections (rendered only when the backend
+// broadcasts any; most backends have none, so nothing shows).
+function renderResourcesPrompts(b, root) {
+  root.innerHTML = '';
+  const res = b.resources || [], prm = b.prompts || [];
+  if (res.length) {
+    const h = document.createElement('div');
+    h.className = 'flabel'; h.style.marginTop = '18px';
+    h.textContent = `Resources (${res.length})`;
+    root.appendChild(h);
+    res.forEach(r => root.appendChild(resourceCard(b, r)));
+  }
+  if (prm.length) {
+    const h = document.createElement('div');
+    h.className = 'flabel'; h.style.marginTop = '18px';
+    h.textContent = `Prompts (${prm.length})`;
+    root.appendChild(h);
+    prm.forEach(p => root.appendChild(promptCard(b, p)));
+  }
 }
 
 // Per-backend server instructions card: prefilled with override else captured
@@ -1077,6 +1100,184 @@ function wireCard(backend, original, card) {
   });
 }
 
+// --- #15: resource + prompt override cards --------------------------------
+// Same editing model as tools: fields prefill with effective values, edits
+// debounce-save, only diffs vs captured defaults are stored server-side.
+
+const rpPending = {};  // key -> save closure, for the beforeunload flush
+
+function rpHeader(idLabel, idText, name, isOvr, enabled, enabledTitle, chip) {
+  return `<div class="tc-h" onclick="this.parentElement.classList.toggle('open'); this.querySelector('.chev').textContent = this.parentElement.classList.contains('open') ? '▾' : '›'">
+      <span class="orig" title="${idLabel}">${esc(idText)}</span>
+      ${chip ? '<span class="chip">' + chip + '</span>' : ''}
+      <span class="arrow">→</span>
+      <span class="newname">${esc(name)}</span>
+      ${isOvr ? '<span class="ov-badge">overridden</span>' : ''}
+      <span class="spacer"></span>
+      <input type="checkbox" class="tgl f-enabled" ${enabled ? 'checked' : ''}
+        onclick="event.stopPropagation()" title="${enabledTitle}">
+      <span class="chev">›</span>
+    </div>`;
+}
+
+// Debounce-save wiring shared by resource + prompt cards. `save` gathers the
+// card and PUTs; blur refills a cleared field with its default (like tools).
+function wireRpCard(card, key, save) {
+  const schedule = () => {
+    clearTimeout(timers[key]);
+    rpPending[key] = save;
+    card.classList.toggle('disabled', !$('.f-enabled', card).checked);
+    timers[key] = setTimeout(() => { delete rpPending[key]; save(); }, 550);
+  };
+  card.querySelectorAll('input, textarea').forEach(inp => {
+    if (inp.type === 'checkbox') { inp.addEventListener('change', schedule); return; }
+    inp.addEventListener('input', schedule);
+    inp.addEventListener('blur', () => {
+      if (inp.dataset.default !== undefined && inp.value.trim() === '' && inp.dataset.default !== '')
+        inp.value = inp.dataset.default;
+      if (timers[key] || rpPending[key]) {
+        clearTimeout(timers[key]); delete rpPending[key]; save();
+      }
+    });
+  });
+}
+
+function resourceCard(b, r) {
+  const card = document.createElement('div');
+  const isOvr = !!(r.name || r.title || r.description || !r.enabled);
+  card.className = 'tool' + (r.enabled ? '' : ' disabled') + (isOvr ? ' ovr' : '');
+  const name = r.name || r.default_name || '';
+  const title = r.title || r.default_title || '';
+  const desc = r.description || r.default_description || '';
+  const dot = k => r[k] ? ' <span class="ovd">·</span>' : '';
+  card.innerHTML = `
+    ${rpHeader('resource URI — the identity Claude reads by (not editable)', r.uri, name, isOvr, r.enabled, 'broadcast this resource', r.template ? 'template' : '')}
+    <div class="t-body">
+      <div class="row2">
+        <div><span class="flabel">Name${dot('name')}</span>
+          <input type="text" class="f-name${r.name ? ' ov' : ''}" value="${esc(name)}" data-default="${esc(r.default_name || '')}"></div>
+        <div><span class="flabel">Title${dot('title')}</span>
+          <input type="text" class="f-title${r.title ? ' ov' : ''}" value="${esc(title)}" data-default="${esc(r.default_title || '')}"></div>
+      </div>
+      <span class="flabel">Description${dot('description')}</span>
+      <textarea class="f-desc grow${r.description ? ' ov' : ''}" data-default="${esc(r.default_description || '')}">${esc(desc)}</textarea>
+      ${r.mime_type ? `<div class="si" style="margin-top:8px">mime type · ${esc(r.mime_type)}</div>` : ''}
+      <div style="margin-top:12px;display:flex;gap:8px;">
+        <button class="btn f-reset">Reset to default</button>
+      </div>
+    </div>`;
+  const save = () => saveResource(b.name, r.uri, card);
+  wireRpCard(card, 'res::' + b.name + '::' + r.uri, save);
+  $('.f-reset', card).addEventListener('click', () => resetResource(b.name, r.uri));
+  return card;
+}
+
+function promptCard(b, p) {
+  const card = document.createElement('div');
+  const isOvr = !!(p.name || p.title || p.description || !p.enabled
+    || (p.args || []).some(a => a.description));
+  card.className = 'tool' + (p.enabled ? '' : ' disabled') + (isOvr ? ' ovr' : '');
+  const name = p.name || p.default_name;
+  const title = p.title || p.default_title || '';
+  const desc = p.description || p.default_description || '';
+  const dot = k => p[k] ? ' <span class="ovd">·</span>' : '';
+  const argRows = (p.args || []).map(a => `
+    <div class="param-row" data-original="${esc(a.original)}">
+      <div class="p-top"><span class="p-nm" title="argument name (not editable — the call forwards it verbatim)">${esc(a.original)}</span>
+        ${a.required ? ' <span class="req-badge">required</span>' : ''}
+        ${a.description ? ' <span class="ovd" style="color:var(--ac)">·</span>' : ''}</div>
+      <div style="margin-top:7px;"><textarea class="p-desc grow${a.description ? ' ov' : ''}" data-default="${esc(a.default_description || '')}">${esc(a.description || a.default_description || '')}</textarea></div>
+    </div>`).join('');
+  card.innerHTML = `
+    ${rpHeader('real MCP prompt name (provider-facing, not editable)', p.original, name, isOvr, p.enabled, 'broadcast this prompt', '')}
+    <div class="t-body">
+      <div class="row2">
+        <div><span class="flabel">Broadcast name${dot('name')}</span>
+          <input type="text" class="f-name mono${p.name ? ' ov' : ''}" value="${esc(name)}" data-default="${esc(p.default_name)}"></div>
+        <div><span class="flabel">Title${dot('title')}</span>
+          <input type="text" class="f-title${p.title ? ' ov' : ''}" value="${esc(title)}" data-default="${esc(p.default_title || '')}"></div>
+      </div>
+      <span class="flabel">Description${dot('description')}</span>
+      <textarea class="f-desc grow${p.description ? ' ov' : ''}" data-default="${esc(p.default_description || '')}">${esc(desc)}</textarea>
+      <div class="params">
+        <span class="flabel" style="margin-top:0">Arguments</span>
+        ${argRows || '<div class="si">no arguments</div>'}
+      </div>
+      <div style="margin-top:12px;display:flex;gap:8px;">
+        <button class="btn f-reset">Reset to default</button>
+      </div>
+    </div>`;
+  const save = () => savePrompt(b.name, p.original, card);
+  wireRpCard(card, 'prm::' + b.name + '::' + p.original, save);
+  $('.f-reset', card).addEventListener('click', () => resetPrompt(b.name, p.original));
+  return card;
+}
+
+async function saveResource(backend, uri, card) {
+  const o = {
+    name: $('.f-name', card).value,
+    title: $('.f-title', card).value,
+    description: $('.f-desc', card).value,
+    enabled: $('.f-enabled', card).checked,
+  };
+  try {
+    await api('PUT', '/admin/api/resource-override', { backend, uri, override: o });
+    const b = STATE && STATE.backends.find(x => x.name === backend);
+    const r = b && (b.resources || []).find(x => x.uri === uri);
+    if (r) {
+      r.name = ovVal(o.name, r.default_name);
+      r.title = ovVal(o.title, r.default_title);
+      r.description = ovVal(o.description, r.default_description);
+      r.enabled = o.enabled;
+      $('.newname', card).textContent = r.name || r.default_name || '';
+    }
+    flashSaved();
+  } catch (e) { toast('save failed: ' + e.message); }
+}
+
+async function savePrompt(backend, original, card) {
+  if (!namesValid(card)) {  // #41: prompt broadcast names follow the tool rule
+    toast("invalid name: letters, digits, '_' or '-' only, max 64 chars");
+    return;
+  }
+  const o = {
+    name: $('.f-name', card).value,
+    title: $('.f-title', card).value,
+    description: $('.f-desc', card).value,
+    enabled: $('.f-enabled', card).checked,
+    args: [...card.querySelectorAll('.param-row')].map(pe => ({
+      original: pe.dataset.original,
+      description: $('.p-desc', pe).value,
+    })),
+  };
+  try {
+    await api('PUT', '/admin/api/prompt-override', { backend, prompt_original: original, override: o });
+    const b = STATE && STATE.backends.find(x => x.name === backend);
+    const p = b && (b.prompts || []).find(x => x.original === original);
+    if (p) {
+      p.name = ovVal(o.name, p.default_name);
+      p.title = ovVal(o.title, p.default_title);
+      p.description = ovVal(o.description, p.default_description);
+      p.enabled = o.enabled;
+      o.args.forEach(oa => {
+        const a = (p.args || []).find(x => x.original === oa.original);
+        if (a) a.description = ovVal(oa.description, a.default_description);
+      });
+      $('.newname', card).textContent = p.name || p.default_name;
+    }
+    flashSaved();
+  } catch (e) { toast('save failed: ' + e.message); }
+}
+
+async function resetResource(backend, uri) {
+  try { await api('POST', '/admin/api/resource-reset', { backend, uri }); await load(); toast('reset to default'); }
+  catch (e) { toast('reset failed: ' + e.message); }
+}
+async function resetPrompt(backend, original) {
+  try { await api('POST', '/admin/api/prompt-reset', { backend, prompt_original: original }); await load(); toast('reset to default'); }
+  catch (e) { toast('reset failed: ' + e.message); }
+}
+
 // #35: JSON-parseable defaults are sent typed (numbers, booleans); anything
 // else goes as a raw string; empty means "no injection". Non-scalar JSON
 // (arrays/objects) is sent as-parsed so the server rejects it with a clear 400.
@@ -1334,6 +1535,7 @@ function flushSave(backend, original, card) {
 window.addEventListener('beforeunload', () => {
   Object.values(pending).forEach(({ backend, original, card }) => doSave(backend, original, card, true));
   Object.values(instrPending).forEach(({ backend, ta }) => doSaveInstr(backend, ta, true));
+  Object.values(rpPending).forEach(save => save());  // #15 resource/prompt edits
 });
 
 // --- instructions save (per-backend: backend = name) ---------------------
