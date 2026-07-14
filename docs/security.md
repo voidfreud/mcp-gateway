@@ -121,6 +121,36 @@ by disabling it (`enabled = false` on the tool, or the toggle in the admin UI).
 A disabled tool is not broadcast to Claude and cannot be called through the
 gateway.
 
+## Behavior hooks run your code
+
+Per-tool [behavior hooks](configuration.md#behavior-hooks-validate--post_process)
+(`validate` / `post_process` on a tool override) are **arbitrary code execution
+inside the daemon, by design**. A hook is a Python function the gateway imports
+from the hooks directory (`MCP_GATEWAY_HOOKS` > `./hooks/` > `~/.config/mcp-gateway/hooks/`)
+and runs on every call to that tool, with the daemon's full privileges — your
+user account, the daemon's environment, its network access. Treat the hooks
+directory with exactly the same care as a stdio backend `command` in
+`config.toml`: both are local-admin-owned code the gateway will execute.
+
+What the gateway does and does not guarantee:
+
+- **Config strings are never evaluated as code.** A hook spec is a
+  `module:function` reference; the module part must be a bare identifier, so it
+  always resolves to a `.py` file *inside* the hooks directory (no path
+  traversal), and it is imported with `importlib`, never `eval`'d.
+- **Whoever can write the hooks dir (or `config.toml`) owns the daemon.** That
+  was already true — config can set a stdio backend `command` — so hooks add
+  no *new* trust boundary, but they make the existing one worth restating.
+  Keep both writable only by your user.
+- **Load failures fail closed, per tool.** A hook that cannot be loaded never
+  silently disappears (that would drop a guard you deliberately configured):
+  the tool's calls error with the load failure until the file is fixed, while
+  the backend's other tools and the mount stay up. Watch `hook_load_error` in
+  the log and `hook_error` in `/admin/api/state`.
+- **Hooks are not a sandbox.** A `validate` hook can reject calls, but it runs
+  in-process; a malicious or buggy hook can do anything the daemon can. Review
+  hook code like you would review a shell script you install on PATH.
+
 ## Session isolation between callers
 
 Warm backends (`stateless = false`) share one persistent backend session across

@@ -38,8 +38,8 @@ of this — but it is here when you want it.
 | Method | Path | Body | Response |
 |--------|------|------|----------|
 | GET | `/admin` | — | The admin UI page (HTML). |
-| GET | `/admin/api/state` | — | Full UI state: every backend, its captured default tools/params, and your overrides. |
-| GET | `/admin/api/export` | — (query `?full=true` adds captured defaults) | The complete stored settings bundle as JSON — every override, instruction, pin, and display name. |
+| GET | `/admin/api/state` | — | Full UI state: every backend, its captured default tools/params, and your overrides. Each tool also carries its behavior-hook specs read-only — `validate`, `post_process` (`module:function` or `null`) and `hook_error` (`null` when absent/loading fine, else the current load failure). Hooks are hand-authored in `config.toml`, not writable via the API; `PUT /admin/api/override` preserves them. |
+| GET | `/admin/api/export` | — (query `?full=true` adds captured defaults) | The complete stored settings bundle as JSON — every override, instruction, pin, and display name. Behavior hooks are excluded (machine-local code references); merge-mode imports preserve stored hooks, replace-mode imports clear them with the rest of the backend's overrides. |
 
 ## Settings (text overrides)
 

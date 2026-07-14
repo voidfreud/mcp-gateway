@@ -105,7 +105,71 @@ backend's original.
 | `description` | string or unset | unset | The description Claude reads to decide when and how to call the tool. |
 | `enabled` | boolean | `true` | `false` drops the tool from the listing entirely. |
 | `always_load` | boolean | `false` | Pin this one tool to load upfront (eager). |
+| `validate` | string or unset | unset | A behavior hook, `module:function` (see [Behavior hooks](#behavior-hooks-validate--post_process)). Runs before every call; raise `ValueError("why")` to reject it. |
+| `post_process` | string or unset | unset | A behavior hook, `module:function`. Runs on every result before the caller sees it. |
 | `params` | list | empty | One `[[backends.tools.params]]` block per parameter you override. |
+
+## Behavior hooks (`validate` / `post_process`)
+
+Hooks are small, hand-authored Python functions that run inside the gateway
+around a tool call — input validation before the backend sees the call, and
+result post-processing (truncate, strip noise, reformat) before the caller
+sees the answer. They are the escape hatch for the cases text rewriting can't
+reach, without forking the backend.
+
+> **This is arbitrary code execution in the daemon, by design.** Hooks run
+> with the gateway's full privileges — the same trust level as a stdio
+> backend `command`. Read the [security guide](security.md#behavior-hooks-run-your-code)
+> before using them.
+
+**Where hooks live.** A dedicated hooks directory, resolved in this order
+(mirroring the config precedence): the `MCP_GATEWAY_HOOKS` env var, a
+repo-local `./hooks/` directory (dev checkout), else
+`~/.config/mcp-gateway/hooks/`. A hook spec `myhooks:check_query` means "the
+function `check_query` in `<hooks_dir>/myhooks.py`". The module part must be a
+bare identifier — no paths, so a spec can never reach outside the hooks dir —
+and the string is imported, never evaluated.
+
+**The contract** (sync or async, both supported):
+
+```python
+# ~/.config/mcp-gateway/hooks/myhooks.py
+
+def check_query(args: dict) -> None:
+    """validate: runs BEFORE the call is forwarded. Raise ValueError to
+    reject; the message is returned to the caller as the tool error."""
+    if len(args.get("query", "")) > 500:
+        raise ValueError("query too long (max 500 chars)")
+
+def trim_output(result):
+    """post_process: runs AFTER the backend answered. `result` is a FastMCP
+    ToolResult; return it (mutated or copied), or any plain value."""
+    for block in result.content:
+        if getattr(block, "text", None):
+            block.text = block.text[:4000]
+    return result
+```
+
+**Argument names.** `validate` receives the **exposed** arguments — the names
+after your renames, with hidden parameters absent — i.e. exactly what the
+caller sent (plus schema defaults). That way a rejection message can reference
+the same names the caller used. The gateway still reverse-maps renames and
+injects hidden defaults before the backend sees the call.
+
+**Error handling.** A hook that fails to *load* (missing file or function,
+import error, malformed spec) never takes the backend's mount down and never
+fails open: the tool stays broadcast, but every call to it returns a clear
+error naming the load failure until the hook is fixed. The structured log gets
+a `hook_load_error` line and the admin state shows the same error per tool
+(`hook_error`). A malformed spec *string* is rejected at config load. Hook
+files are re-checked on every transform rebuild (mtime-cached), so fixing the
+file heals the tool without a restart.
+
+Hooks are hand-authored in `config.toml` — the admin UI displays them
+read-only and preserves them across saves. They are **not** part of the
+settings export/import bundle (a hook spec references code on *this*
+machine); note that a replace-mode import or a per-tool reset clears the
+whole override entry, hooks included.
 
 ## Parameter overrides (`[[backends.tools.params]]`)
 
