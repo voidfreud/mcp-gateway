@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Literal
 
 import tomli_w
-from fastmcp.server.transforms import ToolTransform
+from fastmcp.server.transforms import ToolTransform, Transform
 from fastmcp.tools.tool_transform import ArgTransformConfig, ToolTransformConfig
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -145,6 +145,50 @@ class ToolOverride(BaseModel, extra="forbid"):
     params: list[ParamOverride] = Field(default_factory=list)
 
 
+class ResourceOverride(BaseModel, extra="forbid"):
+    """Rewrite (or hide) one backend resource OR resource template (#15).
+
+    Keyed by ``uri`` — the resource's URI (or a template's ``uriTemplate``),
+    its wire IDENTITY. The URI is never rewritten (clients read by it); only
+    the display text is editable. ``enabled=False`` hides the entry from the
+    listing AND blocks reads through the gateway.
+    """
+
+    uri: str
+    name: str | None = None
+    title: str | None = None
+    description: str | None = None
+    enabled: bool = True
+
+
+class PromptArgOverride(BaseModel, extra="forbid"):
+    """Rewrite one prompt argument's description.
+
+    Argument NAMES are deliberately not renameable: ``prompts/get`` carries an
+    arguments dict the proxy forwards to the backend verbatim, so a renamed
+    argument would never reach it.
+    """
+
+    original: str
+    description: str | None = None
+
+
+class PromptOverride(BaseModel, extra="forbid"):
+    """Rewrite (or hide) one backend prompt and its argument descriptions (#15).
+
+    Renames are real: the broadcast name changes and ``prompts/get`` for the
+    new name reverse-maps to the backend's original (FastMCP's ``ProxyPrompt``
+    preserves the backend name across a ``model_copy`` rename).
+    """
+
+    original: str
+    name: str | None = None
+    title: str | None = None
+    description: str | None = None
+    enabled: bool = True
+    args: list[PromptArgOverride] = Field(default_factory=list)
+
+
 class Backend(BaseModel, extra="forbid"):
     """One backend MCP server and its per-tool text overrides."""
 
@@ -200,6 +244,10 @@ class Backend(BaseModel, extra="forbid"):
     # instructions. Set even when the backend sends none, to add your own.
     instructions: str | None = None
     tools: list[ToolOverride] = Field(default_factory=list)
+    # #15: broadcast-text overrides for resources/templates (keyed by uri) and
+    # prompts (keyed by original name) — the same diff-vs-default model as tools.
+    resources: list[ResourceOverride] = Field(default_factory=list)
+    prompts: list[PromptOverride] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _check_transport(self) -> Backend:
@@ -473,6 +521,186 @@ def build_transforms(  # noqa: PLR0912 — one branch per override field; splitt
     return ToolTransform(transforms), index
 
 
+class ResourcePromptTransform(Transform):
+    """Rewrites resource / resource-template / prompt broadcast text for ONE
+    backend's endpoint (#15).
+
+    FastMCP 3.4.4 has no config-driven analog of ``ToolTransform`` for
+    resources and prompts, but its ``Transform`` base class exposes the same
+    list/get hooks — so the gateway supplies its own:
+
+    - **resources + templates** (keyed by ``uri`` / ``uriTemplate``): name,
+      title, description rewrites; ``enabled=False`` hides the entry from the
+      listing and blocks reads through the gateway. URIs are never rewritten
+      (they are the identity clients read by).
+    - **prompts** (keyed by original name): name/title/description and
+      per-argument description rewrites; renames reverse-map on ``prompts/get``
+      (``ProxyPrompt.model_copy`` preserves ``_backend_name``, so the render
+      still reaches the backend under its real name). ``enabled=False`` hides
+      and blocks.
+
+    Duplicate prompt TARGET names raise ``ValueError`` at build time, exactly
+    like FastMCP's ``ToolTransform`` — the admin dry-build turns that into a
+    400 instead of a persisted config that fails every mount.
+    """
+
+    # Resource URIs pass through pydantic's AnyUrl, which normalizes some forms
+    # (e.g. ``file://a.txt`` -> ``file://a.txt/``). Key overrides on a
+    # trailing-slash-insensitive form so a hand-written config URI still matches
+    # the live object.
+    @staticmethod
+    def _norm_uri(uri) -> str:
+        return str(uri).rstrip("/")
+
+    def __init__(self, backend: Backend) -> None:
+        self._backend_enabled = backend.enabled
+        self._resources: dict[str, ResourceOverride] = {
+            self._norm_uri(r.uri): r for r in backend.resources
+        }
+        self._prompts: dict[str, PromptOverride] = {
+            p.original: p for p in backend.prompts
+        }
+        # broadcast prompt name -> original, for prompts/get reverse-mapping
+        self._prompt_reverse: dict[str, str] = {}
+        for original, ov in self._prompts.items():
+            target = ov.name or original
+            if target in self._prompt_reverse:
+                raise ValueError(
+                    f"prompt overrides have duplicate target name {target!r}: "
+                    f"both {self._prompt_reverse[target]!r} and {original!r} "
+                    f"map to it"
+                )
+            self._prompt_reverse[target] = original
+
+    def __repr__(self) -> str:
+        return (
+            f"ResourcePromptTransform(resources={list(self._resources)!r}, "
+            f"prompts={list(self._prompts)!r})"
+        )
+
+    @staticmethod
+    def _text_update(ov) -> dict:
+        update: dict = {}
+        if ov.name is not None:
+            update["name"] = ov.name
+        if ov.title is not None:
+            update["title"] = ov.title
+        if ov.description is not None:
+            update["description"] = ov.description
+        return update
+
+    def _apply_resource(self, resource, ov: ResourceOverride):
+        update = self._text_update(ov)
+        return resource.model_copy(update=update) if update else resource
+
+    def _apply_prompt(self, prompt, ov: PromptOverride):
+        # ONE model_copy so ProxyPrompt's rename bookkeeping (_backend_name)
+        # sees the name change on the first (only) copy.
+        update = self._text_update(ov)
+        arg_desc = {a.original: a.description for a in ov.args if a.description}
+        if arg_desc and prompt.arguments:
+            update["arguments"] = [
+                a.model_copy(update={"description": arg_desc[a.name]})
+                if a.name in arg_desc
+                else a
+                for a in prompt.arguments
+            ]
+        return prompt.model_copy(update=update) if update else prompt
+
+    # --- resources ---------------------------------------------------------
+
+    async def list_resources(self, resources):
+        if not self._backend_enabled:
+            return []
+        out = []
+        for r in resources:
+            ov = self._resources.get(self._norm_uri(r.uri))
+            if ov is None:
+                out.append(r)
+            elif ov.enabled:
+                out.append(self._apply_resource(r, ov))
+        return out
+
+    async def get_resource(self, uri, call_next, *, version=None):
+        # URIs are never rewritten, so the lookup key passes through unchanged.
+        resource = await call_next(uri, version=version)
+        if resource is None:
+            return None
+        ov = self._resources.get(self._norm_uri(resource.uri))
+        if ov is None:
+            return resource
+        if not self._backend_enabled or not ov.enabled:
+            return None  # hidden -> not just unlisted, unreadable too
+        return self._apply_resource(resource, ov)
+
+    # --- resource templates (same override list, keyed by uriTemplate) ------
+
+    async def list_resource_templates(self, templates):
+        if not self._backend_enabled:
+            return []
+        out = []
+        for t in templates:
+            ov = self._resources.get(self._norm_uri(t.uri_template))
+            if ov is None:
+                out.append(t)
+            elif ov.enabled:
+                out.append(self._apply_resource(t, ov))
+        return out
+
+    async def get_resource_template(self, uri, call_next, *, version=None):
+        template = await call_next(uri, version=version)
+        if template is None:
+            return None
+        ov = self._resources.get(self._norm_uri(template.uri_template))
+        if ov is None:
+            return template
+        if not self._backend_enabled or not ov.enabled:
+            return None
+        return self._apply_resource(template, ov)
+
+    # --- prompts -------------------------------------------------------------
+
+    async def list_prompts(self, prompts):
+        if not self._backend_enabled:
+            return []
+        out = []
+        for p in prompts:
+            ov = self._prompts.get(p.name)
+            if ov is None:
+                out.append(p)
+            elif ov.enabled:
+                out.append(self._apply_prompt(p, ov))
+        return out
+
+    async def get_prompt(self, name, call_next, *, version=None):
+        original = self._prompt_reverse.get(name, name)
+        prompt = await call_next(original, version=version)
+        if prompt is None:
+            return None
+        ov = self._prompts.get(original)
+        if ov is None:
+            return prompt if prompt.name == name else None
+        if not self._backend_enabled or not ov.enabled:
+            return None
+        transformed = self._apply_prompt(prompt, ov)
+        # a renamed prompt only answers to its broadcast name (mirrors
+        # ToolTransform: the original name of a renamed tool is a miss)
+        return transformed if transformed.name == name else None
+
+
+def build_resource_prompt_transform(
+    backend: Backend,
+) -> ResourcePromptTransform | None:
+    """The resource/prompt rewrite layer for ONE backend (#15), or ``None``
+    when there is nothing to rewrite (passthrough costs nothing). A DISABLED
+    backend always gets one — it hides every resource/prompt, mirroring how
+    #38 forces every tool off (defense in depth; a disabled backend is
+    normally unmounted anyway)."""
+    if backend.enabled and not backend.resources and not backend.prompts:
+        return None
+    return ResourcePromptTransform(backend)
+
+
 def backend_instructions(
     backend: Backend, captured: dict[str, str | None]
 ) -> str | None:
@@ -535,6 +763,12 @@ def to_raw(cfg: GatewayConfig) -> dict:  # noqa: PLR0915 — field-by-field TOML
         tools = [_tool(t) for t in b.tools]
         if tools:
             d["tools"] = tools
+        resources = [_resource(r) for r in b.resources]
+        if resources:
+            d["resources"] = resources
+        prompts = [_prompt(p) for p in b.prompts]
+        if prompts:
+            d["prompts"] = prompts
         return d
 
     def _tool(t: ToolOverride) -> dict:
@@ -551,6 +785,35 @@ def to_raw(cfg: GatewayConfig) -> dict:  # noqa: PLR0915 — field-by-field TOML
         params = [_param(p) for p in t.params]
         if params:
             d["params"] = params
+        return d
+
+    def _resource(r: ResourceOverride) -> dict:
+        d: dict = {"uri": r.uri}
+        if r.name is not None:
+            d["name"] = r.name
+        if r.title is not None:
+            d["title"] = r.title
+        if r.description is not None:
+            d["description"] = r.description
+        d["enabled"] = r.enabled
+        return d
+
+    def _prompt(p: PromptOverride) -> dict:
+        d: dict = {"original": p.original}
+        if p.name is not None:
+            d["name"] = p.name
+        if p.title is not None:
+            d["title"] = p.title
+        if p.description is not None:
+            d["description"] = p.description
+        d["enabled"] = p.enabled
+        args = [
+            {"original": a.original, "description": a.description}
+            for a in p.args
+            if a.description is not None
+        ]
+        if args:
+            d["args"] = args
         return d
 
     def _param(p: ParamOverride) -> dict:

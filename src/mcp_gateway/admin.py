@@ -37,6 +37,9 @@ from mcp_gateway.config_loader import (
     Backend,
     GatewayConfig,
     ParamOverride,
+    PromptArgOverride,
+    PromptOverride,
+    ResourceOverride,
     ToolOverride,
 )
 
@@ -133,6 +136,22 @@ async def capture_defaults(b: Backend) -> dict:
     async with asyncio.timeout(CAPTURE_TIMEOUT):
         async with Client(_client_config(b)) as c:
             tools = await c.list_tools()
+            # #15: resources/templates/prompts too. Most backends broadcast
+            # none — and one without the capability errors the request — so
+            # each list degrades to empty rather than failing the capture.
+            resources, templates, prompts = [], [], []
+            try:
+                resources = await c.list_resources()
+            except Exception:  # noqa: BLE001, S110 — capability absent / unsupported
+                pass
+            try:
+                templates = await c.list_resource_templates()
+            except Exception:  # noqa: BLE001, S110
+                pass
+            try:
+                prompts = await c.list_prompts()
+            except Exception:  # noqa: BLE001, S110
+                pass
             init = c.initialize_result  # populated after the context entered
     out_tools = []
     for t in tools:
@@ -170,6 +189,44 @@ async def capture_defaults(b: Backend) -> dict:
         if annotations:
             tool["annotations"] = annotations
         out_tools.append(tool)
+    # #15: resources + templates share one shape ("uri" holds the uriTemplate
+    # for a template) so overrides key on one field; prompts mirror tools.
+    out_resources = [
+        {
+            "uri": str(r.uri),
+            "name": r.name,
+            "title": getattr(r, "title", None),
+            "description": r.description,
+            "mime_type": getattr(r, "mimeType", None),
+        }
+        for r in resources
+    ]
+    out_templates = [
+        {
+            "uri": t.uriTemplate,
+            "name": t.name,
+            "title": getattr(t, "title", None),
+            "description": t.description,
+            "mime_type": getattr(t, "mimeType", None),
+        }
+        for t in templates
+    ]
+    out_prompts = [
+        {
+            "original": p.name,
+            "title": getattr(p, "title", None),
+            "description": p.description,
+            "args": [
+                {
+                    "original": a.name,
+                    "description": a.description,
+                    "required": bool(getattr(a, "required", False)),
+                }
+                for a in (p.arguments or [])
+            ],
+        }
+        for p in prompts
+    ]
     server_info = None
     capabilities = None
     instructions = None
@@ -190,6 +247,11 @@ async def capture_defaults(b: Backend) -> dict:
         "server_info": server_info,
         "capabilities": capabilities,
         "tools": out_tools,
+        # `resources` also marks the file as carrying the #15 capture — a file
+        # without the key is stale and re-captured once (see ensure_defaults).
+        "resources": out_resources,
+        "resource_templates": out_templates,
+        "prompts": out_prompts,
     }
 
 
@@ -256,7 +318,12 @@ async def ensure_defaults(cfg: GatewayConfig, log, force: str | None = None) -> 
         if force:
             return b.name == force
         existing = load_defaults(b.name)
-        return existing is None or "instructions" not in existing
+        # pre-instructions and pre-#15 (no resources key) files are both stale
+        return (
+            existing is None
+            or "instructions" not in existing
+            or "resources" not in existing
+        )
 
     targets = [b for b in cfg.backends if needs(b)]
     if targets:
@@ -295,8 +362,21 @@ async def refresh_defaults(
     new_names = {t["original"] for t in data.get("tools", [])}
     added = sorted(new_names - old_names)
     removed = sorted(old_names - new_names)
+
+    def _rp_sections(d: dict) -> tuple:
+        # #15: resource/template/prompt captures count toward "changed" so a
+        # backend that only edits those still hot-reloads its transforms.
+        return (
+            d.get("resources") or [],
+            d.get("resource_templates") or [],
+            d.get("prompts") or [],
+        )
+
     changed = bool(
-        added or removed or (old or {}).get("instructions") != data.get("instructions")
+        added
+        or removed
+        or (old or {}).get("instructions") != data.get("instructions")
+        or _rp_sections(old or {}) != _rp_sections(data)
     )
     if changed:
         log.info(
@@ -495,6 +575,53 @@ def uniquify_name(base: str, taken: set[str]) -> str:
         n += 1
 
 
+def _resource_state(b: Backend, dr: dict, template: bool) -> dict:
+    """One resource/template row for the UI: captured defaults + override (#15)."""
+    ov = next((r for r in b.resources if r.uri == dr["uri"]), None)
+    return {
+        "uri": dr["uri"],
+        "template": template,
+        "default_name": dr.get("name"),
+        "default_title": dr.get("title"),
+        "default_description": dr.get("description"),
+        "mime_type": dr.get("mime_type"),
+        "name": ov.name if ov else None,
+        "title": ov.title if ov else None,
+        "description": ov.description if ov else None,
+        "enabled": ov.enabled if ov else True,
+    }
+
+
+def _prompt_state(b: Backend, dp: dict) -> dict:
+    """One prompt row for the UI: captured defaults + override (#15)."""
+    ov = next((p for p in b.prompts if p.original == dp["original"]), None)
+    ov_args = {a.original: a for a in (ov.args if ov else [])}
+    args = [
+        {
+            "original": da["original"],
+            "default_description": da.get("description"),
+            "required": da.get("required", False),
+            "description": (
+                ov_args[da["original"]].description
+                if da["original"] in ov_args
+                else None
+            ),
+        }
+        for da in dp.get("args", [])
+    ]
+    return {
+        "original": dp["original"],
+        "default_name": dp["original"],
+        "default_title": dp.get("title"),
+        "default_description": dp.get("description"),
+        "name": ov.name if ov else None,
+        "title": ov.title if ov else None,
+        "description": ov.description if ov else None,
+        "enabled": ov.enabled if ov else True,
+        "args": args,
+    }
+
+
 def build_state(cfg: GatewayConfig) -> dict:
     backends = []
     for b in cfg.backends:
@@ -570,6 +697,20 @@ def build_state(cfg: GatewayConfig) -> dict:
                 # these for one-click migrate/discard.
                 "dangling": dangling_overrides(cfg, b.name),
                 "tools": tools_state,
+                # #15: resources (templates flagged) + prompts, defaults merged
+                # with overrides — empty lists when the backend broadcasts none
+                # (or the defaults file predates the capture).
+                "resources": [
+                    _resource_state(b, dr, False)
+                    for dr in (defaults or {}).get("resources", [])
+                ]
+                + [
+                    _resource_state(b, dr, True)
+                    for dr in (defaults or {}).get("resource_templates", [])
+                ],
+                "prompts": [
+                    _prompt_state(b, dp) for dp in (defaults or {}).get("prompts", [])
+                ],
             }
         )
     return {
@@ -815,15 +956,162 @@ def _reject_transform_landmines(cfg: GatewayConfig, b: Backend) -> None:
     check deliberately allows (a DISABLED entry, a dangling override for a tool
     the backend renamed away). Without this, the save persists, the very next
     hot-reload/mount raises, and the backend fails to mount on every boot — a
-    config landmine (found live migrating the openrouter drift)."""
+    config landmine (found live migrating the openrouter drift). #15: the
+    resource/prompt transform dry-builds too (duplicate prompt target names
+    raise the same way)."""
     try:
         cl.build_transforms(cfg, b)
+        cl.build_resource_prompt_transform(b)
     except ValueError as exc:
         raise cl.ConfigError(
-            f"override rejected — it would break the tool transforms: {exc}. "
+            f"override rejected — it would break the transforms: {exc}. "
             f"If the clashing entry is a stale override for a tool the backend "
             f"no longer exposes, reset that tool first."
         ) from None
+
+
+def apply_resource_override(cfg: GatewayConfig, backend: str, payload: dict) -> None:
+    """Upsert one resource/template override from a UI payload (#15), diffing
+    against the captured defaults — the same semantics as tools: prefilled
+    fields store only real diffs, a key ABSENT from the payload preserves the
+    stored value (#139), and a no-diff result removes the entry entirely.
+
+    Keyed by ``uri`` (a resource's URI or a template's uriTemplate — the
+    identity, never rewritten). Names are free-form display text (MCP puts no
+    identifier charset on them), so unlike tools/prompts there is no name-rule
+    or collision validation.
+    """
+    b = next((x for x in cfg.backends if x.name == backend), None)
+    if b is None:
+        raise cl.ConfigError(f"unknown backend {backend!r}")
+    uri = payload["uri"]
+    ov = payload.get("override", {})
+    prev = next((r for r in b.resources if r.uri == uri), None)
+
+    defaults = load_defaults(backend) or {}
+    dres = next(
+        (
+            r
+            for r in defaults.get("resources", [])
+            + defaults.get("resource_templates", [])
+            if r["uri"] == uri
+        ),
+        {},
+    )
+
+    def _field(key, computed, kept):
+        return computed() if key in ov else kept
+
+    name = _field(
+        "name",
+        lambda: _override_vs_default(ov.get("name"), dres.get("name")),
+        prev.name if prev else None,
+    )
+    title = _field(
+        "title",
+        lambda: _override_vs_default(ov.get("title"), dres.get("title")),
+        prev.title if prev else None,
+    )
+    description = _field(
+        "description",
+        lambda: _override_vs_default(ov.get("description"), dres.get("description")),
+        prev.description if prev else None,
+    )
+    enabled = _field(
+        "enabled", lambda: bool(ov["enabled"]), prev.enabled if prev else True
+    )
+    new = ResourceOverride(
+        uri=uri, name=name, title=title, description=description, enabled=enabled
+    )
+    b.resources = [r for r in b.resources if r.uri != uri]
+    if name or title or description or not enabled:
+        b.resources.append(new)
+
+
+def apply_prompt_override(cfg: GatewayConfig, backend: str, payload: dict) -> None:
+    """Upsert one prompt's override from a UI payload (#15) — the tool model
+    applied to prompts: diff-vs-default storage, #139 merge semantics for
+    absent keys, identifier + collision validation on renames, and a
+    transform dry-build so a save can never persist a config that fails the
+    next mount. Argument descriptions are rewritable; argument NAMES are not
+    (the args dict is forwarded to the backend verbatim)."""
+    b = next((x for x in cfg.backends if x.name == backend), None)
+    if b is None:
+        raise cl.ConfigError(f"unknown backend {backend!r}")
+    original = payload["prompt_original"]
+    ov = payload.get("override", {})
+    prev = next((p for p in b.prompts if p.original == original), None)
+
+    defaults = load_defaults(backend) or {}
+    dprompt = next(
+        (p for p in defaults.get("prompts", []) if p["original"] == original), {}
+    )
+    dargs = {a["original"]: a for a in dprompt.get("args", [])}
+
+    def _field(key, computed, kept):
+        return computed() if key in ov else kept
+
+    name = _field(
+        "name",
+        lambda: _override_vs_default(ov.get("name"), original),
+        prev.name if prev else None,
+    )
+    title = _field(
+        "title",
+        lambda: _override_vs_default(ov.get("title"), dprompt.get("title")),
+        prev.title if prev else None,
+    )
+    description = _field(
+        "description",
+        lambda: _override_vs_default(ov.get("description"), dprompt.get("description")),
+        prev.description if prev else None,
+    )
+    _validate_name(name, "prompt name")
+
+    args = []
+    for a in ov.get("args", []):
+        ao = a["original"]
+        adesc = _override_vs_default(
+            a.get("description"), dargs.get(ao, {}).get("description")
+        )
+        if adesc:
+            args.append(PromptArgOverride(original=ao, description=adesc))
+    if "args" not in ov and prev is not None:
+        args = prev.args
+    enabled = _field(
+        "enabled", lambda: bool(ov["enabled"]), prev.enabled if prev else True
+    )
+    new = PromptOverride(
+        original=original,
+        name=name,
+        title=title,
+        description=description,
+        enabled=enabled,
+        args=args,
+    )
+    # Broadcast-level collision check: an enabled prompt's effective name must
+    # be unique within the backend (Claude can't tell two apart otherwise).
+    if new.enabled:
+        eff_name = new.name or original
+        for dp in defaults.get("prompts", []):
+            other = dp["original"]
+            if other == original:
+                continue
+            other_ov = next((p for p in b.prompts if p.original == other), None)
+            if other_ov is not None and not other_ov.enabled:
+                continue
+            other_name = other_ov.name if (other_ov and other_ov.name) else other
+            if other_name == eff_name:
+                raise cl.ConfigError(
+                    f"broadcast name {eff_name!r} is already used by prompt "
+                    f"{other!r} in backend {backend!r} — names must be unique; "
+                    f"pick a different one"
+                )
+    has_override = bool(new.name or title or description or not enabled or args)
+    b.prompts = [p for p in b.prompts if p.original != original]
+    if has_override:
+        b.prompts.append(new)
+    _reject_transform_landmines(cfg, b)
 
 
 def migrate_override(cfg: GatewayConfig, backend: str, frm: str, to: str) -> dict:
@@ -949,6 +1237,36 @@ def export_settings(  # noqa: PLR0912 — one branch per serialized override fie
                 tools[t.original] = td
         if tools:
             entry["tools"] = tools
+        # #15: resource + prompt overrides round-trip too.
+        resources: dict = {}
+        for r in b.resources:
+            rd: dict = {}
+            for key in ("name", "title", "description"):
+                if getattr(r, key):
+                    rd[key] = getattr(r, key)
+            if not r.enabled:
+                rd["enabled"] = False
+            if rd:
+                resources[r.uri] = rd
+        if resources:
+            entry["resources"] = resources
+        prompts: dict = {}
+        for p in b.prompts:
+            pd: dict = {}
+            for key in ("name", "title", "description"):
+                if getattr(p, key):
+                    pd[key] = getattr(p, key)
+            if not p.enabled:
+                pd["enabled"] = False
+            if p.args:
+                pd["args"] = [
+                    {"original": a.original, "description": a.description}
+                    for a in p.args
+                ]
+            if pd:
+                prompts[p.original] = pd
+        if prompts:
+            entry["prompts"] = prompts
         if entry or full:
             backends[b.name] = entry
         if full:
@@ -989,6 +1307,8 @@ def import_settings(  # noqa: PLR0912 — one validation branch per bundle field
         affected.append(name)
         if mode == "replace":
             b.tools = []
+            b.resources = []
+            b.prompts = []
             b.instructions = None
             b.display_name = None
             b.always_load = False
@@ -1012,7 +1332,40 @@ def import_settings(  # noqa: PLR0912 — one validation branch per bundle field
                 )
             except (cl.ConfigError, KeyError) as exc:
                 errors.append(f"{name}/{original}: {exc}")
+        # #15: resource + prompt overrides, through the same validated paths.
+        _import_rp_overrides(cfg, name, entry, errors)
     return affected, errors
+
+
+def _import_rp_overrides(
+    cfg: GatewayConfig, name: str, entry: dict, errors: list[str]
+) -> None:
+    """The #15 slice of :func:`import_settings`: apply one backend's resource
+    and prompt override entries through the validated single-save paths,
+    reporting each failure per item."""
+    d = load_defaults(name) or {}
+    known_uris = {
+        r["uri"] for r in d.get("resources", []) + d.get("resource_templates", [])
+    }
+    for uri, rd in (entry.get("resources") or {}).items():
+        if known_uris and uri not in known_uris:
+            errors.append(f"{name}/{uri}: resource unknown to this backend")
+            continue
+        try:
+            apply_resource_override(cfg, name, {"uri": uri, "override": dict(rd)})
+        except (cl.ConfigError, KeyError) as exc:
+            errors.append(f"{name}/{uri}: {exc}")
+    known_prompts = {p["original"] for p in d.get("prompts", [])}
+    for original, pd in (entry.get("prompts") or {}).items():
+        if known_prompts and original not in known_prompts:
+            errors.append(f"{name}/{original}: prompt unknown to this backend")
+            continue
+        try:
+            apply_prompt_override(
+                cfg, name, {"prompt_original": original, "override": dict(pd)}
+            )
+        except (cl.ConfigError, KeyError) as exc:
+            errors.append(f"{name}/{original}: {exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -1064,12 +1417,18 @@ def hot_reload(
     new_transform, _index = cl.build_transforms(
         cfg, b, {backend: tools}, {backend: metas} if metas else {}
     )
-    holder = holders.get(backend) or []
-    old = holder[0] if holder else None
-    if old is not None and old in proxy._transforms:
-        proxy._transforms.remove(old)
+    # #15: the holder carries EVERY gateway-owned transform on this proxy (the
+    # tool transform + the optional resource/prompt transform) — swap them all.
+    for old in holders.get(backend) or []:
+        if old is not None and old in proxy._transforms:
+            proxy._transforms.remove(old)
     proxy.add_transform(new_transform)
-    holders[backend] = [new_transform]
+    new_holder = [new_transform]
+    rp_transform = cl.build_resource_prompt_transform(b)
+    if rp_transform is not None:
+        proxy.add_transform(rp_transform)
+        new_holder.append(rp_transform)
+    holders[backend] = new_holder
     # Re-set this backend's live server-level instructions (override else captured
     # original) — each endpoint carries only its own, keeping the full per-server
     # budget.
@@ -1371,6 +1730,50 @@ def _settings_routes(ctx: _AdminCtx) -> list[Route]:  # noqa: PLR0915 — statem
         ctx.commit(cfg, payload["backend"])
         return JSONResponse({"ok": True})
 
+    async def put_resource_override(request: Request):
+        """#15: upsert one resource/template override (keyed by uri)."""
+        payload = await request.json()
+        cfg = ctx.load()
+        try:
+            apply_resource_override(cfg, payload["backend"], payload)
+        except (cl.ConfigError, KeyError) as exc:
+            return _err(str(exc))
+        ctx.commit(cfg, payload["backend"])
+        return JSONResponse({"ok": True, "reloaded": "in-process"})
+
+    async def reset_resource(request: Request):
+        """#15: clear all overrides for one resource (revert to default)."""
+        payload = await request.json()
+        cfg = ctx.load()
+        b = next((x for x in cfg.backends if x.name == payload["backend"]), None)
+        if b is None:
+            return _err("unknown backend")
+        b.resources = [r for r in b.resources if r.uri != payload["uri"]]
+        ctx.commit(cfg, payload["backend"])
+        return JSONResponse({"ok": True})
+
+    async def put_prompt_override(request: Request):
+        """#15: upsert one prompt's override (rename, text, args, enabled)."""
+        payload = await request.json()
+        cfg = ctx.load()
+        try:
+            apply_prompt_override(cfg, payload["backend"], payload)
+        except (cl.ConfigError, KeyError) as exc:
+            return _err(str(exc))
+        ctx.commit(cfg, payload["backend"])
+        return JSONResponse({"ok": True, "reloaded": "in-process"})
+
+    async def reset_prompt(request: Request):
+        """#15: clear all overrides for one prompt (revert to default)."""
+        payload = await request.json()
+        cfg = ctx.load()
+        b = next((x for x in cfg.backends if x.name == payload["backend"]), None)
+        if b is None:
+            return _err("unknown backend")
+        b.prompts = [p for p in b.prompts if p.original != payload["prompt_original"]]
+        ctx.commit(cfg, payload["backend"])
+        return JSONResponse({"ok": True})
+
     async def put_instructions(request: Request):
         """Set a per-backend server-instructions override (``backend`` = name).
         Hot-reloads that backend's endpoint — it only changes the blurb Claude
@@ -1440,6 +1843,26 @@ def _settings_routes(ctx: _AdminCtx) -> list[Route]:  # noqa: PLR0915 — statem
         ),
         Route(
             "/admin/api/reset", _needs_json(ctx.locked(reset_tool)), methods=["POST"]
+        ),
+        Route(
+            "/admin/api/resource-override",
+            _needs_json(ctx.locked(put_resource_override)),
+            methods=["PUT"],
+        ),
+        Route(
+            "/admin/api/resource-reset",
+            _needs_json(ctx.locked(reset_resource)),
+            methods=["POST"],
+        ),
+        Route(
+            "/admin/api/prompt-override",
+            _needs_json(ctx.locked(put_prompt_override)),
+            methods=["PUT"],
+        ),
+        Route(
+            "/admin/api/prompt-reset",
+            _needs_json(ctx.locked(reset_prompt)),
+            methods=["POST"],
         ),
         Route(
             "/admin/api/instructions",

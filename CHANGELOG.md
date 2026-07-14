@@ -6,6 +6,21 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Resource and prompt text rewriting** (#15) — the tool override story now
+  covers everything a backend broadcasts: resources and resource templates
+  (display name/title/description, keyed by URI — the URI itself is never
+  rewritten; disabling hides the entry and blocks reads) and prompts (rename
+  with reverse-mapped `prompts/get`, title/description, per-argument
+  descriptions; argument names stay fixed). Captured at introspection alongside
+  tools, stored as diffs vs the captured defaults, hot-reloaded, validated
+  (identifier rule + collision + transform dry-build), included in settings
+  export/import, and editable in the admin UI via new sections below the tool
+  cards. New endpoints: `PUT /admin/api/resource-override`,
+  `POST /admin/api/resource-reset`, `PUT /admin/api/prompt-override`,
+  `POST /admin/api/prompt-reset`.
+
 ### Documentation
 
 - **ADR-0004: per-session isolation** — recorded that caller isolation is the

@@ -15,6 +15,12 @@ The gateway rewrites broadcast text and forwards calls untouched. Every lever, i
 | Injected param default (#35) | `ToolOverride.params[].default` (scalar: str/int/float/bool) — the gateway injects it on every call; setting one is the ONLY way to hide a *required* param (hide without a default is rejected for required params) | same `params[]` entry (`{original, hide, default}`) | hot-reload |
 | Backend on/off | `Backend.enabled` | `POST /admin/api/backend/{name}/enabled` `{value}` | mounts/unmounts live |
 | Reset a tool to captured defaults | — | `POST /admin/api/reset` `{backend, tool_original}` | hot-reload |
+| Resource / template name / title / description (#15) | `ResourceOverride.name/title/description` (keyed by `uri` — the identity, never rewritten) | `PUT /admin/api/resource-override` `{backend, uri, override:{…}}` — same #139 merge semantics | hot-reload |
+| Resource on/off (#15) | `ResourceOverride.enabled` — off hides it from the listing AND blocks reads | same `override` payload | hot-reload |
+| Prompt name / title / description (#15) | `PromptOverride.name/title/description` — renames are real (`prompts/get` reverse-maps to the backend original) | `PUT /admin/api/prompt-override` `{backend, prompt_original, override:{…}}` | hot-reload |
+| Prompt argument description (#15) | `PromptOverride.args[]` (`original`, `description`) — argument NAMES are not renameable (the call forwards them verbatim) | `args` list inside the `override` payload | hot-reload |
+| Prompt on/off (#15) | `PromptOverride.enabled` | same `override` payload | hot-reload |
+| Reset a resource / prompt to captured defaults (#15) | — | `POST /admin/api/resource-reset` `{backend, uri}` / `POST /admin/api/prompt-reset` `{backend, prompt_original}` | hot-reload |
 
 Deprecation heads-up: **param renaming (`params[].name`) is scheduled to stop being editable.** Don't build tuning on param renames — carry the fix in the param description instead. Tool broadcast names stay editable.
 
@@ -23,7 +29,7 @@ Not levers: schemas (types/enums/required), annotations, response shapes — tho
 ## Reading state
 
 - Effective surface + byte budgets: `surface.py` (see SKILL.md step 1).
-- Raw captured text as the backend shipped it: `~/.local/state/mcp-gateway/defaults/<backend>.json` (also `server_info`, `capabilities`). The baseline auto-refreshes (#43: post-(re)connect, backend `tools/list_changed`, admin page load, optional interval) — overrides are diffs by original name, so a refresh never clobbers edits; new tools appear un-overridden.
+- Raw captured text as the backend shipped it: `~/.local/state/mcp-gateway/defaults/<backend>.json` (also `server_info`, `capabilities`, and — #15 — `resources`, `resource_templates`, `prompts`). The baseline auto-refreshes (#43: post-(re)connect, backend `tools/list_changed`, admin page load, optional interval) — overrides are diffs by original name, so a refresh never clobbers edits; new tools appear un-overridden.
 - Per-backend liveness: `GET /admin/api/status` (#23) — `ok`/`error`/`unmounted`/`disabled` + latency, probed through the live proxy. A WARM backend that probes `error` also triggers a session recycle (#161, best-effort).
 - Everything at once, as the admin UI sees it: `GET http://127.0.0.1:9100/admin/api/state` (also carries `bearer_token` — the `${ENV}` ref, never resolved — and `introspect_interval`).
 - Gateway-wide settings: `GET/PUT /admin/api/settings` (#155) — the bearer-token `${ENV}` ref and `introspect_interval`. Both are read only at boot, so a PUT returns restart semantics; the token PUT rejects a raw (non-`${ENV}`) value.
@@ -32,6 +38,7 @@ Not levers: schemas (types/enums/required), annotations, response shapes — tho
 
 ## Guardrails the app enforces
 
+- Prompt broadcast names follow the same identifier rule and uniqueness as tool names (within the backend's prompts); duplicate prompt TARGET names — enabled or disabled — are rejected by the same transform dry-build that guards tools (#15). Resource names are free-form display text (no rule, no collision check — the URI is the identity).
 - Broadcast names: `[A-Za-z0-9_-]`, unique per backend (each backend is its own endpoint — cross-backend name reuse is fine). Collision-checked on save; opt-in escape hatch per save (#22): `"on_collision": "uniquify"` at the top level of the `PUT /admin/api/override` payload auto-suffixes a colliding name (`_2`, `_3`, …) instead of rejecting, and the response then carries the final `name` + `uniquified: true`. A deliberately-set description identical to a sibling's is always rejected (no uniquify for descriptions).
 - Name uniqueness spans EVERY stored override entry, not just broadcast tools: a DISABLED tool's name and a *dangling* override (its `original` no longer in the captured baseline — the backend renamed the tool upstream) still occupy transform target names, and a save that would duplicate one is a 400 telling you to reset/rename the stale entry first.
 - Repairing a dangling override (#153): when a baseline refresh (#43) leaves an override whose `original` no longer matches a captured tool, its tuned text silently stops applying (reconcile logs `override_no_match`). The admin UI surfaces these as an amber banner in the backend detail (and a ⚠ in the sidebar): per row, pick the tool's new name from the dropdown and one-click **migrate** the text across, or **discard** it. Scripted path: `POST /admin/api/backend/{name}/migrate-override` `{from, to}` carries the override's fields onto `to` (param overrides survive only where the param still exists in `to`'s captured schema — dropped ones are reported in the response) and then removes the old entry; `POST /admin/api/backend/{name}/discard-override` `{original}` just drops the stale entry. `GET /admin/api/state` exposes each backend's `dangling` list; a migrate target must be a captured tool with no stored override yet.

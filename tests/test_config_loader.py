@@ -814,3 +814,208 @@ def test_introspect_interval_rejects_negative():
                 "backends": [{"name": "b", "transport": "stdio", "command": "/bin/x"}],
             }
         )
+
+
+# --- #15 resource + prompt overrides ----------------------------------------
+
+
+def _rp_backend(resources=None, prompts=None, enabled=True) -> cl.Backend:
+    return cl.Backend.model_validate(
+        {
+            "name": "b",
+            "transport": "stdio",
+            "command": "/bin/x",
+            "enabled": enabled,
+            "resources": resources or [],
+            "prompts": prompts or [],
+        }
+    )
+
+
+def test_resource_prompt_overrides_roundtrip_toml():
+    import tomllib as _tomllib
+
+    cfg = cl.GatewayConfig(
+        backends=[
+            _rp_backend(
+                resources=[
+                    {
+                        "uri": "file://a.txt",
+                        "name": "A",
+                        "title": "T",
+                        "description": "D",
+                    },
+                    {"uri": "res://{id}", "enabled": False},
+                ],
+                prompts=[
+                    {
+                        "original": "p",
+                        "name": "better_p",
+                        "description": "pd",
+                        "args": [{"original": "q", "description": "qd"}],
+                    }
+                ],
+            )
+        ]
+    )
+    reparsed = cl.GatewayConfig.model_validate(_tomllib.loads(cl.dump_toml(cfg)))
+    assert cl.to_raw(reparsed) == cl.to_raw(cfg)
+    b = reparsed.backends[0]
+    assert b.resources[0].name == "A"
+    assert b.resources[1].enabled is False
+    assert b.prompts[0].args[0].description == "qd"
+
+
+def test_prompt_arg_override_without_description_not_persisted():
+    cfg = cl.GatewayConfig(
+        backends=[
+            _rp_backend(
+                prompts=[{"original": "p", "name": "x", "args": [{"original": "q"}]}]
+            )
+        ]
+    )
+    raw = cl.to_raw(cfg)
+    assert "args" not in raw["backends"][0]["prompts"][0]
+
+
+def test_build_resource_prompt_transform_none_when_nothing_to_do():
+    assert cl.build_resource_prompt_transform(_rp_backend()) is None
+
+
+def test_build_resource_prompt_transform_exists_for_disabled_backend():
+    # a disabled backend hides everything (defense in depth, mirrors #38)
+    assert cl.build_resource_prompt_transform(_rp_backend(enabled=False)) is not None
+
+
+def test_duplicate_prompt_target_names_raise_value_error():
+    b = _rp_backend(
+        prompts=[{"original": "a", "name": "x"}, {"original": "b2", "name": "x"}]
+    )
+    with pytest.raises(ValueError, match="duplicate target name"):
+        cl.build_resource_prompt_transform(b)
+
+
+@pytest.fixture
+def rp_fixtures():
+    from fastmcp.prompts.base import Prompt, PromptArgument
+    from fastmcp.resources.types import TextResource
+
+    resources = [
+        TextResource(uri="file://a.txt", name="orig-a", description="da", text="x"),
+        TextResource(uri="file://hide.txt", name="h", text="x"),
+        TextResource(uri="file://pass.txt", name="p", text="x"),
+    ]
+    prompts = [
+        Prompt(
+            name="p1",
+            description="old",
+            arguments=[PromptArgument(name="q", description="oldarg", required=True)],
+        ),
+        Prompt(name="p2"),
+        Prompt(name="p3"),
+    ]
+    return resources, prompts
+
+
+@pytest.fixture
+def rp_transform():
+    b = _rp_backend(
+        resources=[
+            {"uri": "file://a.txt", "name": "A", "title": "TA", "description": "DA"},
+            {"uri": "file://hide.txt", "enabled": False},
+        ],
+        prompts=[
+            {
+                "original": "p1",
+                "name": "better_p1",
+                "description": "newpd",
+                "args": [{"original": "q", "description": "newarg"}],
+            },
+            {"original": "p2", "enabled": False},
+        ],
+    )
+    t = cl.build_resource_prompt_transform(b)
+    assert t is not None
+    return t
+
+
+@pytest.mark.anyio
+async def test_list_resources_rewrites_hides_and_passes_through(
+    rp_transform, rp_fixtures
+):
+    resources, _ = rp_fixtures
+    out = await rp_transform.list_resources(resources)
+    by_uri = {str(r.uri).rstrip("/"): r for r in out}
+    assert set(by_uri) == {"file://a.txt", "file://pass.txt"}  # hidden dropped
+    a = by_uri["file://a.txt"]
+    assert (a.name, a.title, a.description) == ("A", "TA", "DA")
+    assert by_uri["file://pass.txt"].name == "p"  # untouched
+
+
+@pytest.mark.anyio
+async def test_get_resource_applies_override_and_blocks_hidden(
+    rp_transform, rp_fixtures
+):
+    resources, _ = rp_fixtures
+    lookup = {str(r.uri).rstrip("/"): r for r in resources}
+
+    async def call_next(uri, *, version=None):
+        return lookup.get(uri.rstrip("/"))
+
+    got = await rp_transform.get_resource("file://a.txt", call_next)
+    assert got is not None and got.name == "A" and got.description == "DA"
+    assert await rp_transform.get_resource("file://hide.txt", call_next) is None
+
+
+@pytest.mark.anyio
+async def test_list_resource_templates_rewrites_by_uri_template():
+    from fastmcp.resources.template import ResourceTemplate
+
+    b = _rp_backend(resources=[{"uri": "res://{id}", "description": "tuned"}])
+    t = cl.build_resource_prompt_transform(b)
+    tmpl = ResourceTemplate.model_construct(
+        uri_template="res://{id}", name="t", parameters={}
+    )
+    out = await t.list_resource_templates([tmpl])
+    assert out[0].description == "tuned"
+
+
+@pytest.mark.anyio
+async def test_list_prompts_rename_hide_and_arg_descriptions(rp_transform, rp_fixtures):
+    _, prompts = rp_fixtures
+    out = await rp_transform.list_prompts(prompts)
+    names = [p.name for p in out]
+    assert names == ["better_p1", "p3"]  # p2 hidden, p1 renamed
+    p1 = out[0]
+    assert p1.description == "newpd"
+    assert p1.arguments[0].description == "newarg"
+    assert p1.arguments[0].required is True  # untouched
+    assert p1.arguments[0].name == "q"  # arg names never renamed
+
+
+@pytest.mark.anyio
+async def test_get_prompt_reverse_maps_renames(rp_transform, rp_fixtures):
+    _, prompts = rp_fixtures
+    lookup = {p.name: p for p in prompts}
+    calls = []
+
+    async def call_next(name, *, version=None):
+        calls.append(name)
+        return lookup.get(name)
+
+    got = await rp_transform.get_prompt("better_p1", call_next)
+    assert calls == ["p1"]  # reverse-mapped to the backend original
+    assert got is not None and got.name == "better_p1"
+    # a renamed prompt no longer answers to its original name
+    assert await rp_transform.get_prompt("p1", call_next) is None
+    # hidden prompt is blocked, passthrough untouched
+    assert await rp_transform.get_prompt("p2", call_next) is None
+    assert (await rp_transform.get_prompt("p3", call_next)).name == "p3"
+
+
+@pytest.mark.anyio
+async def test_disabled_backend_hides_all_resources_and_prompts(rp_fixtures):
+    resources, prompts = rp_fixtures
+    t = cl.build_resource_prompt_transform(_rp_backend(enabled=False))
+    assert await t.list_resources(resources) == []
+    assert await t.list_prompts(prompts) == []

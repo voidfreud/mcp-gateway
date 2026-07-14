@@ -84,6 +84,29 @@ stateless = true                   # parsed; shared-session reuse is a
                                    # hidden WITH a default; optional params
                                    # may take a default without hiding.
 
+  # Per-resource rewrite (#15). `uri` is the resource's URI (or a template's
+  # uriTemplate) — its identity, never rewritten. Only display text is
+  # editable; enabled = false hides it from the listing AND blocks reads.
+  # [[backends.resources]]
+  # uri = "file://project/readme"
+  # name = "Project readme"       # display name (free-form text)
+  # title = "Readme"
+  # description = "What Claude should read for this resource."
+  # enabled = true
+
+  # Per-prompt rewrite (#15). `original` is the backend's own prompt name.
+  # Renames are real: Claude sees `name`, prompts/get reverse-maps to the
+  # original. Argument NAMES are not renameable (the call forwards them
+  # verbatim); their descriptions are.
+  # [[backends.prompts]]
+  # original = "summarize"
+  # name = "summarize_document"
+  # description = "What Claude should read for this prompt."
+  # enabled = true
+  #   [[backends.prompts.args]]
+  #   original = "text"
+  #   description = "What Claude should read for this argument."
+
 # A local stdio backend looks like this:
 # [[backends]]
 # name = "serena"
