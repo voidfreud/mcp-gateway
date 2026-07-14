@@ -2,7 +2,10 @@
 # Copy to config.toml and edit. Secrets are never hardcoded: write ${ENV_VAR}
 # and the loader resolves it from the environment (injected by the LaunchAgent).
 
-host = "127.0.0.1"          # bind loopback only — never 0.0.0.0
+host = "127.0.0.1"          # loopback by default. A non-loopback bind (e.g. a
+                            # Tailscale IP) REQUIRES bearer_token or the config
+                            # refuses to load — docs/security.md ("Binding
+                            # beyond loopback").
 port = 9100
 log_file = "~/.local/state/mcp-gateway/gateway.log"
 # introspect_interval = 900 # seconds between scheduled re-captures of every
@@ -65,6 +68,18 @@ stateless = true                   # parsed; shared-session reuse is a
   description = "Exactly what Claude should read for this tool."
   enabled = true                   # false -> tool is dropped from the listing
   always_load = true               # pin THIS tool to load upfront (eager)
+  # Behavior hooks (#16): user-authored Python, "module:function" resolved in
+  # the hooks dir (MCP_GATEWAY_HOOKS > ./hooks/ > ~/.config/mcp-gateway/hooks/).
+  # ARBITRARY CODE EXECUTION in the daemon, by design — same trust as a stdio
+  # `command`; see docs/security.md. Never eval'd, only imported from that dir.
+  # validate = "myhooks:check_query"    # check_query(args: dict) runs BEFORE
+  #                                     # the call; raise ValueError("why") to
+  #                                     # reject it (message -> the caller).
+  #                                     # args use the EXPOSED (post-rename)
+  #                                     # names; hidden params are absent.
+  # post_process = "myhooks:trim"       # trim(result) runs AFTER the backend
+  #                                     # answered (truncate / strip / reshape
+  #                                     # the ToolResult). Sync or async.
 
     [[backends.tools.params]]
     original = "query"
@@ -83,6 +98,29 @@ stateless = true                   # parsed; shared-session reuse is a
                                    # float/bool). Required params can only be
                                    # hidden WITH a default; optional params
                                    # may take a default without hiding.
+
+  # Per-resource rewrite (#15). `uri` is the resource's URI (or a template's
+  # uriTemplate) — its identity, never rewritten. Only display text is
+  # editable; enabled = false hides it from the listing AND blocks reads.
+  # [[backends.resources]]
+  # uri = "file://project/readme"
+  # name = "Project readme"       # display name (free-form text)
+  # title = "Readme"
+  # description = "What Claude should read for this resource."
+  # enabled = true
+
+  # Per-prompt rewrite (#15). `original` is the backend's own prompt name.
+  # Renames are real: Claude sees `name`, prompts/get reverse-maps to the
+  # original. Argument NAMES are not renameable (the call forwards them
+  # verbatim); their descriptions are.
+  # [[backends.prompts]]
+  # original = "summarize"
+  # name = "summarize_document"
+  # description = "What Claude should read for this prompt."
+  # enabled = true
+  #   [[backends.prompts.args]]
+  #   original = "text"
+  #   description = "What Claude should read for this argument."
 
 # A local stdio backend looks like this:
 # [[backends]]

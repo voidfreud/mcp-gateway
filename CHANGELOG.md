@@ -17,6 +17,48 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   today) — the dispatch seam smart routing (#21) will build on. Admin API:
   `GET /admin/api/composites` and a live enable/disable toggle. (#14)
 
+- **Per-tool behavior hooks** (#16) — a tool override can name two
+  user-authored Python hooks: `validate = "module:function"` and
+  `post_process = "module:function"`, resolved in a dedicated hooks directory
+  (`MCP_GATEWAY_HOOKS` > `./hooks/` > `~/.config/mcp-gateway/hooks/`; specs
+  are imported, never eval'd, and cannot name a path outside the directory).
+  `validate(args)` runs before the backend sees the call — raise
+  `ValueError("why")` to reject it with that message as the tool error;
+  `post_process(result)` reshapes the answer (truncate, strip, reformat)
+  before the caller sees it. Sync or async; hooks compose with renames and
+  hidden+injected params (they see the exposed argument names). This is
+  deliberate arbitrary code execution in the daemon — documented as such in
+  the security guide. A hook that fails to load fails **closed, per tool**:
+  the mount and every other tool stay up while the hooked tool's calls error
+  with the load failure (`hook_load_error` in the log, `hook_error` in
+  `/admin/api/state`). Hooks are hand-authored in `config.toml`; the admin
+  state shows them read-only and UI saves preserve them.
+
+- **Resource and prompt text rewriting** (#15) — the tool override story now
+  covers everything a backend broadcasts: resources and resource templates
+  (display name/title/description, keyed by URI — the URI itself is never
+  rewritten; disabling hides the entry and blocks reads) and prompts (rename
+  with reverse-mapped `prompts/get`, title/description, per-argument
+  descriptions; argument names stay fixed). Captured at introspection alongside
+  tools, stored as diffs vs the captured defaults, hot-reloaded, validated
+  (identifier rule + collision + transform dry-build), included in settings
+  export/import, and editable in the admin UI via new sections below the tool
+  cards. New endpoints: `PUT /admin/api/resource-override`,
+  `POST /admin/api/resource-reset`, `PUT /admin/api/prompt-override`,
+  `POST /admin/api/prompt-reset`.
+
+- **Guarded non-loopback bind** (#18) — `host` may now point beyond loopback
+  (e.g. a Tailscale IP) for multi-host use, but the config refuses to load a
+  non-loopback bind without `bearer_token` set, so the gateway can never start
+  exposed and unauthenticated. Documented in security.md ("Binding beyond
+  loopback").
+
+### Documentation
+
+- **ADR-0004: per-session isolation** — recorded that caller isolation is the
+  existing per-backend `stateless` lever, not a new gateway mode; added a
+  "Session isolation between callers" section to the security guide (#25).
+
 ## [1.0.0] - 2026-07-12
 
 The first feature-complete release. This wave (#150) turns the gateway from a

@@ -815,7 +815,7 @@ def test_taking_a_disabled_tools_name_is_a_clean_400(defaults_dir):
             ]
         }
     )
-    with pytest.raises(cl.ConfigError, match="break the tool transforms"):
+    with pytest.raises(cl.ConfigError, match="break the transforms"):
         admin.apply_tool_override(
             cfg,
             "b",
@@ -1370,7 +1370,7 @@ def test_disabled_captured_tool_duplicate_target_rejected(defaults_dir):
     admin.apply_tool_override(
         cfg, "b", {"tool_original": "a", "override": {"name": "x", "enabled": False}}
     )
-    with pytest.raises(cl.ConfigError, match="break the tool transforms"):
+    with pytest.raises(cl.ConfigError, match="break the transforms"):
         admin.apply_tool_override(
             cfg, "b", {"tool_original": "bb", "override": {"name": "x"}}
         )
@@ -1595,3 +1595,322 @@ def test_ensure_defaults_captures_concurrently(defaults_dir, monkeypatch):
     elapsed = _time.perf_counter() - started
     assert elapsed < 0.38, f"captures serialized: {elapsed:.2f}s"
     assert admin.load_defaults("b1") and admin.load_defaults("b2")
+
+
+# --- #15 resource + prompt overrides ----------------------------------------
+
+
+def _write_rp_defaults(d, backend="b"):
+    (d / f"{backend}.json").write_text(
+        json.dumps(
+            {
+                "backend": backend,
+                "instructions": None,
+                "tools": [],
+                "resources": [
+                    {
+                        "uri": "file://a.txt",
+                        "name": "a-name",
+                        "title": None,
+                        "description": "a-desc",
+                        "mime_type": "text/plain",
+                    }
+                ],
+                "resource_templates": [
+                    {
+                        "uri": "res://{id}",
+                        "name": "tmpl",
+                        "title": None,
+                        "description": "t-desc",
+                        "mime_type": None,
+                    }
+                ],
+                "prompts": [
+                    {
+                        "original": "p1",
+                        "title": None,
+                        "description": "p-desc",
+                        "args": [
+                            {"original": "q", "description": "q-desc", "required": True}
+                        ],
+                    },
+                    {"original": "p2", "title": None, "description": None, "args": []},
+                ],
+            }
+        )
+    )
+
+
+def test_apply_resource_override_stores_diff_only(defaults_dir):
+    _write_rp_defaults(defaults_dir)
+    cfg = _single_cfg()
+    admin.apply_resource_override(
+        cfg,
+        "b",
+        {
+            "uri": "file://a.txt",
+            "override": {"name": "better", "description": "a-desc"},  # desc == default
+        },
+    )
+    (r,) = cfg.backends[0].resources
+    assert (r.uri, r.name, r.description) == ("file://a.txt", "better", None)
+
+
+def test_apply_resource_override_equal_to_default_stores_nothing(defaults_dir):
+    _write_rp_defaults(defaults_dir)
+    cfg = _single_cfg()
+    admin.apply_resource_override(
+        cfg,
+        "b",
+        {"uri": "file://a.txt", "override": {"name": "a-name", "enabled": True}},
+    )
+    assert cfg.backends[0].resources == []
+
+
+def test_apply_resource_override_disable_is_an_override(defaults_dir):
+    _write_rp_defaults(defaults_dir)
+    cfg = _single_cfg()
+    admin.apply_resource_override(
+        cfg, "b", {"uri": "res://{id}", "override": {"enabled": False}}
+    )
+    (r,) = cfg.backends[0].resources
+    assert r.uri == "res://{id}" and r.enabled is False
+
+
+def test_apply_resource_override_partial_put_preserves_absent_fields(defaults_dir):
+    _write_rp_defaults(defaults_dir)
+    cfg = _single_cfg()
+    admin.apply_resource_override(
+        cfg, "b", {"uri": "file://a.txt", "override": {"name": "better"}}
+    )
+    admin.apply_resource_override(
+        cfg, "b", {"uri": "file://a.txt", "override": {"description": "newd"}}
+    )
+    (r,) = cfg.backends[0].resources
+    assert r.name == "better" and r.description == "newd"
+
+
+def test_apply_resource_override_unknown_backend_rejected(defaults_dir):
+    with pytest.raises(cl.ConfigError, match="unknown backend"):
+        admin.apply_resource_override(
+            _single_cfg(), "nope", {"uri": "file://a.txt", "override": {}}
+        )
+
+
+def test_apply_prompt_override_stores_rename_and_arg_diffs(defaults_dir):
+    _write_rp_defaults(defaults_dir)
+    cfg = _single_cfg()
+    admin.apply_prompt_override(
+        cfg,
+        "b",
+        {
+            "prompt_original": "p1",
+            "override": {
+                "name": "better_p1",
+                "description": "p-desc",  # == default -> inherits
+                "args": [{"original": "q", "description": "new-q"}],
+            },
+        },
+    )
+    (p,) = cfg.backends[0].prompts
+    assert (p.original, p.name, p.description) == ("p1", "better_p1", None)
+    assert [(a.original, a.description) for a in p.args] == [("q", "new-q")]
+
+
+def test_apply_prompt_override_no_diff_removes_entry(defaults_dir):
+    _write_rp_defaults(defaults_dir)
+    cfg = _single_cfg()
+    admin.apply_prompt_override(
+        cfg,
+        "b",
+        {"prompt_original": "p1", "override": {"name": "x"}},
+    )
+    admin.apply_prompt_override(
+        cfg,
+        "b",
+        {
+            "prompt_original": "p1",
+            "override": {"name": "p1", "description": "p-desc", "enabled": True},
+        },
+    )
+    assert cfg.backends[0].prompts == []
+
+
+def test_apply_prompt_override_rejects_invalid_name(defaults_dir):
+    _write_rp_defaults(defaults_dir)
+    with pytest.raises(cl.ConfigError, match="invalid prompt name"):
+        admin.apply_prompt_override(
+            _single_cfg(),
+            "b",
+            {"prompt_original": "p1", "override": {"name": "has space"}},
+        )
+
+
+def test_apply_prompt_override_rejects_broadcast_name_collision(defaults_dir):
+    _write_rp_defaults(defaults_dir)
+    cfg = _single_cfg()
+    with pytest.raises(cl.ConfigError, match="already used by prompt"):
+        admin.apply_prompt_override(
+            cfg, "b", {"prompt_original": "p1", "override": {"name": "p2"}}
+        )
+
+
+def test_apply_prompt_override_duplicate_target_with_disabled_is_400(defaults_dir):
+    # broadcast-level check skips disabled entries; the transform dry-build
+    # still rejects a duplicate TARGET name (mirrors the tool landmine, #152).
+    _write_rp_defaults(defaults_dir)
+    cfg = _single_cfg()
+    admin.apply_prompt_override(
+        cfg,
+        "b",
+        {"prompt_original": "p1", "override": {"name": "x", "enabled": False}},
+    )
+    with pytest.raises(cl.ConfigError, match="break the transforms"):
+        admin.apply_prompt_override(
+            cfg, "b", {"prompt_original": "p2", "override": {"name": "x"}}
+        )
+
+
+def test_apply_prompt_override_partial_put_preserves_args(defaults_dir):
+    _write_rp_defaults(defaults_dir)
+    cfg = _single_cfg()
+    admin.apply_prompt_override(
+        cfg,
+        "b",
+        {
+            "prompt_original": "p1",
+            "override": {"args": [{"original": "q", "description": "tuned"}]},
+        },
+    )
+    admin.apply_prompt_override(
+        cfg, "b", {"prompt_original": "p1", "override": {"name": "renamed"}}
+    )
+    (p,) = cfg.backends[0].prompts
+    assert p.name == "renamed"
+    assert [(a.original, a.description) for a in p.args] == [("q", "tuned")]
+
+
+def test_build_state_surfaces_resources_and_prompts(defaults_dir):
+    _write_rp_defaults(defaults_dir)
+    cfg = _single_cfg()
+    admin.apply_resource_override(
+        cfg, "b", {"uri": "file://a.txt", "override": {"name": "better"}}
+    )
+    admin.apply_prompt_override(
+        cfg,
+        "b",
+        {
+            "prompt_original": "p1",
+            "override": {"args": [{"original": "q", "description": "tuned"}]},
+        },
+    )
+    state = admin.build_state(cfg)["backends"][0]
+    res = {r["uri"]: r for r in state["resources"]}
+    assert res["file://a.txt"]["name"] == "better"
+    assert res["file://a.txt"]["default_name"] == "a-name"
+    assert res["file://a.txt"]["template"] is False
+    assert res["res://{id}"]["template"] is True
+    prompts = {p["original"]: p for p in state["prompts"]}
+    assert prompts["p1"]["args"][0]["description"] == "tuned"
+    assert prompts["p1"]["args"][0]["default_description"] == "q-desc"
+    assert prompts["p1"]["args"][0]["required"] is True
+    assert prompts["p2"]["enabled"] is True
+
+
+def test_build_state_degrades_without_rp_capture(defaults_dir):
+    # pre-#15 defaults file (no resources/prompts keys) -> empty lists, no crash
+    _write_defaults(defaults_dir, "b", "t")
+    state = admin.build_state(_single_cfg())["backends"][0]
+    assert state["resources"] == [] and state["prompts"] == []
+
+
+def test_export_import_round_trips_resources_and_prompts(defaults_dir):
+    _write_rp_defaults(defaults_dir)
+    cfg = _single_cfg()
+    admin.apply_resource_override(
+        cfg,
+        "b",
+        {"uri": "file://a.txt", "override": {"name": "better", "enabled": False}},
+    )
+    admin.apply_prompt_override(
+        cfg,
+        "b",
+        {
+            "prompt_original": "p1",
+            "override": {
+                "name": "better_p1",
+                "args": [{"original": "q", "description": "tuned"}],
+            },
+        },
+    )
+    bundle = admin.export_settings(cfg)
+    fresh = _single_cfg()
+    affected, errors = admin.import_settings(fresh, bundle, mode="replace")
+    assert errors == [] and affected == ["b"]
+    assert admin.export_settings(fresh) == bundle
+
+
+def test_import_rejects_unknown_resource_and_prompt(defaults_dir):
+    _write_rp_defaults(defaults_dir)
+    bundle = {
+        "kind": admin.EXPORT_KIND,
+        "version": 1,
+        "backends": {
+            "b": {
+                "resources": {"file://ghost.txt": {"name": "x"}},
+                "prompts": {"ghost": {"name": "y"}},
+            }
+        },
+    }
+    _, errors = admin.import_settings(_single_cfg(), bundle)
+    assert any("resource unknown" in e for e in errors)
+    assert any("prompt unknown" in e for e in errors)
+
+
+def test_hot_reload_swaps_resource_prompt_transform_too(defaults_dir):
+    # holders must carry BOTH gateway-owned transforms and swap them all —
+    # otherwise stale rp transforms pile up on the live proxy.
+    import structlog
+    from fastmcp.server import create_proxy
+
+    _write_rp_defaults(defaults_dir)
+    cfg = _single_cfg()
+    admin.apply_resource_override(
+        cfg, "b", {"uri": "file://a.txt", "override": {"name": "better"}}
+    )
+    b = cfg.backends[0]
+    proxy = create_proxy(cl.to_proxy_config_one(b), name="mcp-gateway-b")
+    baseline = len(proxy._transforms)
+    registry, holders = {"b": proxy}, {}
+    log = structlog.get_logger("test")
+    admin.hot_reload(registry, holders, cfg, "b", log)
+    assert len(holders["b"]) == 2  # tool transform + rp transform
+    assert len(proxy._transforms) == baseline + 2
+    # second reload replaces, never accumulates
+    admin.hot_reload(registry, holders, cfg, "b", log)
+    assert len(proxy._transforms) == baseline + 2
+    # dropping the overrides drops the rp transform from the proxy
+    cfg.backends[0].resources = []
+    admin.hot_reload(registry, holders, cfg, "b", log)
+    assert len(holders["b"]) == 1
+    assert len(proxy._transforms) == baseline + 1
+
+
+def test_refresh_defaults_flags_rp_only_changes(defaults_dir, monkeypatch):
+    # a backend that only changes its prompts (same tools) must still count as
+    # changed so the auto-refresh hot-reloads the transforms
+    import asyncio as _asyncio
+
+    _write_rp_defaults(defaults_dir)
+    new_data = json.loads((defaults_dir / "b.json").read_text())
+    new_data["prompts"][0]["description"] = "moved"
+
+    async def fake_capture(b):
+        return new_data
+
+    monkeypatch.setattr(admin, "capture_defaults", fake_capture)
+    b = cl.Backend(name="b", transport="stdio", command="/bin/x")
+    res = _asyncio.run(
+        admin.refresh_defaults(b, structlog.get_logger("test"), force=True)
+    )
+    assert res["status"] == "refreshed" and res["changed"] is True
