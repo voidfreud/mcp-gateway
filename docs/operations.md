@@ -104,6 +104,17 @@ Everything the gateway persists lives under `~/.local/state/mcp-gateway/`:
   the immutable baseline the UI diffs your overrides against, and the source for
   "reset to default." It is re-captured on connect, on a backend's own change
   notification, on admin page load (throttled), and on **Re-inspect**.
+  The connect-time re-capture is **age-gated**: a baseline younger than
+  `baseline_max_age` (default 24 h) is kept as-is, so a routine restart does
+  not cold-start every slow stdio backend twice — the log line for a skip is
+  `baseline_fresh_skipped`. Set `baseline_max_age = 0` to re-capture on every
+  mount, or press **Re-inspect** for an immediate refresh (never gated). See
+  [configuration.md](configuration.md#gateway-settings-top-level).
+  A boot also sweeps `defaults/` files for backends no longer in the config —
+  but refuses (`orphan_sweep_refused` in the log) when more than half the
+  files would go, which means the running config isn't the one that captured
+  them (e.g. a scratch daemon pointed at a test config while sharing the real
+  state dir). Nothing is deleted in that case.
 
 ## Recovering from a bad config
 

@@ -8,6 +8,20 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Age-gated post-mount baseline refresh** (#157) — a new top-level
+  `baseline_max_age` config knob (seconds, default `86400` = 24 h, `0`
+  disables the gate). At boot/remount, a backend whose captured baseline is
+  younger than the knob is not re-introspected (`baseline_fresh_skipped` in
+  the log), sparing slow stdio backends a second cold start per boot. The
+  event-driven refresh triggers — `tools/list_changed`, admin page load,
+  manual Re-inspect — are never gated.
+- **Orphan-sweep disjoint-config guard** (#157) — the boot sweep of stale
+  `defaults/*.json` files now refuses to run (loud `orphan_sweep_refused`
+  warning, nothing deleted) when more than half the captured baselines would
+  be removed, which means the loaded config isn't the one that captured them
+  (e.g. a scratch daemon on a test config sharing the real state dir — this
+  wiped all real baselines once).
+
 - **Per-tool output-cap lever** (#162) — a tool override can set
   `max_result_chars` (positive integer), broadcast as
   `_meta["anthropic/maxResultSizeChars"]`, which Claude Code honors over its

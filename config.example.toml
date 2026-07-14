@@ -14,6 +14,13 @@ log_file = "~/.local/state/mcp-gateway/gateway.log"
 #                           # tools/list_changed, admin page load — cover
 #                           # everything but a long-lived remote backend that
 #                           # hot-swaps tools silently (#43).
+# baseline_max_age = 86400  # (#157) seconds a stored baseline stays "fresh":
+#                           # the post-(re)mount refresh is SKIPPED while the
+#                           # captured baseline is younger, sparing slow stdio
+#                           # backends a second cold start per boot. Default
+#                           # 86400 (24h); 0 = refresh on every mount. The
+#                           # event-driven refreshes (tools/list_changed,
+#                           # admin page load, Re-inspect) are never gated.
 
 # Optional defense-in-depth (#26): require this bearer token on every backend
 # MCP endpoint AND the admin API (/health, /ready and the bare GET /admin page

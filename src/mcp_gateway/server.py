@@ -335,9 +335,16 @@ class _AutoRefresh:
     refresh, and the opt-in scheduled sweep. ``close()`` ends both tasks."""
 
     def __init__(  # noqa: PLR0913 — same lifespan plumbing as _mount_backend
-        self, interval: int, config_path: str, registry: dict, holders: dict, log
+        self,
+        interval: int,
+        baseline_max_age: int,
+        config_path: str,
+        registry: dict,
+        holders: dict,
+        log,
     ) -> None:
         self.interval = interval
+        self.baseline_max_age = baseline_max_age
         self._config_path = config_path
         self._registry = registry
         self._holders = holders
@@ -345,7 +352,7 @@ class _AutoRefresh:
         self.shutdown = anyio.Event()
         self.send, self._recv = anyio.create_memory_object_stream(16)
 
-    async def refresh(self, b, throttle=None):
+    async def refresh(self, b, throttle=None, max_age=0.0):
         """Re-capture one backend's baseline + hot-reload on change (#43).
         Never raises — auto-refresh is best-effort background work."""
         try:
@@ -356,9 +363,17 @@ class _AutoRefresh:
                 self._holders,
                 self._log,
                 throttle=admin.REFRESH_THROTTLE if throttle is None else throttle,
+                max_age=max_age,
             )
         except Exception as exc:  # noqa: BLE001
             self._log.warning("auto_refresh_error", backend=b.name, error=str(exc))
+
+    async def post_mount(self, b):
+        """#43 trigger 1 — the (re)mount refresh, and the ONLY age-gated one
+        (#157): a baseline younger than ``baseline_max_age`` is skipped, so a
+        routine boot doesn't pay every slow stdio backend a second cold start.
+        Event-driven triggers stay ungated — they're explicit change signals."""
+        await self.refresh(b, None, self.baseline_max_age)
 
     async def worker(self) -> None:
         async for b in self._recv:  # ends when self.send closes
@@ -730,7 +745,12 @@ def _build_app(  # noqa: PLR0913, PLR0915 — composition root; takes what it wi
         stops: dict[str, anyio.Event] = {}
         # #43: list_changed queue + worker, post-mount refresh, interval sweep.
         refresher = _AutoRefresh(
-            cfg.introspect_interval, config_path, registry, holders, log
+            cfg.introspect_interval,
+            cfg.baseline_max_age,
+            config_path,
+            registry,
+            holders,
+            log,
         )
         # #161: recycle requests (backend name) enqueued from arbitrary tasks —
         # the call-log middleware, the status probe, the stateless-toggle route.
@@ -792,7 +812,9 @@ def _build_app(  # noqa: PLR0913, PLR0915 — composition root; takes what it wi
                         # means possibly-new backend state — re-capture the
                         # baseline in the background (throttled; boot after an
                         # upgrade catches e.g. gitnexus 13 -> 17 tools).
-                        tg.start_soon(refresher.refresh, b)
+                        # #157: age-gated — skipped while the stored baseline
+                        # is younger than cfg.baseline_max_age.
+                        tg.start_soon(refresher.post_mount, b)
                         await ev.wait()
             finally:
                 stops.pop(b.name, None)
