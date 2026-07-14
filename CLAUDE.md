@@ -12,8 +12,12 @@ while forwarding real calls untouched — and per-tool behavior hooks (#16) can
 validate/reshape the calls themselves. One loopback daemon at login (loopback
 by default — a non-loopback bind requires bearer_token, #18), shared by all
 sessions. Mission statement: issue #121. The ongoing hand-work is tuning
-backends with the `.claude/skills/mcp-tool-design` skill — 4 configured
-backends (gitnexus, graphitti, serena, xapi) are still disabled/untuned.
+backends with the `.claude/skills/mcp-tool-design` skill. As of 2026-07-15
+ALL 11 configured backends are enabled, tuned, and field-graded (full check
+pass: every string graded, zero undocumented params; graphitti was removed —
+unreachable host). New/renamed backends get the pipeline on arrival; the
+pending regression check is a fresh-session cold-eval (differentiation.md
+step 7 — same-session seats can't judge newly enabled backends).
 
 ## Stack & layout
 

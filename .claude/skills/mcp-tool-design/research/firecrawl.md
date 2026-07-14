@@ -1,9 +1,11 @@
 # Firecrawl — research cache
 
 **Researched:** 2026-07-03
-**Server:** `firecrawl-fastmcp` v3.22.2 (hosted, `https://mcp.firecrawl.dev/.../v2/mcp`) — **currently DISABLED in the gateway.**
+**Server:** `firecrawl-fastmcp` v3.22.3 (hosted, `https://mcp.firecrawl.dev/.../v2/mcp`) — **enabled in the gateway; 18 tools broadcast** (scrape/search/interact + monitor_* CRUD + research_* corpus; the rest of the 26 captured tools stay disabled — map, feedback, crawl, check_crawl_status, extract, agent, agent_status, parse).
 **Tools seen (26):** `scrape`, `map`, `search`, `search_feedback`, `feedback`, `crawl`, `check_crawl_status`, `extract`, `agent`, `agent_status`, `interact`, `interact_stop`, `parse`, `monitor_create`, `monitor_list`, `monitor_get`, `monitor_update`, `monitor_delete`, `monitor_run`, `monitor_checks`, `monitor_check`, `research_search_papers`, `research_inspect_paper`, `research_related_papers`, `research_read_paper`, `research_search_github`.
 **Sources:** docs.firecrawl.dev (pricing/billing, scrape, crawl, extract, agent, monitoring, research), firecrawl.dev/pricing, plus four independent third-party comparisons/benchmarks: apigene.ai (800-pt 8-category benchmark, 2026-03), riccardogiorato/web-scrapers-evals (speed + success table, Nov 2025), pondero.ai (pricing/architecture, 2026-06), sagentum.com (MCP-quality assessment). **No live probe — every Firecrawl call bills credits.**
+
+**2026-07-15 param-doc pass:** every visible param on all 18 broadcast tools now carries a written description (previously most were "(no description)" — the broadcast schema types/enums/defaults, confirmed live via the gateway's own tool schemas). Also de-shouted six monitor_* CRUD tools (`list/get/update/delete/run/checks`) that were still carrying raw upstream `**Usage Example:** \`\`\`json` blocks.
 
 **Server instructions (provider-shipped, present):** tells Claude to prefer `firecrawl_search` over built-in web search, then call `firecrawl_search_feedback` to refund 1 credit. This is self-promoting default text we'd overwrite or drop; it exists (unlike Tavily's `null`).
 
