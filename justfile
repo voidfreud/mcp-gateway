@@ -32,3 +32,8 @@ restart:
 # Re-run after moving the repo. Preview with: ./install.sh --dry-run
 install:
     ./install.sh
+
+# Remove the LaunchAgent, plist, and symlink; keeps config/state (#171).
+# Add --purge by hand to also delete those. Preview with --dry-run.
+uninstall:
+    ./install.sh --uninstall

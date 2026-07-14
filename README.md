@@ -35,7 +35,10 @@ cd mcp-gateway
 ```
 
 `./install.sh` sets everything up: it builds the environment, installs a login
-service so the gateway starts with your Mac, and starts it now. Confirm it's up:
+service so the gateway starts with your Mac, and starts it now. Removal is just
+as easy: `./install.sh --uninstall` reverses it all, keeping your config and
+state unless you add `--purge` (see
+[docs/installation.md](docs/installation.md)). Confirm it's up:
 
 ```bash
 curl -s http://127.0.0.1:9100/health   # -> ok mcp-gateway <version> @ /path/to/clone
