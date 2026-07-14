@@ -917,6 +917,43 @@ def test_introspect_interval_rejects_negative():
         )
 
 
+# --- #157: baseline_max_age knob ----------------------------------------------
+
+
+def test_baseline_max_age_defaults_to_24h_and_omitted():
+    cfg = cl.GatewayConfig.model_validate(
+        {"backends": [{"name": "b", "transport": "stdio", "command": "/bin/x"}]}
+    )
+    assert cfg.baseline_max_age == cl.DEFAULT_BASELINE_MAX_AGE == 86_400
+    # default is not persisted (config stays minimal)
+    assert "baseline_max_age" not in cl.to_raw(cfg)
+
+
+@pytest.mark.parametrize("value", [0, 3600, 604_800])
+def test_baseline_max_age_non_default_roundtrips(value):
+    # 0 (gate off) and any custom age must survive a UI save (to_raw -> reload)
+    cfg = cl.GatewayConfig.model_validate(
+        {
+            "baseline_max_age": value,
+            "backends": [{"name": "b", "transport": "stdio", "command": "/bin/x"}],
+        }
+    )
+    reparsed = cl.GatewayConfig.model_validate(tomllib.loads(cl.dump_toml(cfg)))
+    assert reparsed.baseline_max_age == value
+
+
+def test_baseline_max_age_rejects_negative():
+    import pydantic
+
+    with pytest.raises((cl.ConfigError, pydantic.ValidationError)):
+        cl.GatewayConfig.model_validate(
+            {
+                "baseline_max_age": -1,
+                "backends": [{"name": "b", "transport": "stdio", "command": "/bin/x"}],
+            }
+        )
+
+
 # --- #15 resource + prompt overrides ----------------------------------------
 
 

@@ -99,7 +99,13 @@ layout, console script `mcp-gateway`). MIT; distributed via
 - **Baseline auto-refresh (#43):** post-mount, on `tools/list_changed`
   (stateful clients only; handler only ENQUEUES — never block the message
   pump), on admin page load; throttled (300s / 2s push floor) in in-process
-  `admin._last_refresh`. Overrides are diffs by original name — refresh never
+  `admin._last_refresh`. The POST-MOUNT trigger is additionally age-gated
+  (#157): skipped while the stored baseline's `captured_at` is younger than
+  `baseline_max_age` (default 24h; 0 = ungated; log `baseline_fresh_skipped`)
+  — event triggers are NEVER gated and a skip doesn't stamp the throttle.
+  The boot orphan sweep refuses (`orphan_sweep_refused`) when >half the
+  defaults files would go — a scratch daemon on a test config once wiped
+  every real baseline. Overrides are diffs by original name — refresh never
   clobbers them; a backend renaming tools upstream leaves DANGLING overrides
   (text silently inactive) → the UI's stale-override banner migrates/discards
   them (#153). Baselines capture concurrently at boot.
@@ -127,7 +133,7 @@ layout, console script `mcp-gateway`). MIT; distributed via
   symlink; recreate the venv with `uv sync`.
 - Accepted spec gaps (#92): completions capability not forwarded; tools/list
   served as one page. Framework-level, irrelevant to Claude Code.
-- Backlog: #162 (per-tool output-cap lever), #157 (age-gate boot refresh),
+- Backlog: #162 (per-tool output-cap lever),
   #170 (admin UI revamp), north-star #121. Uninstall is `./install.sh
   --uninstall` (#171; `--purge` adds config+state, `--dry-run` composes).
   The old parked set is resolved (2026-07-14): #10/#25 closed by audit/ADR-0004,

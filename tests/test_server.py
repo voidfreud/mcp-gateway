@@ -1556,6 +1556,71 @@ def test_post_mount_refresh_trigger_fires(tmp_path, monkeypatch):
     assert refreshed == ["b"]
 
 
+def test_post_mount_refresh_passes_baseline_max_age(tmp_path, monkeypatch):
+    """#157: the mount-time trigger carries cfg.baseline_max_age into the age
+    gate — and ONLY that trigger (the list_changed worker and interval sweep
+    stay ungated, max_age=0)."""
+    seen = []
+
+    async def fake_refresh(b, *a, **k):
+        seen.append((b.name, k.get("max_age")))
+        return {"status": "fresh"}
+
+    monkeypatch.setattr(admin, "refresh_and_reload", fake_refresh)
+
+    async def fake_mount(app, stack, b, *a, **k):
+        return True
+
+    monkeypatch.setattr(server, "_mount_backend", fake_mount)
+    cfg = cl.GatewayConfig.model_validate(
+        {
+            "baseline_max_age": 1234,
+            "backends": [{"name": "b", "transport": "stdio", "command": "/bin/x"}],
+        }
+    )
+    path = tmp_path / "config.toml"
+    cl.save(cfg, str(path))
+    app = server._build_app(
+        cfg, structlog.get_logger("test"), {}, {}, {}, config_path=str(path)
+    )
+    with TestClient(app):
+        for _ in range(100):
+            if seen:
+                break
+            time.sleep(0.02)
+    assert seen == [("b", 1234)]
+
+
+def test_autorefresh_event_paths_are_ungated(tmp_path, monkeypatch):
+    """#157: _AutoRefresh.refresh defaults to max_age=0 — the tools/list_changed
+    worker and the interval sweep never skip on baseline age."""
+    seen = []
+
+    async def fake_refresh(b, *a, **k):
+        seen.append(k.get("max_age"))
+        return {"status": "refreshed", "changed": False}
+
+    monkeypatch.setattr(admin, "refresh_and_reload", fake_refresh)
+    cfg = cl.GatewayConfig.model_validate(
+        {
+            "baseline_max_age": 1234,
+            "backends": [{"name": "b", "transport": "stdio", "command": "/bin/x"}],
+        }
+    )
+    path = tmp_path / "config.toml"
+    cl.save(cfg, str(path))
+    log = structlog.get_logger("test")
+    b = cfg.backends[0]
+
+    async def go():
+        ar = server._AutoRefresh(0, cfg.baseline_max_age, str(path), {}, {}, log)
+        await ar.refresh(b)  # the worker/interval path
+        await ar.post_mount(b)  # the gated path, for contrast
+
+    anyio.run(go)
+    assert seen == [0.0, 1234]
+
+
 # ---------------------------------------------------------------------------
 # #149 — launchd decoupled from the repo path via the ~/.local/opt symlink
 # ---------------------------------------------------------------------------
@@ -1806,7 +1871,7 @@ def test_interval_refresh_loop_sweeps_and_stops(tmp_path, monkeypatch):
     log = structlog.get_logger("test")
 
     async def go():
-        ar = server._AutoRefresh(1, str(path), {"up": object()}, {}, log)
+        ar = server._AutoRefresh(1, 0, str(path), {"up": object()}, {}, log)
         ar.interval = 0.05  # fast clock for the test
         async with anyio.create_task_group() as tg:
             tg.start_soon(ar.interval_loop)

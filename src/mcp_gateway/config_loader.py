@@ -37,6 +37,10 @@ _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 DEFAULT_SECRETS_PATH = "~/.config/mcp-gateway/secrets.env"
 
+# #157: default post-mount refresh age gate — skip re-capturing a baseline
+# younger than 24h at mount time (see GatewayConfig.baseline_max_age).
+DEFAULT_BASELINE_MAX_AGE = 86_400
+
 
 class ConfigError(RuntimeError):
     """Raised for any malformed or unresolvable configuration."""
@@ -351,6 +355,14 @@ class GatewayConfig(BaseModel, extra="forbid"):
     # page load) cover everything but a long-lived remote backend that hot-swaps
     # tools silently; set an interval only for that rare case.
     introspect_interval: int = Field(default=0, ge=0)
+    # #157: age-gate the POST-MOUNT baseline refresh (#43 trigger 1). A boot
+    # (or remount) skips re-capturing a backend whose stored baseline is
+    # younger than this many seconds — sparing slow stdio backends (gitnexus
+    # ~13s) a second cold start per boot, at the cost of up to this much
+    # staleness after an upgrade. 0 disables the gate (refresh on every
+    # mount, the pre-#157 behavior). Event-driven triggers — tools/
+    # list_changed, admin page load, manual Re-inspect — are NEVER gated.
+    baseline_max_age: int = Field(default=DEFAULT_BASELINE_MAX_AGE, ge=0)
     # Optional bearer token required on every backend MCP endpoint (#26) —
     # defense-in-depth on the loopback bind. Store a ${ENV} ref, never the raw
     # value; the server resolves it ONCE at startup via expand_env (a missing
@@ -956,6 +968,8 @@ def to_raw(cfg: GatewayConfig) -> dict:  # noqa: PLR0915 — field-by-field TOML
     }
     if cfg.introspect_interval:  # default 0 (off) — only persist when set (#43)
         out["introspect_interval"] = cfg.introspect_interval
+    if cfg.baseline_max_age != DEFAULT_BASELINE_MAX_AGE:  # persist non-default (#157)
+        out["baseline_max_age"] = cfg.baseline_max_age
     if cfg.bearer_token is not None:  # default None — only persist when set (#26)
         out["bearer_token"] = cfg.bearer_token
     out["backends"] = [_backend(b) for b in cfg.backends]
