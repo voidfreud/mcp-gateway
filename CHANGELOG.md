@@ -6,6 +6,24 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Admin UI visual revamp** (#170) — the single-file admin page got a
+  deliberate design pass: a light theme (follows `prefers-color-scheme`, dark
+  stays the base), inline-SVG iconography replacing the mixed emoji/text
+  affordances, the backend control bar regrouped into captioned clusters
+  (Broadcast / Session / Display name / Claude Code), a sticky backend
+  header, skeleton placeholders for the async first paint, smooth
+  expand/hover/toggle transitions (honoring `prefers-reduced-motion`), an
+  always-visible byte-budget counter (amber near, red over the 2 KB cap), and
+  a read-only **Behavior hooks** section on tool cards showing the configured
+  `validate`/`post_process` specs plus a live hook-error badge (#16 surfaced
+  in the UI for the first time). Still one hand-editable HTML file — vanilla
+  JS, no build step, no external assets; every control keeps its endpoint and
+  save semantics. The backend detail's **Register in CC** button is now
+  **Register** inside the Claude Code cluster. After-screenshots live in
+  `docs/img/` and the README.
+
 ### Added
 
 - **Composite tools** — config-defined synthetic tools (`[[composites]]`) served
@@ -16,6 +34,40 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   every override applies. Member selection is a pluggable strategy (`"all"`
   today) — the dispatch seam smart routing (#21) will build on. Admin API:
   `GET /admin/api/composites` and a live enable/disable toggle. (#14)
+- **Age-gated post-mount baseline refresh** (#157) — a new top-level
+  `baseline_max_age` config knob (seconds, default `86400` = 24 h, `0`
+  disables the gate). At boot/remount, a backend whose captured baseline is
+  younger than the knob is not re-introspected (`baseline_fresh_skipped` in
+  the log), sparing slow stdio backends a second cold start per boot. The
+  event-driven refresh triggers — `tools/list_changed`, admin page load,
+  manual Re-inspect — are never gated.
+- **Orphan-sweep disjoint-config guard** (#157) — the boot sweep of stale
+  `defaults/*.json` files now refuses to run (loud `orphan_sweep_refused`
+  warning, nothing deleted) when more than half the captured baselines would
+  be removed, which means the loaded config isn't the one that captured them
+  (e.g. a scratch daemon on a test config sharing the real state dir — this
+  wiped all real baselines once).
+
+- **Per-tool output-cap lever** (#162) — a tool override can set
+  `max_result_chars` (positive integer), broadcast as
+  `_meta["anthropic/maxResultSizeChars"]`, which Claude Code honors over its
+  global 25k-token `MAX_MCP_OUTPUT_TOKENS` cap for text content. It merges
+  into the tool's captured `_meta` alongside the `always_load` pin flag, is
+  editable in the admin UI (an "Output cap (chars)" field on the tool card)
+  and via `PUT /admin/api/override` (`max_result_chars`; `null` clears; #139
+  merge semantics), round-trips through export/import and override
+  migration, and hot-reloads like every other broadcast edit.
+- **`./install.sh --uninstall`** (#171) — one-command removal, symmetric with
+  the install: boots out the LaunchAgent (tolerating not-loaded), removes the
+  installed plist and the `~/.local/opt/mcp-gateway` symlink, and prints what
+  was removed vs deliberately kept. User data is kept by default — config
+  (`./config.toml` / `~/.config/mcp-gateway/`) and state/logs/backups
+  (`~/.local/state/mcp-gateway/`); add `--purge` to delete the config and
+  state directories too, after an explicit confirmation. Claude Code
+  registrations are never touched (the script prints the
+  `claude mcp remove gateway-<name>` hint). Idempotent — with nothing
+  installed it says so and exits 0 — and `--dry-run` composes with both
+  flags, like the installer. Also available as `just uninstall`.
 
 - **Per-tool behavior hooks** (#16) — a tool override can name two
   user-authored Python hooks: `validate = "module:function"` and

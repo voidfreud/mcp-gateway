@@ -66,11 +66,57 @@ def turn0(cfg, target: str | None) -> int:
                 continue
             name = ov.name if (ov and ov.name) else dt["original"]
             print(f"mcp__gateway-{b.name}__{name}")
+        # #15: prompts surface to the agent as slash commands at turn 0.
+        povs = {p.original: p for p in b.prompts}
+        for dp in d.get("prompts") or []:
+            ov = povs.get(dp.get("original"))
+            if ov is not None and not ov.enabled:
+                continue
+            pname = (ov.name if ov else None) or dp.get("original")
+            print(f"/mcp__gateway-{b.name}__{pname}")
         print()
     if target and shown == 0:
         print(f"no enabled backend named {target!r}", file=sys.stderr)
         return 1
     return 0
+
+
+def _resources_prompts(b, d: dict, full: bool) -> None:
+    """Resource / template / prompt broadcast text (#15) — same
+    override-over-captured merge the tool walk above does. Silent when the
+    backend broadcasts none (today's common case)."""
+    rovs = {r.uri: r for r in b.resources}
+    for kind, key in (("resource", "resources"), ("template", "resource_templates")):
+        for dr in d.get(key) or []:
+            uri = dr.get("uri") or dr.get("uriTemplate") or "?"
+            ov = rovs.get(uri)
+            if ov is not None and not ov.enabled:
+                print(f"  - {kind} {uri}: DISABLED (hidden, reads blocked)")
+                continue
+            name = (ov.name if ov else None) or dr.get("name") or uri
+            desc = (ov.description if ov else None) or dr.get("description")
+            print(f"  - {kind} {name} <{uri}>: desc {budget(desc)}")
+            if full:
+                print(f"      desc: {desc or '(none)'}")
+    povs = {p.original: p for p in b.prompts}
+    for dp in d.get("prompts") or []:
+        orig = dp.get("original", "?")
+        ov = povs.get(orig)
+        if ov is not None and not ov.enabled:
+            print(f"  - prompt {orig}: DISABLED (not broadcast)")
+            continue
+        name = (ov.name if ov else None) or orig
+        desc = (ov.description if ov else None) or dp.get("description")
+        tag = f" [renamed from {orig}]" if name != orig else ""
+        print(f"  - prompt {name}{tag}: desc {budget(desc)}")
+        if full:
+            print(f"      desc: {desc or '(none)'}")
+            aovs = {a.original: a for a in (ov.args if ov else [])}
+            for da in dp.get("args") or []:
+                aname = da.get("original")
+                ao = aovs.get(aname)
+                adesc = (ao.description if ao else None) or da.get("description")
+                print(f"      arg {aname}: {adesc or '(no description)'}")
 
 
 def main() -> int:
@@ -117,6 +163,16 @@ def main() -> int:
                 tags.append("pinned")
             if name != orig:
                 tags.append(f"renamed from {orig}")
+            # #16: behavior hooks are mechanics, not broadcast text — but a
+            # tuner must know a call is validated/reshaped before grading it.
+            # (Field is validate_ — `validate` shadows a pydantic attr.)
+            hooked = []
+            if ov and ov.validate_:
+                hooked.append("validate")
+            if ov and ov.post_process:
+                hooked.append("post_process")
+            if hooked:
+                tags.append("hooks: " + ", ".join(hooked))
             tag = f" [{', '.join(tags)}]" if tags else ""
             print(f"  - {name}{tag}: desc {budget(desc)}")
             if full:
@@ -154,6 +210,7 @@ def main() -> int:
                         f"      param {pname}{ptag}{pdef}: "
                         f"{pdesc or '(no description)'}"
                     )
+        _resources_prompts(b, d, full)
         print()
     if target and shown == 0:
         print(f"no enabled backend named {target!r}", file=sys.stderr)

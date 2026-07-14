@@ -11,6 +11,7 @@ The gateway rewrites broadcast text and forwards calls untouched. Every lever, i
 | Tool on/off | `ToolOverride.enabled` | same `override` payload | hot-reload |
 | Pin tool upfront | `ToolOverride.always_load` | same `override` payload | hot-reload (meta only) |
 | Pin whole backend | `Backend.always_load` | `POST /admin/api/backend/{name}/pin` `{value}` | hot-reload |
+| Per-tool output cap (#162) | `ToolOverride.max_result_chars` (positive int) — broadcast as `_meta["anthropic/maxResultSizeChars"]`, which Claude Code honors over its global 25k-token `MAX_MCP_OUTPUT_TOKENS` cap (mechanics: references/discovery.md). Raise for bulk readers (e.g. `read_repo_wiki`), lower for chatty tools. Merges into the tool's captured `_meta` alongside the pin flag; unset = client default | same `override` payload (`max_result_chars`; `null` clears) | hot-reload (meta only; reconnect to re-broadcast) |
 | Param description / hide / name | `ToolOverride.params[]` (`original`, `description`, `hide`, `name`) | inside the `override` payload | hot-reload |
 | Injected param default (#35) | `ToolOverride.params[].default` (scalar: str/int/float/bool) — the gateway injects it on every call; setting one is the ONLY way to hide a *required* param (hide without a default is rejected for required params) | same `params[]` entry (`{original, hide, default}`) | hot-reload |
 | Backend on/off | `Backend.enabled` | `POST /admin/api/backend/{name}/enabled` `{value}` | mounts/unmounts live |

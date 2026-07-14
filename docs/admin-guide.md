@@ -58,8 +58,9 @@ backend-wide controls:
   the endpoint URL, the config key, or the Claude Code registration — all of
   those keep using the real name. Use this when you just want a friendlier label.
 - **Rename…** A real identity change (see [Rename vs Display name](#rename-vs-display-name)).
-- **Register in CC.** Registers this backend's gateway endpoint with Claude Code
-  in one click, with a selectable scope (see [Registering in Claude Code](#registering-in-claude-code)).
+- **Register (in the Claude Code cluster).** Registers this backend's gateway
+  endpoint with Claude Code in one click, with a selectable scope (see
+  [Registering in Claude Code](#registering-in-claude-code)).
   A small chip next to the button shows whether the backend is currently
   **registered in Claude Code** (checked via the `claude` command and cached for
   a minute; the chip disappears if the command isn't installed).

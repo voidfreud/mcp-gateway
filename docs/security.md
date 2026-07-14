@@ -75,7 +75,7 @@ then fetches is challenged).
 token and stores it in the browser's local storage, so you enter it once.
 
 **Consequence for Claude Code.** A backend registered in Claude Code must carry
-the header, or every call would `401`. The admin UI's **Register in CC** button
+the header, or every call would `401`. The admin UI's **Register** button (Claude Code cluster)
 adds it automatically. If you register by hand, include it:
 
 ```bash

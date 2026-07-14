@@ -58,6 +58,8 @@ def gw_config_dict(draw) -> dict:
             t: dict = {"original": to, "enabled": draw(st.booleans())}
             if draw(st.booleans()):
                 t["always_load"] = True
+            if draw(st.booleans()):  # #162: per-tool output cap
+                t["max_result_chars"] = draw(st.integers(1, 10**7))
             if draw(st.booleans()):
                 t["name"] = draw(ident)
             if draw(st.booleans()):
@@ -324,6 +326,69 @@ def test_per_backend_always_load_pins_all_tools():
     )
     assert set(tr._transforms) == {"t1", "t2", "t3"}
     assert all(t.meta == cl.ALWAYS_LOAD_META for t in tr._transforms.values())
+
+
+# --- #162: per-tool output cap (anthropic/maxResultSizeChars) ---------------
+
+
+def _cap_cfg(**tool_kw):
+    return cl.GatewayConfig.model_validate(
+        {
+            "backends": [
+                {
+                    "name": "b",
+                    "transport": "stdio",
+                    "command": "/bin/x",
+                    "tools": [{"original": "t", **tool_kw}],
+                }
+            ]
+        }
+    )
+
+
+def test_max_result_chars_sets_meta():
+    cfg = _cap_cfg(max_result_chars=50000)
+    tr, _ = cl.build_transforms(cfg, cfg.backends[0])
+    assert tr._transforms["t"].meta == {cl.MAX_RESULT_CHARS_META_KEY: 50000}
+
+
+def test_max_result_chars_composes_with_pin_and_captured_meta():
+    # cap + pin land in ONE merged meta dict on top of the captured original
+    cfg = _cap_cfg(max_result_chars=123, always_load=True, name="tt")
+    captured = {"b": {"t": {"io.modelcontextprotocol/related-task": "task-1"}}}
+    tr, _ = cl.build_transforms(cfg, cfg.backends[0], {"b": ["t"]}, captured)
+    meta = tr._transforms["t"].meta
+    assert meta["anthropic/alwaysLoad"] is True
+    assert meta[cl.MAX_RESULT_CHARS_META_KEY] == 123
+    assert meta["io.modelcontextprotocol/related-task"] == "task-1"
+    assert tr._transforms["t"].name == "tt"  # rename rides the same transform
+
+
+def test_disabled_backend_beats_max_result_chars():
+    cfg = _cap_cfg(max_result_chars=123)
+    cfg.backends[0].enabled = False
+    tr, _ = cl.build_transforms(cfg, cfg.backends[0], all_tools={"b": ["t"]})
+    assert tr._transforms["t"].enabled is False
+    assert tr._transforms["t"].meta is None
+
+
+def test_max_result_chars_toml_roundtrip():
+    cfg = _cap_cfg(max_result_chars=99000)
+    raw = cl.to_raw(cfg)
+    assert raw["backends"][0]["tools"][0]["max_result_chars"] == 99000
+    reparsed = cl.GatewayConfig.model_validate(tomllib.loads(cl.dump_toml(cfg)))
+    assert reparsed.backends[0].tools[0].max_result_chars == 99000
+
+
+def test_max_result_chars_unset_is_omitted_from_toml():
+    raw = cl.to_raw(_cap_cfg(name="tt"))
+    assert "max_result_chars" not in raw["backends"][0]["tools"][0]
+
+
+@pytest.mark.parametrize("bad", [0, -5, True])
+def test_max_result_chars_rejects_nonsense(bad):
+    with pytest.raises((cl.ConfigError, ValidationError)):
+        _cap_cfg(max_result_chars=bad)
 
 
 # --- backend-level enable/disable (#38) + display name (#42) ----------------
@@ -847,6 +912,43 @@ def test_introspect_interval_rejects_negative():
         cl.GatewayConfig.model_validate(
             {
                 "introspect_interval": -5,
+                "backends": [{"name": "b", "transport": "stdio", "command": "/bin/x"}],
+            }
+        )
+
+
+# --- #157: baseline_max_age knob ----------------------------------------------
+
+
+def test_baseline_max_age_defaults_to_24h_and_omitted():
+    cfg = cl.GatewayConfig.model_validate(
+        {"backends": [{"name": "b", "transport": "stdio", "command": "/bin/x"}]}
+    )
+    assert cfg.baseline_max_age == cl.DEFAULT_BASELINE_MAX_AGE == 86_400
+    # default is not persisted (config stays minimal)
+    assert "baseline_max_age" not in cl.to_raw(cfg)
+
+
+@pytest.mark.parametrize("value", [0, 3600, 604_800])
+def test_baseline_max_age_non_default_roundtrips(value):
+    # 0 (gate off) and any custom age must survive a UI save (to_raw -> reload)
+    cfg = cl.GatewayConfig.model_validate(
+        {
+            "baseline_max_age": value,
+            "backends": [{"name": "b", "transport": "stdio", "command": "/bin/x"}],
+        }
+    )
+    reparsed = cl.GatewayConfig.model_validate(tomllib.loads(cl.dump_toml(cfg)))
+    assert reparsed.baseline_max_age == value
+
+
+def test_baseline_max_age_rejects_negative():
+    import pydantic
+
+    with pytest.raises((cl.ConfigError, pydantic.ValidationError)):
+        cl.GatewayConfig.model_validate(
+            {
+                "baseline_max_age": -1,
                 "backends": [{"name": "b", "transport": "stdio", "command": "/bin/x"}],
             }
         )
