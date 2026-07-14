@@ -298,6 +298,17 @@ def build_meta_server(registry: dict, hooks: dict, log) -> FastMCP:
                 "error": f"backend {backend!r} is not mounted",
                 "mounted": sorted(cat),
             }
+        # Unknown TOOL gets the same actionable shape as unknown backend
+        # ({ok: false} + the valid names), instead of leaking the wire-level
+        # "Unknown tool" text inside an is_error content block.
+        _, listed = await _list_tools(backend, target, log)
+        names = {t.name for t in listed}
+        if listed and tool not in names:
+            return {
+                "ok": False,
+                "error": f"tool {tool!r} is not on backend {backend!r}",
+                "available": sorted(names),
+            }
         started = time.perf_counter()
         try:
             async with asyncio.timeout(EXECUTE_TIMEOUT):

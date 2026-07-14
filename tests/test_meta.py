@@ -248,8 +248,11 @@ def test_execute_unknown_tool_is_honest_error_not_crash():
     body = _call(
         srv, "execute", {"backend": "exa", "tool": "nope", "arguments": {}}
     ).data
-    # tool-level error: reported inside the payload, never a raised crash
-    assert body["ok"] is False or body["is_error"] is True
+    # same actionable shape as unknown backend: {ok: false} + the valid names,
+    # not an is_error content block the caller has to parse
+    assert body["ok"] is False
+    assert "nope" in body["error"] and "exa" in body["error"]
+    assert "search_web" in body["available"]
 
 
 def test_execute_unknown_backend_is_structured_error():
