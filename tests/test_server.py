@@ -2191,3 +2191,110 @@ def test_reregister_all_missing_cli_is_400(tmp_path, monkeypatch):
     )
     r = TestClient(app).post("/admin/api/cc-reregister-all", json={})
     assert r.status_code == 400
+
+
+# --- #15 resource + prompt override endpoints -------------------------------
+
+
+def _seed_rp_defaults():
+    admin.save_defaults(
+        {
+            "backend": "b",
+            "instructions": None,
+            "tools": [],
+            "resources": [
+                {
+                    "uri": "file://a.txt",
+                    "name": "a-name",
+                    "title": None,
+                    "description": "a-desc",
+                    "mime_type": "text/plain",
+                }
+            ],
+            "resource_templates": [],
+            "prompts": [
+                {
+                    "original": "p1",
+                    "title": None,
+                    "description": "p-desc",
+                    "args": [
+                        {"original": "q", "description": "q-desc", "required": False}
+                    ],
+                }
+            ],
+        }
+    )
+
+
+def test_resource_override_endpoint_roundtrip(tmp_path):
+    _seed_rp_defaults()
+    client = TestClient(_admin_app(tmp_path))
+    r = client.put(
+        "/admin/api/resource-override",
+        json={
+            "backend": "b",
+            "uri": "file://a.txt",
+            "override": {"name": "better", "description": "tuned"},
+        },
+    )
+    assert r.status_code == 200 and r.json()["reloaded"] == "in-process"
+    state = client.get("/admin/api/state").json()
+    (res,) = state["backends"][0]["resources"]
+    assert res["name"] == "better" and res["description"] == "tuned"
+    r = client.post(
+        "/admin/api/resource-reset", json={"backend": "b", "uri": "file://a.txt"}
+    )
+    assert r.status_code == 200
+    state = client.get("/admin/api/state").json()
+    (res,) = state["backends"][0]["resources"]
+    assert res["name"] is None and res["description"] is None
+
+
+def test_prompt_override_endpoint_roundtrip_and_validation(tmp_path):
+    _seed_rp_defaults()
+    client = TestClient(_admin_app(tmp_path))
+    r = client.put(
+        "/admin/api/prompt-override",
+        json={
+            "backend": "b",
+            "prompt_original": "p1",
+            "override": {
+                "name": "better_p1",
+                "args": [{"original": "q", "description": "tuned"}],
+            },
+        },
+    )
+    assert r.status_code == 200
+    state = client.get("/admin/api/state").json()
+    (p,) = state["backends"][0]["prompts"]
+    assert p["name"] == "better_p1" and p["args"][0]["description"] == "tuned"
+    # invalid name -> clean 400
+    r = client.put(
+        "/admin/api/prompt-override",
+        json={
+            "backend": "b",
+            "prompt_original": "p1",
+            "override": {"name": "has space"},
+        },
+    )
+    assert r.status_code == 400 and "invalid prompt name" in r.json()["error"]
+    r = client.post(
+        "/admin/api/prompt-reset", json={"backend": "b", "prompt_original": "p1"}
+    )
+    assert r.status_code == 200
+    state = client.get("/admin/api/state").json()
+    assert state["backends"][0]["prompts"][0]["name"] is None
+
+
+def test_rp_override_endpoints_reject_unknown_backend(tmp_path):
+    client = TestClient(_admin_app(tmp_path))
+    r = client.put(
+        "/admin/api/resource-override",
+        json={"backend": "ghost", "uri": "file://x", "override": {}},
+    )
+    assert r.status_code == 400
+    r = client.put(
+        "/admin/api/prompt-override",
+        json={"backend": "ghost", "prompt_original": "p", "override": {}},
+    )
+    assert r.status_code == 400

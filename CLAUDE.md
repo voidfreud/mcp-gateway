@@ -113,7 +113,12 @@ layout, console script `mcp-gateway`). MIT; distributed via
 - Accepted spec gaps (#92): completions capability not forwarded; tools/list
   served as one page. Framework-level, irrelevant to Claude Code.
 - Backlog: #162 (per-tool output-cap lever), #157 (age-gate boot refresh),
-  plus the parked set (#10, #13–16, #18, #21, #25) and north-star #121.
+  #170 (admin UI revamp), #171 (install.sh --uninstall), north-star #121.
+  The old parked set is resolved (2026-07-14): #10/#25 closed by audit/ADR-0004,
+  #15 (resource+prompt rewriting), #16 (behavior hooks), #18 (guarded
+  non-loopback bind) merged; #14/#21/#13 built as STACKED DRAFT PRs
+  #173→#175/#176 on `feat/14-composite-tools` — unmerged pending live testing,
+  merge #173 first.
 
 ## Hard-won session learnings (2026-07-12 — read before repeating them)
 

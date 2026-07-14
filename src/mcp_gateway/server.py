@@ -648,6 +648,13 @@ async def _mount_backend(  # noqa: PLR0913 — the mount needs the full lifespan
         # round-trip, #105); SOURCE names, before renames apply.
         _reconcile(index, all_tools.get(b.name, []), log)
         proxy.add_transform(transforms)
+        # #15: resource/prompt text rewrites ride the same transform chain (the
+        # holder carries every gateway-owned transform so hot_reload swaps all).
+        holder = [transforms]
+        rp_transform = config_loader.build_resource_prompt_transform(b)
+        if rp_transform is not None:
+            proxy.add_transform(rp_transform)
+            holder.append(rp_transform)
         # Per-endpoint instructions: only this backend's blurb -> its own 2KB.
         proxy.instructions = config_loader.backend_instructions(b, captured_instr)
 
@@ -658,7 +665,7 @@ async def _mount_backend(  # noqa: PLR0913 — the mount needs the full lifespan
         app.router.routes.append(Mount(f"/{b.name}", app=sub))
 
         registry[b.name] = proxy
-        holders[b.name] = [transforms]
+        holders[b.name] = holder
         log.info(
             "backend_mounted",
             backend=b.name,
