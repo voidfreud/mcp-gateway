@@ -107,8 +107,19 @@ stateless = true                   # parsed; shared-session reuse is a
 # description = "Search the web across every provider at once."
 # enabled = true                     # false -> not broadcast (toggle via admin API)
 # always_load = true                 # pin the composite to load upfront (eager)
-# strategy = "all"                   # member selection; "all" = fan out to every
-#                                    # member (the seam smart routing will plug into)
+# strategy = "all"                   # WHICH members get a call (#21):
+#                                    #   "all"     = fan out to every member (default)
+#                                    #   "keyword" = per-member route_patterns regexes
+#                                    #               against the call's arg text
+#                                    #   "llm"     = an OpenRouter model picks a subset
+#
+#   # Router settings — needed by "llm" (all fields) and "keyword" (fallback only):
+#   # [composites.router]
+#   # model = "openai/gpt-4o-mini"   # OpenRouter slug; pick something cheap/fast
+#   # api_key = "${OPENROUTER_KEY}"  # ${ENV} ref, resolved once at boot (required for "llm")
+#   # conditions = "Prefer a single member; pick both only when genuinely ambiguous."
+#   # timeout = 3.0                  # router deadline (s); past it -> fallback
+#   # fallback = "all"               # keyword no-match / ANY llm failure: "all" or a member label
 #
 #   # The composite's OWN parameter schema (authored, not captured):
 #   [[composites.params]]
@@ -127,9 +138,13 @@ stateless = true                   # parsed; shared-session reuse is a
 #   [[composites.members]]
 #   backend = "Exa"
 #   tool = "search_web"
-#   label = "exa"                    # section label in the merged output
+#   label = "exa"                    # section label in the merged output (and the
+#                                    # routing label the strategies select by)
 #   timeout = 30.0                   # seconds; this member alone times out
 #   args = { query = "query" }      # member param = composite param
+#   route_patterns = ["code", "api"] # "keyword": selected when ANY regex matches
+#                                    # the call's arg text (case-insensitive)
+#   route_description = "use for code and API questions"  # "llm": what the router reads
 #
 #   [[composites.members]]
 #   backend = "Tavily"

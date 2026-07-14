@@ -16,19 +16,26 @@ semantics are whatever the member's backend mount already does. Member ``tool``
 names are therefore the EXPOSED (post-transform) names.
 
 The dispatch seam for smart routing (#21): member selection is a pluggable
-STRATEGY (``select_members``). ``"all"`` — today's only strategy — returns
-every member; a router strategy can later pick a per-call SUBSET (it receives
-the composite AND the call args) without touching the fan-out/merge machinery.
+STRATEGY (``select_members``). ``"all"`` fans out to every member; ``"keyword"``
+matches per-member ``route_patterns`` regexes against the call's arg text
+(free, instant); ``"llm"`` asks a cheap OpenRouter model to pick a member
+subset. Routing is BEST-EFFORT by design: a router outage, timeout, or garbage
+reply falls back to the configured ``router.fallback`` (default: all members) —
+it must never break the call.
 """
 
 from __future__ import annotations
 
 import asyncio
 import inspect
+import json
+import re
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import Annotated, Any
 
+import httpx
 from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.tools import Tool
@@ -39,12 +46,16 @@ from mcp_gateway.config_loader import (
     COMPOSITE_ROUTE,
     Composite,
     CompositeMember,
+    CompositeRouter,
     GatewayConfig,
+    expand_env,
 )
 
 __all__ = [
     "COMPOSITE_ROUTE",
+    "OPENROUTER_URL",
     "STRATEGIES",
+    "RouteContext",
     "build_composite_server",
     "build_composite_tool",
     "call_member",
@@ -63,28 +74,195 @@ _PARAM_TYPES: dict[str, type] = {
 
 
 # ---------------------------------------------------------------------------
-# Member selection — the #21 dispatch seam
+# Member selection — the #21 dispatch seam (smart routing)
 # ---------------------------------------------------------------------------
 
+# OpenRouter's OpenAI-compatible chat endpoint — the "llm" strategy's router.
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
-def _strategy_all(comp: Composite, _args: dict) -> list[CompositeMember]:
-    """Fan out to every member (v1 behaviour)."""
+
+@dataclass
+class RouteContext:
+    """Boot-resolved inputs a strategy may need beyond (composite, args).
+
+    ``api_key`` is the RESOLVED OpenRouter key (``${ENV}`` expanded once in
+    :func:`build_composite_tool`, like ``bearer_token`` — never per call).
+    """
+
+    api_key: str | None = None
+    log: Any = None
+
+
+def _fallback_members(comp: Composite) -> list[CompositeMember]:
+    """Where a call goes when routing decides nothing (or the router fails):
+    ``router.fallback`` — every member (``"all"``, the default) or the one
+    member whose label matches (validated to exist at config load)."""
+    fb = comp.router.fallback if comp.router else "all"
+    if fb == "all":
+        return list(comp.members)
+    return [m for m in comp.members if member_label(m) == fb]
+
+
+def _route_text(args: dict) -> str:
+    """The text routing looks at: every supplied arg value, stringified."""
+    return " ".join(str(v) for v in args.values())
+
+
+def _strategy_all(
+    comp: Composite, _args: dict, _ctx: RouteContext
+) -> list[CompositeMember]:
+    """Fan out to every member (v1 behaviour, the default)."""
     return list(comp.members)
 
 
-# strategy name -> (composite, call args) -> members to dispatch to. Smart
-# routing (#21) registers here: a router strategy returns a per-call SUBSET.
-STRATEGIES: dict[str, Callable[[Composite, dict], list[CompositeMember]]] = {
+def _strategy_keyword(
+    comp: Composite, args: dict, ctx: RouteContext
+) -> list[CompositeMember]:
+    """Free, instant heuristic: a member is selected when ANY of its
+    ``route_patterns`` regexes matches the call's arg text (case-insensitive
+    search). No member matched -> the configured fallback."""
+    text = _route_text(args)
+    hits = [
+        m
+        for m in comp.members
+        if any(re.search(p, text, re.IGNORECASE) for p in m.route_patterns)
+    ]
+    if hits:
+        return hits
+    if ctx.log:
+        ctx.log.info(
+            "composite_route_fallback",
+            composite=comp.name,
+            strategy="keyword",
+            reason="no route_pattern matched",
+        )
+    return _fallback_members(comp)
+
+
+def _router_prompt(comp: Composite, args: dict) -> str:
+    """The routing question: member labels + their routing conditions, any
+    composite-level policy text, and the call args. Answer contract: a bare
+    JSON array of member labels."""
+    lines = [
+        f"You route calls for the tool {comp.name!r}: {comp.description}",
+        "",
+        "Members (label: when to route to it):",
+    ]
+    for m in comp.members:
+        cond = m.route_description or "(no routing description)"
+        lines.append(f'- "{member_label(m)}": {cond}')
+    if comp.router and comp.router.conditions:
+        lines += ["", comp.router.conditions]
+    lines += [
+        "",
+        "Call arguments (JSON):",
+        json.dumps(args, default=str),
+        "",
+        "Reply with ONLY a JSON array of the member labels that should "
+        'receive this call, e.g. ["label-a", "label-b"]. Pick at least one.',
+    ]
+    return "\n".join(lines)
+
+
+async def _post_router(router: CompositeRouter, api_key: str, prompt: str) -> str:
+    """One routing request to OpenRouter; returns the message content.
+
+    Factored out so tests mock the HTTP layer here — never call OpenRouter
+    for real in tests. Raises on any HTTP/shape problem; the caller's
+    fallback handles it.
+    """
+    async with httpx.AsyncClient(timeout=router.timeout) as client:
+        resp = await client.post(
+            OPENROUTER_URL,
+            headers={"Authorization": f"Bearer {api_key}"},
+            json={
+                "model": router.model,
+                "temperature": 0,
+                "max_tokens": 200,
+                "messages": [{"role": "user", "content": prompt}],
+            },
+        )
+    resp.raise_for_status()
+    return resp.json()["choices"][0]["message"]["content"]
+
+
+def _parse_router_reply(content: str) -> list[str]:
+    """Strict small parse: the reply must carry ONE JSON array of strings
+    (surrounding prose/code fences tolerated; anything else raises)."""
+    start, end = content.find("["), content.rfind("]")
+    if start < 0 or end <= start:
+        raise ValueError("no JSON array in router reply")
+    labels = json.loads(content[start : end + 1])
+    if not isinstance(labels, list) or not all(isinstance(x, str) for x in labels):
+        raise ValueError("router reply is not a JSON array of strings")
+    return labels
+
+
+async def _strategy_llm(
+    comp: Composite, args: dict, ctx: RouteContext
+) -> list[CompositeMember]:
+    """OpenRouter-backed router: a cheap model reads the call args and each
+    member's routing condition, replies with a JSON array of member labels.
+
+    Best-effort BY CONTRACT: timeout, HTTP error, garbage reply, or an
+    unknown-label reply all fall back to ``router.fallback`` — a router
+    outage must never break the composite call.
+    """
+    router = comp.router
+    assert router is not None and ctx.api_key  # noqa: S101 — enforced at config load + boot
+    try:
+        prompt = _router_prompt(comp, args)
+        async with asyncio.timeout(router.timeout):
+            content = await _post_router(router, ctx.api_key, prompt)
+        labels = set(_parse_router_reply(content))
+        chosen = [m for m in comp.members if member_label(m) in labels]
+        if not chosen:
+            raise ValueError(f"router chose no known member: {sorted(labels)}")
+    except Exception as exc:  # noqa: BLE001 — ANY router failure falls back
+        if ctx.log:
+            ctx.log.warning(
+                "composite_route_fallback",
+                composite=comp.name,
+                strategy="llm",
+                error=f"{type(exc).__name__}: {exc}",
+            )
+        return _fallback_members(comp)
+    if ctx.log:
+        ctx.log.info(
+            "composite_route",
+            composite=comp.name,
+            strategy="llm",
+            chosen=[member_label(m) for m in chosen],
+        )
+    return chosen
+
+
+# strategy name -> (composite, call args, context) -> members to dispatch to
+# (or an awaitable of them). Registering here is the whole plug-in surface.
+STRATEGIES: dict[
+    str,
+    Callable[
+        [Composite, dict, RouteContext],
+        list[CompositeMember] | Awaitable[list[CompositeMember]],
+    ],
+] = {
     "all": _strategy_all,
+    "keyword": _strategy_keyword,
+    "llm": _strategy_llm,
 }
 
 
-def select_members(comp: Composite, args: dict) -> list[CompositeMember]:
+async def select_members(
+    comp: Composite, args: dict, ctx: RouteContext | None = None
+) -> list[CompositeMember]:
     """The members this call dispatches to, per the composite's strategy."""
     strategy = STRATEGIES.get(comp.strategy)
     if strategy is None:  # unreachable via config (Literal), guards drift
         raise ToolError(f"composite {comp.name!r}: unknown strategy {comp.strategy!r}")
-    return strategy(comp, args)
+    selected = strategy(comp, args, ctx or RouteContext())
+    if inspect.isawaitable(selected):
+        selected = await selected
+    return selected
 
 
 # ---------------------------------------------------------------------------
@@ -165,13 +343,15 @@ def merge_results(results: list[dict]) -> str:
     return "\n\n".join(parts)
 
 
-async def run_composite(comp: Composite, args: dict, registry: dict, log) -> str:
+async def run_composite(
+    comp: Composite, args: dict, registry: dict, log, api_key: str | None = None
+) -> str:
     """Select members (strategy seam), fan out concurrently, merge.
 
     Raises :class:`ToolError` only when EVERY member failed — a partial
     failure returns the merge with the failures labeled inside it.
     """
-    members = select_members(comp, args)
+    members = await select_members(comp, args, RouteContext(api_key=api_key, log=log))
     results = list(
         await asyncio.gather(*(call_member(m, args, registry) for m in members))
     )
@@ -203,8 +383,17 @@ def build_composite_tool(comp: Composite, registry: dict, log) -> Tool:
     the signature (verified against FastMCP 3.4.4).
     """
 
+    # #21: the "llm" strategy's OpenRouter key is a ${ENV} reference resolved
+    # ONCE here — at boot (or admin rebuild), like bearer_token. A missing
+    # secret fails the mount loudly instead of failing every routed call.
+    api_key = (
+        expand_env(comp.router.api_key)
+        if comp.strategy == "llm" and comp.router and comp.router.api_key
+        else None
+    )
+
     async def impl(**kwargs: Any) -> str:
-        return await run_composite(comp, kwargs, registry, log)
+        return await run_composite(comp, kwargs, registry, log, api_key=api_key)
 
     sig_params: list[inspect.Parameter] = []
     annotations: dict[str, Any] = {}

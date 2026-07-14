@@ -3,7 +3,10 @@ schema synthesis, the #21 dispatch seam, and the admin list/toggle routes."""
 
 from __future__ import annotations
 
+import json
+
 import anyio
+import httpx
 import pytest
 import structlog
 from fastmcp import Client, FastMCP
@@ -247,16 +250,285 @@ def test_all_members_failed_raises_tool_error():
 
 def test_strategy_all_selects_every_member():
     comp = _comp(_cfg())
-    assert composite.select_members(comp, {"query": "q"}) == comp.members
+    assert anyio.run(composite.select_members, comp, {"query": "q"}) == comp.members
 
 
 def test_strategy_seam_is_pluggable(monkeypatch):
-    """A future router registers a strategy that picks a per-call SUBSET."""
+    """A registered strategy picks a per-call SUBSET (sync or async both work)."""
     comp = _comp(_cfg())
-    monkeypatch.setitem(composite.STRATEGIES, "all", lambda c, args: [c.members[0]])
+    monkeypatch.setitem(
+        composite.STRATEGIES, "all", lambda c, args, ctx: [c.members[0]]
+    )
     merged = anyio.run(composite.run_composite, comp, {"query": "q"}, _registry(), log)
     assert "exa results for q" in merged
     assert "tavily" not in merged
+
+
+# --- smart routing (#21): config validation -----------------------------------
+
+
+def _routed_raw(strategy: str = "keyword", **router) -> dict:
+    """The base composite reshaped for routing tests: per-member patterns and
+    route descriptions, plus an optional [composites.router] table."""
+    raw = _base_raw()
+    c = raw["composites"][0]
+    c["strategy"] = strategy
+    c["members"][0]["route_patterns"] = ["code", r"regex(es)?"]
+    c["members"][0]["route_description"] = "use for code and API questions"
+    c["members"][1]["route_patterns"] = ["news", "current events"]
+    c["members"][1]["route_description"] = "use for news and current events"
+    if router or strategy == "llm":
+        c["router"] = {"api_key": "${OPENROUTER_KEY}", **router}
+    return raw
+
+
+def test_keyword_strategy_config_parses_and_roundtrips():
+    import tomllib
+
+    cfg = cl.GatewayConfig.model_validate(_routed_raw(fallback="tavily"))
+    c = _comp(cfg)
+    assert c.strategy == "keyword"
+    assert c.members[0].route_patterns == ["code", r"regex(es)?"]
+    assert c.router.fallback == "tavily"
+    reparsed = cl.GatewayConfig.model_validate(tomllib.loads(cl.dump_toml(cfg)))
+    assert reparsed == cfg
+
+
+def test_llm_strategy_config_parses_with_defaults():
+    cfg = cl.GatewayConfig.model_validate(_routed_raw("llm"))
+    r = _comp(cfg).router
+    assert r.api_key == "${OPENROUTER_KEY}"
+    assert r.model == "openai/gpt-4o-mini"
+    assert r.timeout == 3.0 and r.fallback == "all"
+
+
+def test_llm_strategy_without_api_key_rejected():
+    raw = _routed_raw("llm")
+    del raw["composites"][0]["router"]["api_key"]
+    with pytest.raises(cl.ConfigError, match="table with an api_key"):
+        cl.GatewayConfig.model_validate(raw)
+    del raw["composites"][0]["router"]
+    with pytest.raises(cl.ConfigError, match="api_key"):
+        cl.GatewayConfig.model_validate(raw)
+
+
+def test_keyword_strategy_without_any_patterns_rejected():
+    raw = _routed_raw()
+    for m in raw["composites"][0]["members"]:
+        m.pop("route_patterns", None)
+    with pytest.raises(cl.ConfigError, match="route_patterns on at least one member"):
+        cl.GatewayConfig.model_validate(raw)
+
+
+def test_invalid_route_pattern_rejected():
+    raw = _routed_raw()
+    raw["composites"][0]["members"][0]["route_patterns"] = ["[unclosed"]
+    with pytest.raises(cl.ConfigError, match="invalid route_pattern"):
+        cl.GatewayConfig.model_validate(raw)
+
+
+def test_unknown_fallback_label_rejected():
+    raw = _routed_raw(fallback="ghost")
+    with pytest.raises(cl.ConfigError, match="matches no member label"):
+        cl.GatewayConfig.model_validate(raw)
+
+
+def test_unknown_strategy_rejected():
+    raw = _base_raw()
+    raw["composites"][0]["strategy"] = "vibes"
+    with pytest.raises(Exception, match="vibes"):
+        cl.GatewayConfig.model_validate(raw)
+
+
+# --- smart routing (#21): keyword strategy ------------------------------------
+
+
+def _routed_comp(strategy: str = "keyword", **router) -> cl.Composite:
+    return _comp(cl.GatewayConfig.model_validate(_routed_raw(strategy, **router)))
+
+
+def test_keyword_routes_matching_member_only():
+    comp = _routed_comp()
+    merged = anyio.run(
+        composite.run_composite,
+        comp,
+        {"query": "python regexes explained"},
+        _registry(),
+        log,
+    )
+    assert "exa results for" in merged
+    assert "tavily" not in merged
+
+
+def test_keyword_match_is_case_insensitive_and_can_pick_several():
+    comp = _routed_comp()
+    selected = anyio.run(composite.select_members, comp, {"query": "CODE in the NEWS"})
+    assert selected == comp.members  # both matched
+
+
+def test_keyword_no_match_falls_back_to_all():
+    comp = _routed_comp()
+    selected = anyio.run(composite.select_members, comp, {"query": "gardening tips"})
+    assert selected == comp.members
+
+
+def test_keyword_no_match_falls_back_to_designated_member():
+    comp = _routed_comp(fallback="tavily")
+    selected = anyio.run(composite.select_members, comp, {"query": "gardening tips"})
+    assert [composite.member_label(m) for m in selected] == ["tavily"]
+
+
+# --- smart routing (#21): llm strategy (HTTP layer always mocked) -------------
+
+
+def _llm_ctx() -> composite.RouteContext:
+    return composite.RouteContext(api_key="sk-or-test", log=log)
+
+
+def test_llm_routes_the_chosen_subset(monkeypatch):
+    """Full HTTP layer via httpx.MockTransport: URL, auth header, payload,
+    and the reply's member subset all verified — OpenRouter never called."""
+    comp = _routed_comp("llm")
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["url"] = str(request.url)
+        seen["auth"] = request.headers.get("authorization")
+        seen["payload"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": '["tavily"]'}}]},
+        )
+
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        composite.httpx,
+        "AsyncClient",
+        lambda **kw: real_client(transport=httpx.MockTransport(handler), **kw),
+    )
+    selected = anyio.run(composite.select_members, comp, {"query": "q"}, _llm_ctx())
+    assert [composite.member_label(m) for m in selected] == ["tavily"]
+    assert seen["url"] == composite.OPENROUTER_URL
+    assert seen["auth"] == "Bearer sk-or-test"
+    assert seen["payload"]["model"] == "openai/gpt-4o-mini"
+    prompt = seen["payload"]["messages"][0]["content"]
+    assert "use for news and current events" in prompt  # route_description
+    assert '"q"' in prompt  # call args reach the router
+
+
+def test_llm_prompt_carries_conditions_text(monkeypatch):
+    comp = _routed_comp("llm", conditions="Prefer the cheapest single member.")
+    assert "Prefer the cheapest single member." in composite._router_prompt(
+        comp, {"query": "q"}
+    )
+
+
+def test_llm_timeout_falls_back_to_all(monkeypatch):
+    comp = _routed_comp("llm", timeout=0.05)
+
+    async def slow(router, api_key, prompt):
+        import asyncio
+
+        await asyncio.sleep(1.0)
+        return "[]"
+
+    monkeypatch.setattr(composite, "_post_router", slow)
+    selected = anyio.run(composite.select_members, comp, {"query": "q"}, _llm_ctx())
+    assert selected == comp.members
+
+
+def test_llm_http_error_falls_back(monkeypatch):
+    comp = _routed_comp("llm")
+
+    async def boom(router, api_key, prompt):
+        raise httpx.HTTPStatusError(
+            "502",
+            request=httpx.Request("POST", composite.OPENROUTER_URL),
+            response=httpx.Response(502),
+        )
+
+    monkeypatch.setattr(composite, "_post_router", boom)
+    selected = anyio.run(composite.select_members, comp, {"query": "q"}, _llm_ctx())
+    assert selected == comp.members
+
+
+@pytest.mark.parametrize(
+    "garbage",
+    [
+        "sure, I'd route this to tavily!",  # no JSON array at all
+        '{"member": "tavily"}',  # JSON but not an array
+        "[1, 2, 3]",  # array, wrong element type
+        '["ghost-member"]',  # valid shape, unknown label
+        "[unterminated",  # broken JSON
+    ],
+)
+def test_llm_garbage_reply_falls_back(monkeypatch, garbage):
+    comp = _routed_comp("llm")
+
+    async def reply(router, api_key, prompt):
+        return garbage
+
+    monkeypatch.setattr(composite, "_post_router", reply)
+    selected = anyio.run(composite.select_members, comp, {"query": "q"}, _llm_ctx())
+    assert selected == comp.members
+
+
+def test_llm_failure_honors_designated_fallback(monkeypatch):
+    comp = _routed_comp("llm", fallback="tavily")
+
+    async def reply(router, api_key, prompt):
+        return "no idea"
+
+    monkeypatch.setattr(composite, "_post_router", reply)
+    selected = anyio.run(composite.select_members, comp, {"query": "q"}, _llm_ctx())
+    assert [composite.member_label(m) for m in selected] == ["tavily"]
+
+
+def test_llm_reply_with_prose_around_array_parses():
+    labels = composite._parse_router_reply('Routing:\n```json\n["a", "b"]\n```')
+    assert labels == ["a", "b"]
+
+
+def test_build_tool_resolves_api_key_at_boot(monkeypatch):
+    """The ${ENV} ref resolves ONCE in build_composite_tool (boot), and the
+    resolved key reaches the router request — end-to-end through the tool."""
+    monkeypatch.setenv("OPENROUTER_KEY", "sk-or-resolved")
+    comp = _routed_comp("llm")
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["auth"] = request.headers.get("authorization")
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": '["exa/search_web"]'}}]}
+        )
+
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        composite.httpx,
+        "AsyncClient",
+        lambda **kw: real_client(transport=httpx.MockTransport(handler), **kw),
+    )
+    tool = composite.build_composite_tool(comp, _registry(), log)
+
+    async def go():
+        server = FastMCP(name="t")
+        server.add_tool(tool)
+        async with Client(server) as c:
+            res = await c.call_tool("web_search", {"query": "q"})
+            return res.content[0].text
+
+    merged = anyio.run(go)
+    assert seen["auth"] == "Bearer sk-or-resolved"
+    assert "exa results for q" in merged
+    assert "tavily" not in merged
+
+
+def test_build_tool_missing_secret_fails_loudly(monkeypatch):
+    monkeypatch.delenv("OPENROUTER_KEY", raising=False)
+    monkeypatch.setenv("MCP_GATEWAY_SECRETS", "/nonexistent/secrets.env")
+    comp = _routed_comp("llm")
+    with pytest.raises(cl.ConfigError, match="OPENROUTER_KEY"):
+        composite.build_composite_tool(comp, {}, log)
 
 
 # --- tool/server build -------------------------------------------------------

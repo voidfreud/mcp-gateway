@@ -142,7 +142,8 @@ enable/disable toggle applies live.
 | `description` | string | required | What Claude reads to decide when to call it. |
 | `enabled` | boolean | `true` | `false` drops the composite from the listing. |
 | `always_load` | boolean | `false` | Pin the composite tool to load upfront (eager). |
-| `strategy` | string | `"all"` | Member selection per call. `"all"` fans out to every member; this is the seam a future smart router plugs into. |
+| `strategy` | string | `"all"` | Member selection per call: `"all"`, `"keyword"`, or `"llm"` (see [Smart routing](#smart-routing-composite-strategies)). |
+| `router` | table | unset | `[composites.router]` — routing settings for `"keyword"`/`"llm"` (below). |
 | `params` | list | empty | The composite's own parameter schema (`[[composites.params]]`, below). |
 | `members` | list | required, min 1 | The member tools (`[[composites.members]]`, below). |
 
@@ -168,6 +169,45 @@ Authored schema, not a rewrite — there is no backend schema behind these.
 | `args` | table | empty | `member_param = "composite_param"` — the value Claude supplied for the composite param is forwarded under the member's own parameter name. An omitted optional composite param is simply not forwarded. |
 | `static_args` | table | empty | `member_param = value` — a fixed scalar injected on every call (same idea as a hidden param's injected `default`). |
 | `timeout` | number | `30.0` | Seconds this member gets before it reports `timeout` in the merge. |
+| `route_patterns` | list of strings | empty | `"keyword"` strategy only: this member is selected when **any** of these regexes matches the call's argument text (case-insensitive search). |
+| `route_description` | string or unset | unset | `"llm"` strategy only: the routing condition the router model reads for this member ("use for code and API questions"). |
+
+### Smart routing (composite strategies)
+
+`strategy` decides **which members** receive a given call:
+
+- **`"all"`** (default) — fan out to every member. No router table needed.
+- **`"keyword"`** — free, instant heuristic. Every supplied argument value is
+  stringified and joined; a member is selected when any of its
+  `route_patterns` regexes matches that text (case-insensitive). Requires
+  `route_patterns` on at least one member. When **no** member matches, the
+  call goes to the configured `fallback`.
+- **`"llm"`** — an OpenRouter-backed router. The gateway POSTs one small
+  chat-completion to `https://openrouter.ai/api/v1/chat/completions` (the
+  configured `model`) with the call arguments, each member's
+  `route_description`, and the optional `conditions` policy text, and expects
+  back a JSON array of member labels. Routing is **best-effort by contract**:
+  a router timeout, HTTP error, unparseable reply, or a reply naming no known
+  member falls back to `fallback` — a router outage never breaks the call
+  (watch the `composite_route_fallback` log line). Requires the `router`
+  table with an `api_key`.
+
+An unknown `strategy` value, an `"llm"` composite without `router.api_key`, a
+`"keyword"` composite with no `route_patterns` anywhere, an invalid regex, or
+a `fallback` naming no member label are all **rejected at config load**.
+
+### Router settings (`[composites.router]`)
+
+One table per composite. `fallback` also applies to `"keyword"`; the other
+fields are `"llm"`-only.
+
+| Key | Type | Default | Meaning |
+|-----|------|---------|---------|
+| `model` | string | `"openai/gpt-4o-mini"` | OpenRouter model slug. Pick something cheap and fast — the router only ever emits a tiny JSON array. |
+| `api_key` | string | required for `"llm"` | The OpenRouter API key as a `${ENV}` reference (see [Secrets](#secrets)) — resolved **once at boot**, like `bearer_token`; the raw value never sits in the config or the process environment. |
+| `conditions` | string or unset | unset | Extra routing policy text appended to the router prompt ("prefer a single member", "route ambiguous calls to both", …). |
+| `timeout` | number | `3.0` | Router deadline in seconds. Kept short on purpose: past it the call proceeds with `fallback` instead of stalling. |
+| `fallback` | string | `"all"` | Where a call goes when routing decides nothing (keyword no-match) or the router fails (every `"llm"` failure mode): `"all"` = every member, or one member's label. |
 
 ## Secrets
 

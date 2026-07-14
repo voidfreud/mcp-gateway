@@ -22,6 +22,7 @@ classifiers = [
 ]
 dependencies = [
     "fastmcp>=3.4.4",
+    "httpx>=0.27",  # #21 llm routing (already a fastmcp transitive; declared for direct use)
     "pydantic>=2.13.4",
     "structlog>=26.1.0",
     "tomli-w>=1.2.0",

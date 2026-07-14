@@ -283,6 +283,12 @@ class CompositeMember(BaseModel, extra="forbid"):
     tool: str
     # Label used in the merged output ("## <label> — ok"); default backend/tool.
     label: str | None = None
+    # #21 "keyword" strategy: this member is selected when ANY of these regexes
+    # matches the call's arg text (case-insensitive search). Ignored by "all".
+    route_patterns: list[str] = Field(default_factory=list)
+    # #21 "llm" strategy: the routing condition the router model reads for this
+    # member ("use for code questions", …). Ignored by "all" and "keyword".
+    route_description: str | None = None
     # member param name -> composite param name (the value Claude supplied for
     # that composite param is forwarded under the member's own param name).
     args: dict[str, str] = Field(default_factory=dict)
@@ -301,7 +307,39 @@ class CompositeMember(BaseModel, extra="forbid"):
                 f"composite member {self.backend}/{self.tool}: param(s) "
                 f"{sorted(overlap)} appear in both args and static_args"
             )
+        for pat in self.route_patterns:
+            try:
+                re.compile(pat)
+            except re.error as exc:
+                raise ConfigError(
+                    f"composite member {self.backend}/{self.tool}: invalid "
+                    f"route_pattern {pat!r}: {exc}"
+                ) from None
         return self
+
+
+class CompositeRouter(BaseModel, extra="forbid"):
+    """Per-composite routing settings (#21) — the ``[composites.router]`` table.
+
+    Used by the ``"keyword"`` strategy (``fallback`` only) and the ``"llm"``
+    strategy (all fields). The ``api_key`` is a ``${ENV}`` reference resolved
+    ONCE at boot via :func:`expand_env` — like ``bearer_token``, the raw value
+    never sits in the config file and stays out of ``os.environ``.
+    """
+
+    # OpenRouter model slug for the "llm" strategy — pick something cheap/fast;
+    # the router only ever emits a tiny JSON array.
+    model: str = "openai/gpt-4o-mini"
+    # ${ENV} reference to the OpenRouter API key. Required for strategy="llm".
+    api_key: str | None = None
+    # Extra routing policy text appended to the router prompt (llm only).
+    conditions: str | None = None
+    # Router deadline in seconds (llm only). Kept SHORT on purpose: a router
+    # outage falls back, it never stalls the composite call.
+    timeout: float = Field(default=3.0, gt=0)
+    # Where a call goes when routing decides nothing: "all" (every member) or
+    # one member's label. Applies to keyword no-match AND every llm failure.
+    fallback: str = "all"
 
 
 class Composite(BaseModel, extra="forbid"):
@@ -318,10 +356,12 @@ class Composite(BaseModel, extra="forbid"):
     enabled: bool = True
     # Pin the composite tool to load upfront (same lever as ToolOverride).
     always_load: bool = False
-    # Member-selection strategy — THE dispatch seam smart routing (#21) plugs
-    # into. "all" = fan out to every member; a future router strategy picks a
-    # subset per call. Only "all" exists today.
-    strategy: Literal["all"] = "all"
+    # Member-selection strategy (#21). "all" = fan out to every member;
+    # "keyword" = per-member route_patterns regexes against the call's arg
+    # text; "llm" = an OpenRouter-backed router picks a subset per call.
+    strategy: Literal["all", "keyword", "llm"] = "all"
+    # Router settings for "keyword"/"llm" (see CompositeRouter).
+    router: CompositeRouter | None = None
     params: list[CompositeParam] = Field(default_factory=list)
     members: list[CompositeMember]
 
@@ -347,6 +387,27 @@ class Composite(BaseModel, extra="forbid"):
                 raise ConfigError(
                     f"composite {self.name!r}: member {m.backend}/{m.tool} maps "
                     f"undeclared composite param(s): {sorted(set(unknown))}"
+                )
+        # #21 strategy plumbing: fail at LOAD, never at call time.
+        if self.strategy == "llm" and (self.router is None or not self.router.api_key):
+            raise ConfigError(
+                f"composite {self.name!r}: strategy 'llm' needs a "
+                f"[composites.router] table with an api_key (a ${{ENV}} reference)"
+            )
+        if self.strategy == "keyword" and not any(
+            m.route_patterns for m in self.members
+        ):
+            raise ConfigError(
+                f"composite {self.name!r}: strategy 'keyword' needs "
+                f"route_patterns on at least one member"
+            )
+        if self.router is not None and self.router.fallback != "all":
+            labels = {m.label or f"{m.backend}/{m.tool}" for m in self.members}
+            if self.router.fallback not in labels:
+                raise ConfigError(
+                    f"composite {self.name!r}: router fallback "
+                    f"{self.router.fallback!r} matches no member label "
+                    f'(use "all" or one of {sorted(labels)})'
                 )
         return self
 
@@ -713,8 +774,19 @@ def to_raw(cfg: GatewayConfig) -> dict:  # noqa: PLR0915 — field-by-field TOML
             d["enabled"] = False
         if c.always_load:
             d["always_load"] = True
-        if c.strategy != "all":  # future-proof; only "all" exists today
+        if c.strategy != "all":
             d["strategy"] = c.strategy
+        if c.router is not None:  # #21 — [composites.router]
+            rd: dict = {"model": c.router.model}
+            if c.router.api_key is not None:
+                rd["api_key"] = c.router.api_key
+            if c.router.conditions is not None:
+                rd["conditions"] = c.router.conditions
+            if c.router.timeout != 3.0:  # noqa: PLR2004 — the field default above
+                rd["timeout"] = c.router.timeout
+            if c.router.fallback != "all":
+                rd["fallback"] = c.router.fallback
+            d["router"] = rd
         params = []
         for p in c.params:
             pd: dict = {"name": p.name, "type": p.type}
@@ -732,6 +804,10 @@ def to_raw(cfg: GatewayConfig) -> dict:  # noqa: PLR0915 — field-by-field TOML
             md: dict = {"backend": m.backend, "tool": m.tool}
             if m.label:
                 md["label"] = m.label
+            if m.route_patterns:  # #21 keyword strategy
+                md["route_patterns"] = list(m.route_patterns)
+            if m.route_description is not None:  # #21 llm strategy
+                md["route_description"] = m.route_description
             if m.args:
                 md["args"] = dict(m.args)
             if m.static_args:

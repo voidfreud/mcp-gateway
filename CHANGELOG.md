@@ -16,6 +16,17 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   every override applies. Member selection is a pluggable strategy (`"all"`
   today) — the dispatch seam smart routing (#21) will build on. Admin API:
   `GET /admin/api/composites` and a live enable/disable toggle. (#14)
+- **Smart routing** — per-composite pluggable member selection (`strategy`):
+  `"keyword"` matches per-member `route_patterns` regexes against the call's
+  argument text (free, instant); `"llm"` asks a cheap OpenRouter model
+  (`[composites.router]`: model, `${ENV}` api_key resolved once at boot,
+  conditions text, short timeout) to pick a member subset from each member's
+  `route_description`. Routing is best-effort by contract: keyword no-match
+  and every llm failure mode (timeout, HTTP error, garbage reply, unknown
+  labels) fall back to `router.fallback` — all members by default, or one
+  designated member — so a router outage never breaks the call. Misconfig
+  (unknown strategy, llm without api_key, bad regex, unknown fallback label)
+  is rejected at config load. (#21)
 
 ## [1.0.0] - 2026-07-12
 
