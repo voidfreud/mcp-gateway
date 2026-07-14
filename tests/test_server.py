@@ -1623,6 +1623,102 @@ def test_install_sh_is_executable_and_parses():
     assert proc.returncode == 0, proc.stderr
 
 
+# ---------------------------------------------------------------------------
+# #171 — install.sh --uninstall: symmetric one-command removal
+# ---------------------------------------------------------------------------
+
+
+def _install_sh(args, home, loaded):
+    """Run install.sh with a sandbox $HOME and a fake launchctl on PATH.
+
+    `loaded` controls what the fake `launchctl print` reports, so the script's
+    bootout branch is exercised deterministically without launchd (works in
+    Linux CI too, where launchctl does not exist)."""
+    fake_bin = home / "fakebin"
+    fake_bin.mkdir(exist_ok=True)
+    lc = fake_bin / "launchctl"
+    lc.write_text("#!/bin/sh\nexit 0\n" if loaded else "#!/bin/sh\nexit 1\n")
+    lc.chmod(0o755)
+    env = dict(os.environ)
+    env["HOME"] = str(home)
+    env["PATH"] = f"{fake_bin}:{env['PATH']}"
+    return subprocess.run(
+        ["/bin/bash", str(REPO_ROOT / "install.sh"), *args],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+    )
+
+
+def _fake_install(home):
+    """Lay down what install.sh creates: the rendered plist and the symlink."""
+    agents = home / "Library" / "LaunchAgents"
+    agents.mkdir(parents=True)
+    plist = agents / "com.void.mcp-gateway.plist"
+    plist.write_text("<plist/>")
+    opt = home / ".local" / "opt"
+    opt.mkdir(parents=True)
+    link = opt / "mcp-gateway"
+    link.symlink_to(REPO_ROOT)
+    return plist, link
+
+
+def test_uninstall_dry_run_renders_actions_and_keeps_everything(tmp_path):
+    # Mirrors the installer's --dry-run contract: every action is printed,
+    # nothing is touched, and the kept-data + Claude Code hints are explicit.
+    plist, link = _fake_install(tmp_path)
+    proc = _install_sh(["--uninstall", "--dry-run"], tmp_path, loaded=True)
+    assert proc.returncode == 0, proc.stderr
+    out = proc.stdout
+    assert "[dry-run] launchctl bootout" in out
+    assert f"[dry-run] rm {plist}" in out
+    assert f"[dry-run] rm {link}" in out
+    # user data is listed as KEPT, never as an action
+    assert ".config/mcp-gateway" in out
+    assert ".local/state/mcp-gateway" in out
+    assert "rm -rf" not in out
+    assert "claude mcp remove gateway-<name>" in out
+    assert "nothing was changed" in out
+    assert plist.exists() and link.is_symlink()
+
+
+def test_uninstall_purge_dry_run_adds_data_dirs(tmp_path):
+    _fake_install(tmp_path)
+    proc = _install_sh(["--uninstall", "--purge", "--dry-run"], tmp_path, loaded=True)
+    assert proc.returncode == 0, proc.stderr
+    assert f"[dry-run] rm -rf {tmp_path}/.config/mcp-gateway" in proc.stdout
+    assert f"[dry-run] rm -rf {tmp_path}/.local/state/mcp-gateway" in proc.stdout
+
+
+def test_uninstall_removes_plist_and_symlink_but_keeps_data(tmp_path):
+    plist, link = _fake_install(tmp_path)
+    config = tmp_path / ".config" / "mcp-gateway"
+    config.mkdir(parents=True)
+    state = tmp_path / ".local" / "state" / "mcp-gateway"
+    state.mkdir(parents=True)
+    proc = _install_sh(["--uninstall"], tmp_path, loaded=False)
+    assert proc.returncode == 0, proc.stderr
+    assert not plist.exists()
+    assert not link.exists() and not link.is_symlink()
+    # user data survives a plain --uninstall
+    assert config.is_dir() and state.is_dir()
+    assert "uninstall complete" in proc.stdout
+
+
+def test_uninstall_with_nothing_installed_exits_cleanly(tmp_path):
+    # Idempotent: a second run (or a run with no install present) is a no-op.
+    proc = _install_sh(["--uninstall"], tmp_path, loaded=False)
+    assert proc.returncode == 0, proc.stderr
+    assert "nothing to do" in proc.stdout
+
+
+def test_install_sh_rejects_unknown_flags(tmp_path):
+    proc = _install_sh(["--bogus"], tmp_path, loaded=False)
+    assert proc.returncode == 2
+    assert "usage:" in proc.stderr
+
+
 def test_register_carries_bearer_header_and_redacts_it(tmp_path, monkeypatch):
     """#26 x #45: a bearer-protected gateway registers WITH the resolved
     Authorization header (or every call would 401), and the response never
