@@ -543,6 +543,47 @@ def test_built_tool_schema_matches_config():
     assert schema["properties"]["limit"] == {"default": 5, "type": "integer"}
 
 
+def test_optional_param_without_default_emits_valid_schema():
+    """Review finding: the ordinary 'required = false, no default' pattern used
+    to emit {"type": "string", "default": null} — self-contradictory JSON
+    Schema. The type must admit null when the default is null."""
+    raw = _base_raw()
+    raw["composites"][0]["params"].append({"name": "lang", "required": False})
+    comp = _comp(cl.GatewayConfig.model_validate(raw))
+    schema = composite.build_composite_tool(comp, {}, log).parameters
+    lang = schema["properties"]["lang"]
+    assert lang["default"] is None
+    types = lang.get("anyOf") or [lang]
+    assert {"type": "null"} in types  # null is a legal value for the type
+    assert "lang" not in schema["required"]
+
+
+def test_param_default_must_match_declared_type():
+    raw = _base_raw()
+    raw["composites"][0]["params"].append(
+        {"name": "n", "type": "integer", "required": False, "default": "five"}
+    )
+    with pytest.raises(cl.ConfigError, match="does not match type"):
+        cl.GatewayConfig.model_validate(raw)
+
+
+def test_param_bool_default_rejected_for_integer_type():
+    # isinstance(True, int) is True in Python but not in JSON Schema
+    raw = _base_raw()
+    raw["composites"][0]["params"].append(
+        {"name": "n", "type": "integer", "required": False, "default": True}
+    )
+    with pytest.raises(cl.ConfigError, match="does not match type"):
+        cl.GatewayConfig.model_validate(raw)
+
+
+def test_member_tool_name_must_not_be_blank():
+    raw = _base_raw()
+    raw["composites"][0]["members"][0]["tool"] = "  "
+    with pytest.raises(cl.ConfigError, match="must not be empty"):
+        cl.GatewayConfig.model_validate(raw)
+
+
 def test_always_load_pins_composite_tool():
     raw = _base_raw()
     raw["composites"][0]["always_load"] = True
