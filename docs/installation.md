@@ -22,8 +22,8 @@ separately. To install `uv`:
 curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-To register backends from inside the admin UI (the one-click "Register in CC"
-button), you also need the `claude` command line tool (Claude Code) available.
+To register backends from inside the admin UI (the one-click "Register"
+button (Claude Code cluster)), you also need the `claude` command line tool (Claude Code) available.
 That is optional — you can always register backends by hand.
 
 ## Path A — clone and install as a login service (macOS)
@@ -159,28 +159,54 @@ the path it reports should now be the new location.
 
 ## Uninstalling
 
-**Path A (login service):**
+**Path A (login service)** — one command, symmetric with the install:
 
 ```bash
-# stop and unload the service
-launchctl bootout gui/$(id -u)/com.void.mcp-gateway
+./install.sh --uninstall
+```
 
-# remove the installed service file and the stable symlink
+That boots out the LaunchAgent, removes the installed service file
+(`~/Library/LaunchAgents/com.void.mcp-gateway.plist`) and the stable symlink
+(`~/.local/opt/mcp-gateway`), and prints exactly what was removed and what was
+deliberately kept. It is idempotent — running it twice, or without an install
+present, exits cleanly saying so. Preview with `--dry-run`.
+
+Your data is **kept** by default: config (`./config.toml` in the clone and/or
+`~/.config/mcp-gateway/`) and runtime state — logs and config backups — under
+`~/.local/state/mcp-gateway/`. To delete the config and state directories too,
+add `--purge` (asks for confirmation; irreversible — the backups live there):
+
+```bash
+./install.sh --uninstall --purge
+```
+
+If you registered backends in Claude Code, remove those yourself — the script
+cannot do it safely and will remind you:
+
+```bash
+claude mcp remove gateway-<name>   # for each registered backend
+```
+
+(or use the admin UI's remove buttons *before* uninstalling). Then delete the
+clone if you want.
+
+The manual recipe, for reference (what `--uninstall` does):
+
+```bash
+launchctl bootout gui/$(id -u)/com.void.mcp-gateway
 rm ~/Library/LaunchAgents/com.void.mcp-gateway.plist
 rm ~/.local/opt/mcp-gateway
 ```
-
-Then delete the clone if you want. If you registered backends in Claude Code,
-remove those too (`claude mcp remove gateway-<name>` for each, or use the admin
-UI's remove buttons before uninstalling). Runtime state under
-`~/.local/state/mcp-gateway/` and config under the clone / `~/.config/mcp-gateway/`
-can be deleted by hand.
 
 **Path B (standalone tool):**
 
 ```bash
 uv tool uninstall mcp-gateway
 ```
+
+This removes only the `mcp-gateway` binary; the same data notes apply —
+`~/.config/mcp-gateway/`, `~/.local/state/mcp-gateway/`, and any Claude Code
+registrations stay until you remove them by hand.
 
 ## Next steps
 

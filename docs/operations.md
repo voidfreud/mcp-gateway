@@ -104,6 +104,17 @@ Everything the gateway persists lives under `~/.local/state/mcp-gateway/`:
   the immutable baseline the UI diffs your overrides against, and the source for
   "reset to default." It is re-captured on connect, on a backend's own change
   notification, on admin page load (throttled), and on **Re-inspect**.
+  The connect-time re-capture is **age-gated**: a baseline younger than
+  `baseline_max_age` (default 24 h) is kept as-is, so a routine restart does
+  not cold-start every slow stdio backend twice — the log line for a skip is
+  `baseline_fresh_skipped`. Set `baseline_max_age = 0` to re-capture on every
+  mount, or press **Re-inspect** for an immediate refresh (never gated). See
+  [configuration.md](configuration.md#gateway-settings-top-level).
+  A boot also sweeps `defaults/` files for backends no longer in the config —
+  but refuses (`orphan_sweep_refused` in the log) when more than half the
+  files would go, which means the running config isn't the one that captured
+  them (e.g. a scratch daemon pointed at a test config while sharing the real
+  state dir). Nothing is deleted in that case.
 
 ## Recovering from a bad config
 
@@ -127,7 +138,7 @@ The starter/default config ships inside the package and seeds a fresh
 | `/health` doesn't respond at all | Daemon not running | `launchctl print gui/$(id -u)/com.void.mcp-gateway` for status; `launchctl kickstart -k …` to (re)start. Check `gateway.log` and `err.log`. |
 | `/health` green but from the wrong path | Ghost process from an old/moved clone | Re-run `./install.sh` from the current clone location. |
 | `/ready` returns 503; a backend shows red in the UI | An enabled backend failed to connect or mount | Check that backend's URL/command and its secret; use **Re-inspect** in the UI, or read the error on its status dot. Other backends keep working. |
-| Every call to the gateway returns 401 | A bearer token is set but the caller isn't sending it | Register the backend in Claude Code with the `Authorization` header (the UI's **Register in CC** does this automatically), or paste the token when the admin UI prompts. See [security.md](security.md). |
+| Every call to the gateway returns 401 | A bearer token is set but the caller isn't sending it | Register the backend in Claude Code with the `Authorization` header (the UI's **Register** button in the Claude Code cluster does this automatically), or paste the token when the admin UI prompts. See [security.md](security.md). |
 | Claude Code still shows the old tool name/description after an edit | The session hasn't re-listed the backend's tools yet | Reconnect the MCP server, start a new session, or trigger a tool use. Text edits are live in the gateway immediately, but a connected session caches the old broadcast. |
 | A tool you renamed can't be saved | Its name (or a deliberately identical description) collides with another tool | Pick a unique name, or turn on **auto-uniquify** in the ⚙ Gateway header for bulk renames. |
 | Claude sees a backend's tools twice | The backend is registered *both* directly and through the gateway | Remove the direct registration so Claude sees only the gateway's rewritten version. |

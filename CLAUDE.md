@@ -6,12 +6,18 @@ A local MCP proxy daemon (FastMCP v3) between Claude Code and backend MCP
 servers. Most MCP servers ship sloppy broadcast text — vague names, empty
 instructions, useless param docs — so agents can't use them. The gateway
 rewrites EVERYTHING a backend broadcasts (tool name/title/description, every
-param name/description, server instructions, pinning, hide+inject) until a
-sloppy server reads like a well-designed one, while forwarding real calls
-untouched. One loopback daemon at login, shared by all sessions. Mission
-statement: issue #121. The ongoing hand-work is tuning backends with the
-`.claude/skills/mcp-tool-design` skill — 4 configured backends (gitnexus,
-graphitti, serena, xapi) are still disabled/untuned.
+param name/description, server instructions, resource + prompt text (#15),
+pinning, hide+inject) until a sloppy server reads like a well-designed one,
+while forwarding real calls untouched — and per-tool behavior hooks (#16) can
+validate/reshape the calls themselves. One loopback daemon at login (loopback
+by default — a non-loopback bind requires bearer_token, #18), shared by all
+sessions. Mission statement: issue #121. The ongoing hand-work is tuning
+backends with the `.claude/skills/mcp-tool-design` skill. As of 2026-07-15
+ALL 11 configured backends are enabled, tuned, and field-graded (full check
+pass: every string graded, zero undocumented params; graphitti was removed —
+unreachable host). New/renamed backends get the pipeline on arrival; the
+pending regression check is a fresh-session cold-eval (differentiation.md
+step 7 — same-session seats can't judge newly enabled backends).
 
 ## Stack & layout
 
@@ -31,9 +37,10 @@ layout, console script `mcp-gateway`). MIT; distributed via
 - `src/mcp_gateway/admin.py` — admin API + helpers: capture/defaults, override
   diffing, collision + transform-dry-build validation, hot reload, Claude Code
   CLI integration, settings, stale-override migration.
-- `src/mcp_gateway/admin.html` — single-file vanilla-JS admin UI (no build).
-  Guarded by tests: no merge-conflict markers, inline JS must pass
-  `node --check`.
+- `src/mcp_gateway/admin.html` — single-file vanilla-JS admin UI (no build,
+  no external assets; light+dark via prefers-color-scheme, #170). Guarded by
+  tests: no merge-conflict markers, ONE inline `<script>` that must pass
+  `node --check` (the test extracts first `<script>`…first `</script>`).
 - `src/mcp_gateway/config.default.toml` — seed; ships in the wheel.
   `config.example.toml` — annotated schema reference (repo root).
 - `config.toml` — LIVE admin-managed config (gitignored, regenerated on UI
@@ -68,6 +75,13 @@ layout, console script `mcp-gateway`). MIT; distributed via
   you're talking to a ghost process from an old clone.
 - Ship: branch → PR (one closing keyword per issue) → squash-merge → deploy is
   `./install.sh` (plist/code changed) or `POST /admin/api/restart` (code only).
+- **Docs ship with the feature, in the same PR** — the levers.md sync rule
+  generalized: a user-visible change updates README ("What you get"),
+  the relevant docs/ page, CHANGELOG (Unreleased), and THIS FILE (north-star
+  scope + a gotcha if the change has a trap). This file is the next session's
+  memory: when a session ends having changed how the gateway works or ships,
+  the backlog line and gotchas here must already say so. Stale instructions
+  are worse than none — prune as eagerly as you add.
 
 ## Gotchas (verified against FastMCP 3.4.4)
 
@@ -90,10 +104,22 @@ layout, console script `mcp-gateway`). MIT; distributed via
 - **Baseline auto-refresh (#43):** post-mount, on `tools/list_changed`
   (stateful clients only; handler only ENQUEUES — never block the message
   pump), on admin page load; throttled (300s / 2s push floor) in in-process
-  `admin._last_refresh`. Overrides are diffs by original name — refresh never
+  `admin._last_refresh`. The POST-MOUNT trigger is additionally age-gated
+  (#157): skipped while the stored baseline's `captured_at` is younger than
+  `baseline_max_age` (default 24h; 0 = ungated; log `baseline_fresh_skipped`)
+  — event triggers are NEVER gated and a skip doesn't stamp the throttle.
+  The boot orphan sweep refuses (`orphan_sweep_refused`) when >half the
+  defaults files would go — a scratch daemon on a test config once wiped
+  every real baseline. Overrides are diffs by original name — refresh never
   clobbers them; a backend renaming tools upstream leaves DANGLING overrides
   (text silently inactive) → the UI's stale-override banner migrates/discards
   them (#153). Baselines capture concurrently at boot.
+- **Behavior hooks (#16):** the `ToolOverride` model field is `validate_`
+  (TOML key `validate` — the bare name shadows a pydantic attr; the surface.py
+  false-positive from getattr'ing `validate` already happened once). Hooks
+  fail CLOSED per tool: a broken hook errors that tool's calls, never the
+  mount, and never silently skips a configured guard. Hook files re-read by
+  mtime; specs are importlib'd from the hooks dir, never eval'd.
 - **Auth:** optional `bearer_token` (${ENV} ref, resolved once at boot) gates
   backend endpoints AND `/admin/api/*` (open admin = config writes + tool
   execution for any local process); only `/health`, `/ready`, bare `GET
@@ -112,13 +138,13 @@ layout, console script `mcp-gateway`). MIT; distributed via
   symlink; recreate the venv with `uv sync`.
 - Accepted spec gaps (#92): completions capability not forwarded; tools/list
   served as one page. Framework-level, irrelevant to Claude Code.
-- Backlog: #162 (per-tool output-cap lever), #157 (age-gate boot refresh),
-  #170 (admin UI revamp), #171 (install.sh --uninstall), north-star #121.
-  The old parked set is resolved (2026-07-14): #10/#25 closed by audit/ADR-0004,
-  #15 (resource+prompt rewriting), #16 (behavior hooks), #18 (guarded
-  non-loopback bind) merged; #14/#21/#13 built as STACKED DRAFT PRs
-  #173→#175/#176 on `feat/14-composite-tools` — unmerged pending live testing,
-  merge #173 first.
+- Backlog (2026-07-15): the issue tracker is CLEAR except north-star #121
+  (ongoing tuning mission) and the three STACKED DRAFT PRs #173→#175/#176
+  (composites → smart routing / code mode) on `feat/14-composite-tools` —
+  reviewed, conflict-free, unmerged pending live testing; merge #173 first.
+  Everything else shipped: parked set (#10/#13–16/#18/#21/#25), #157 age-gate,
+  #162 output-cap lever, #170 UI revamp, #171 uninstall (`./install.sh
+  --uninstall`; `--purge` adds config+state, `--dry-run` composes).
 
 ## Hard-won session learnings (2026-07-12 — read before repeating them)
 
@@ -155,18 +181,18 @@ This project is indexed by GitNexus as **mcp-gateway** (941 symbols, 2025 relati
 
 ## Always Do
 
-- **MUST run impact analysis before editing any symbol.** Before modifying a function, class, or method, run `impact({target: "symbolName", direction: "upstream"})` and report the blast radius (direct callers, affected processes, risk level) to the user.
+- **MUST run impact analysis before editing any symbol.** Before modifying a function, class, or method, run `analyze_impact({target: "symbolName", direction: "upstream"})` (gateway name for `impact`) and report the blast radius (direct callers, affected processes, risk level) to the user.
 - **MUST run `detect_changes()` before committing** to verify your changes only affect expected symbols and execution flows. For regression review, compare against the default branch: `detect_changes({scope: "compare", base_ref: "main"})`.
 - **MUST warn the user** if impact analysis returns HIGH or CRITICAL risk before proceeding with edits.
-- When exploring unfamiliar code, use `query({search_query: "concept"})` to find execution flows instead of grepping. It returns process-grouped results ranked by relevance.
-- When you need full context on a specific symbol — callers, callees, which execution flows it participates in — use `context({name: "symbolName"})`.
-- For security review, `explain({target: "fileOrSymbol"})` lists taint findings (source→sink flows; needs `analyze --pdg`).
+- When exploring unfamiliar code, use `search_code_flows({search_query: "concept"})` (gateway name for `query`) to find execution flows instead of grepping. It returns process-grouped results ranked by relevance.
+- When you need full context on a specific symbol — callers, callees, which execution flows it participates in — use `get_symbol_context({name: "symbolName"})` (gateway name for `context`).
+- For security review, `list_taint_findings({target: "fileOrSymbol"})` (gateway name for `explain`) lists taint findings (source→sink flows; needs `analyze --pdg`).
 
 ## Never Do
 
 - NEVER edit a function, class, or method without first running `impact` on it.
 - NEVER ignore HIGH or CRITICAL risk warnings from impact analysis.
-- NEVER rename symbols with find-and-replace — use `rename` which understands the call graph.
+- NEVER rename symbols with find-and-replace — use `rename_symbol` (gateway name for `rename`) which understands the call graph and previews by default.
 - NEVER commit changes without running `detect_changes()` to check affected scope.
 
 ## Resources
