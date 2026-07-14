@@ -38,6 +38,12 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `POST /admin/api/resource-reset`, `PUT /admin/api/prompt-override`,
   `POST /admin/api/prompt-reset`.
 
+- **Guarded non-loopback bind** (#18) — `host` may now point beyond loopback
+  (e.g. a Tailscale IP) for multi-host use, but the config refuses to load a
+  non-loopback bind without `bearer_token` set, so the gateway can never start
+  exposed and unauthenticated. Documented in security.md ("Binding beyond
+  loopback").
+
 ### Documentation
 
 - **ADR-0004: per-session isolation** — recorded that caller isolation is the

@@ -15,6 +15,7 @@ transforms are keyed by that bare original name.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import re
@@ -303,6 +304,22 @@ class Backend(BaseModel, extra="forbid"):
         return v
 
 
+def _is_loopback_host(host: str) -> bool:
+    """True when ``host`` can only be reached from this machine.
+
+    ``localhost`` and any loopback IP (127.0.0.0/8, ``::1``) qualify; every
+    other hostname or address — including ones that HAPPEN to resolve to
+    loopback — is treated as exposed, because we can't verify resolution at
+    config-load time and the failure mode is an open admin API.
+    """
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host.strip("[]")).is_loopback
+    except ValueError:
+        return False
+
+
 class GatewayConfig(BaseModel, extra="forbid"):
     """Top-level gateway configuration."""
 
@@ -330,6 +347,13 @@ class GatewayConfig(BaseModel, extra="forbid"):
         dupes = {n for n in names if names.count(n) > 1}
         if dupes:
             raise ConfigError(f"duplicate backend name(s): {sorted(dupes)}")
+        # #18: a non-loopback bind exposes config writes and tool execution to
+        # the network, so it is refused outright without the bearer token.
+        if self.bearer_token is None and not _is_loopback_host(self.host):
+            raise ConfigError(
+                f"host {self.host!r} is not loopback: binding beyond this "
+                f"machine requires bearer_token (see docs/security.md)"
+            )
         return self
 
 

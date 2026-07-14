@@ -5,14 +5,29 @@ against, what it does not, and how to tighten it.
 
 ## The starting point: loopback only
 
-The gateway binds to `127.0.0.1` (loopback) and never to `0.0.0.0`. Nothing off
-your machine can reach it — not another device on your network, not the internet.
-This is the primary protection, and it is on by default. Do not change `host` to
-a non-loopback address.
+The gateway binds to `127.0.0.1` (loopback) by default. Nothing off your
+machine can reach it — not another device on your network, not the internet.
+This is the primary protection.
 
 The trade-off: any process running as you, on the same machine, *can* reach the
 loopback port. On a single-user Mac that is usually a non-issue. The bearer token
 below exists for when it is not.
+
+### Binding beyond loopback
+
+Setting `host` to a non-loopback address (say, your Tailscale IP, to share one
+gateway across your own machines) is supported, with one hard rule: **the
+config refuses to load a non-loopback `host` without `bearer_token` set.**
+An open bind would hand config writes and tool execution to anything that can
+reach the port, so the gateway fails loudly at startup instead of running
+exposed. With the token set, every backend endpoint and every `/admin/api/*`
+route demands it; `/health`, `/ready`, and the bare `GET /admin` page remain
+open, and the Origin guard still rejects foreign browser origins.
+
+Only bind to an interface you trust end-to-end (a tailnet, not a café LAN, and
+never the public internet — there is no TLS, so the token travels in clear on
+the wire). Remember the token is a shared secret: every host you give it to
+can do everything the gateway can.
 
 ## The Origin guard (built in, always on)
 

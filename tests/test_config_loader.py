@@ -459,6 +459,42 @@ def test_bearer_token_omitted_when_unset():
     assert "bearer_token" not in cl.dump_toml(cfg)
 
 
+# --- non-loopback bind requires the bearer token (#18) ----------------------
+
+
+def _cfg_with_host(host: str, **kw):
+    return cl.GatewayConfig.model_validate(
+        {
+            "host": host,
+            "backends": [{"name": "b", "transport": "stdio", "command": "/bin/x"}],
+            **kw,
+        }
+    )
+
+
+LOOPBACK_HOSTS = ["127.0.0.1", "localhost", "::1", "[::1]", "127.1.2.3"]
+EXPOSED_HOSTS = ["0.0.0.0", "100.99.233.103", "::", "mymac.tailnet.ts.net"]
+
+
+@pytest.mark.parametrize("host", LOOPBACK_HOSTS)
+def test_loopback_hosts_need_no_token(host):
+    assert _cfg_with_host(host).bearer_token is None
+
+
+@pytest.mark.parametrize("host", EXPOSED_HOSTS)
+def test_non_loopback_host_without_token_is_refused(host):
+    with pytest.raises(cl.ConfigError, match="requires bearer_token"):
+        _cfg_with_host(host)
+
+
+def test_non_loopback_host_with_token_is_allowed():
+    cfg = _cfg_with_host("100.99.233.103", bearer_token="${MCP_GATEWAY_TOKEN}")
+    assert cfg.host == "100.99.233.103"
+    # and it round-trips like any other gateway-level field
+    reparsed = cl.GatewayConfig.model_validate(tomllib.loads(cl.dump_toml(cfg)))
+    assert reparsed.host == "100.99.233.103"
+
+
 # --- durable save ----------------------------------------------------------
 
 

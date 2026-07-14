@@ -61,7 +61,7 @@ diff-vs-default model (see below).
 
 | Key | Type | Default | Meaning |
 |-----|------|---------|---------|
-| `host` | string | `"127.0.0.1"` | The address to bind. Keep it loopback (`127.0.0.1`). Never bind `0.0.0.0` — that would expose the gateway off-machine. |
+| `host` | string | `"127.0.0.1"` | The address to bind. Loopback by default; a non-loopback address (e.g. a Tailscale IP) is refused at load time unless `bearer_token` is also set. See [security.md](security.md#binding-beyond-loopback). |
 | `port` | integer | `9100` | The port the gateway listens on. |
 | `log_file` | string | `"~/.local/state/mcp-gateway/gateway.log"` | Where the structured log is written. Rotates automatically (5 MB × 5 files). |
 | `introspect_interval` | integer (seconds) | `0` (off) | How often to re-scan every backend's tool list on a timer. `0` means off, which is the recommended default — the gateway already refreshes on reconnect, on a backend's own change notification, and on admin page load. Set an interval only for a long-lived remote backend that silently swaps its tools. |
