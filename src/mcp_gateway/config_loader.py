@@ -372,6 +372,25 @@ class CompositeParam(BaseModel, extra="forbid"):
                 f"composite param {self.name!r}: a required param cannot take a "
                 f"default — set required = false"
             )
+        if self.default is not None:
+            # The default must satisfy the declared type or the emitted JSON
+            # Schema contradicts itself. bool is special-cased first because
+            # isinstance(True, int) is True in Python but not in JSON Schema.
+            if isinstance(self.default, bool):
+                ok = self.type == "boolean"
+            elif self.type == "integer":
+                ok = isinstance(self.default, int)
+            elif self.type == "number":
+                ok = isinstance(self.default, (int, float))
+            elif self.type == "string":
+                ok = isinstance(self.default, str)
+            else:  # boolean, and the default wasn't a bool
+                ok = False
+            if not ok:
+                raise ConfigError(
+                    f"composite param {self.name!r}: default {self.default!r} "
+                    f"does not match type {self.type!r}"
+                )
         return self
 
 
@@ -399,6 +418,14 @@ class CompositeMember(BaseModel, extra="forbid"):
 
     @model_validator(mode="after")
     def _check(self) -> CompositeMember:
+        # backend is cross-checked against the configured backend names at the
+        # GatewayConfig level; tool has no such registry (it's the backend's
+        # own exposed name), so at least fail fast on a blank one.
+        if not self.tool.strip():
+            raise ConfigError(
+                f"composite member on backend {self.backend!r}: tool name "
+                f"must not be empty"
+            )
         overlap = set(self.args) & set(self.static_args)
         if overlap:
             raise ConfigError(

@@ -210,6 +210,11 @@ def build_composite_tool(comp: Composite, registry: dict, log) -> Tool:
     annotations: dict[str, Any] = {}
     for p in comp.params:
         base = _PARAM_TYPES[p.type]
+        if not p.required and p.default is None:
+            # An optional param with no authored default carries default None
+            # in the signature — the type must admit null or the emitted
+            # schema contradicts its own default.
+            base = base | None
         ann = (
             Annotated[base, Field(description=p.description)] if p.description else base
         )
