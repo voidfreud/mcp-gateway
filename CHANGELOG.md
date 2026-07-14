@@ -8,6 +8,23 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Per-tool behavior hooks** (#16) — a tool override can name two
+  user-authored Python hooks: `validate = "module:function"` and
+  `post_process = "module:function"`, resolved in a dedicated hooks directory
+  (`MCP_GATEWAY_HOOKS` > `./hooks/` > `~/.config/mcp-gateway/hooks/`; specs
+  are imported, never eval'd, and cannot name a path outside the directory).
+  `validate(args)` runs before the backend sees the call — raise
+  `ValueError("why")` to reject it with that message as the tool error;
+  `post_process(result)` reshapes the answer (truncate, strip, reformat)
+  before the caller sees it. Sync or async; hooks compose with renames and
+  hidden+injected params (they see the exposed argument names). This is
+  deliberate arbitrary code execution in the daemon — documented as such in
+  the security guide. A hook that fails to load fails **closed, per tool**:
+  the mount and every other tool stay up while the hooked tool's calls error
+  with the load failure (`hook_load_error` in the log, `hook_error` in
+  `/admin/api/state`). Hooks are hand-authored in `config.toml`; the admin
+  state shows them read-only and UI saves preserve them.
+
 - **Resource and prompt text rewriting** (#15) — the tool override story now
   covers everything a backend broadcasts: resources and resource templates
   (display name/title/description, keyed by URI — the URI itself is never

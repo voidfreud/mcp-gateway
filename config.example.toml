@@ -65,6 +65,18 @@ stateless = true                   # parsed; shared-session reuse is a
   description = "Exactly what Claude should read for this tool."
   enabled = true                   # false -> tool is dropped from the listing
   always_load = true               # pin THIS tool to load upfront (eager)
+  # Behavior hooks (#16): user-authored Python, "module:function" resolved in
+  # the hooks dir (MCP_GATEWAY_HOOKS > ./hooks/ > ~/.config/mcp-gateway/hooks/).
+  # ARBITRARY CODE EXECUTION in the daemon, by design — same trust as a stdio
+  # `command`; see docs/security.md. Never eval'd, only imported from that dir.
+  # validate = "myhooks:check_query"    # check_query(args: dict) runs BEFORE
+  #                                     # the call; raise ValueError("why") to
+  #                                     # reject it (message -> the caller).
+  #                                     # args use the EXPOSED (post-rename)
+  #                                     # names; hidden params are absent.
+  # post_process = "myhooks:trim"       # trim(result) runs AFTER the backend
+  #                                     # answered (truncate / strip / reshape
+  #                                     # the ToolResult). Sync or async.
 
     [[backends.tools.params]]
     original = "query"

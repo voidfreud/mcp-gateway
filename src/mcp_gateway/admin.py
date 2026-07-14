@@ -33,6 +33,7 @@ from starlette.responses import FileResponse, JSONResponse
 from starlette.routing import Route
 
 from mcp_gateway import config_loader as cl
+from mcp_gateway import hooks as hooks_mod
 from mcp_gateway.config_loader import (
     Backend,
     GatewayConfig,
@@ -622,6 +623,25 @@ def _prompt_state(b: Backend, dp: dict) -> dict:
     }
 
 
+def _hook_error(ov: ToolOverride | None) -> str | None:
+    """Current load status of a tool override's behavior hooks (#16), for the
+    read-only admin display: None when there are no hooks or they all load,
+    else the joined load error(s). Cheap — modules are mtime-cached — and
+    always current (a fixed hook file clears the error on the next state read).
+    """
+    if ov is None:
+        return None
+    errs = []
+    for spec in (ov.validate_, ov.post_process):
+        if not spec:
+            continue
+        try:
+            hooks_mod.load_hook(spec)
+        except hooks_mod.HookError as exc:
+            errs.append(str(exc))
+    return "; ".join(errs) or None
+
+
 def build_state(cfg: GatewayConfig) -> dict:
     backends = []
     for b in cfg.backends:
@@ -663,6 +683,12 @@ def build_state(cfg: GatewayConfig) -> dict:
                     "description": ov.description if ov else None,
                     "enabled": ov.enabled if ov else True,
                     "always_load": ov.always_load if ov else False,
+                    # #16: behavior hooks — hand-authored in config.toml, shown
+                    # read-only (specs + current load status; None = no hooks /
+                    # loading fine).
+                    "validate": ov.validate_ if ov else None,
+                    "post_process": ov.post_process if ov else None,
+                    "hook_error": _hook_error(ov),
                     # Read-only schema surface (issue #2): surfaced as-captured;
                     # None when the backend didn't advertise them or the defaults
                     # file predates the capture (use .get so old files degrade).
@@ -910,6 +936,10 @@ def apply_tool_override(cfg: GatewayConfig, backend: str, payload: dict) -> str 
         description=description,
         enabled=enabled,
         always_load=always_load,
+        # #16: hooks are hand-authored in config.toml, not admin-editable — a UI
+        # save must carry them through unchanged, never silently drop them.
+        validate_=prev.validate_ if prev else None,
+        post_process=prev.post_process if prev else None,
         params=params,
     )
     # Opt-in escape hatch (#22): `"on_collision": "uniquify"` at the payload
@@ -939,7 +969,14 @@ def apply_tool_override(cfg: GatewayConfig, backend: str, payload: dict) -> str 
             new.name = final if final != default_name else None
             uniquified = final
     has_override = bool(
-        new.name or title or description or not enabled or always_load or params
+        new.name
+        or title
+        or description
+        or not enabled
+        or always_load
+        or params
+        or new.validate_
+        or new.post_process
     )
     # Reject a rename/description that would collide with another broadcast tool.
     check_no_collision(cfg, backend, original, new)
@@ -1202,7 +1239,14 @@ def export_settings(  # noqa: PLR0912 — one branch per serialized override fie
     instructions override, display name, pin, and every tool/param override —
     exactly what config.toml stores beyond topology, so an import round-trips
     with zero loss. ``full`` adds each backend's captured defaults for context
-    (read-only; import ignores them)."""
+    (read-only; import ignores them).
+
+    Deliberately NOT bundled (like topology): behavior hooks (#16). A hook
+    spec is a reference to machine-local code in this machine's hooks dir —
+    exporting it to another gateway would import a dangling (fail-closed)
+    reference. Merge-mode imports preserve stored hooks (the same #139
+    absent-key semantics as UI saves); a replace-mode import resets the
+    backend's stored overrides, hooks included."""
     backends: dict = {}
     for b in cfg.backends:
         entry: dict = {}

@@ -24,10 +24,13 @@ import tomllib
 from pathlib import Path
 from typing import Literal
 
+import structlog
 import tomli_w
 from fastmcp.server.transforms import ToolTransform, Transform
 from fastmcp.tools.tool_transform import ArgTransformConfig, ToolTransformConfig
 from pydantic import BaseModel, Field, field_validator, model_validator
+
+from mcp_gateway import hooks as hooks_mod
 
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
@@ -131,7 +134,7 @@ class ParamOverride(BaseModel, extra="forbid"):
     default: str | int | float | bool | None = None
 
 
-class ToolOverride(BaseModel, extra="forbid"):
+class ToolOverride(BaseModel, extra="forbid", populate_by_name=True):
     """Rewrite (or disable) one backend tool and its parameters."""
 
     original: str
@@ -142,7 +145,28 @@ class ToolOverride(BaseModel, extra="forbid"):
     # Pin this tool to load UPFRONT (exempt from Claude Code tool-search deferral)
     # via the tool's `_meta["anthropic/alwaysLoad"]`.
     always_load: bool = False
+    # #16: behavior hooks — "module:function" specs resolved in the hooks dir
+    # (see hooks.py; NEVER evaluated as code). The TOML key is `validate`; the
+    # field is aliased because `validate` shadows a pydantic BaseModel attr.
+    # validate(args: dict) rejects a call by raising ValueError(msg);
+    # post_process(result) reshapes the backend's answer before the caller
+    # sees it. Hand-authored in config.toml, read-only in the admin UI.
+    validate_: str | None = Field(default=None, alias="validate")
+    post_process: str | None = None
     params: list[ParamOverride] = Field(default_factory=list)
+
+    @field_validator("validate_", "post_process")
+    @classmethod
+    def _check_hook_spec(cls, v: str | None) -> str | None:
+        # Format-only check at load time (cheap, catches typos in a hand-edited
+        # config); existence/importability is checked at transform-build time so
+        # a missing hook FILE can't crash config load / boot.
+        if v is not None and not hooks_mod.valid_spec(v):
+            raise ConfigError(
+                f"invalid hook spec {v!r}: use 'module:function' (a function in "
+                f"a .py file inside the hooks directory)"
+            )
+        return v
 
 
 class ResourceOverride(BaseModel, extra="forbid"):
@@ -432,6 +456,32 @@ def to_proxy_config(cfg: GatewayConfig) -> dict:
 ALWAYS_LOAD_META = {"anthropic/alwaysLoad": True}
 
 
+def tool_hook_fn(backend_name: str, tool: ToolOverride):
+    """Resolve one override's hook specs (#16) into ``(transform_fn, error)``.
+
+    ``(None, None)`` when the tool has no hooks. A load failure (missing
+    module/function, import crash) must be loud but PER TOOL: it never raises
+    — the mount and every other tool stay up — and it never fails open. The
+    returned stand-in errors every call to THIS tool with the load failure
+    (see hooks.make_failing_hook_fn), the structured log gets a
+    ``hook_load_error`` line, and the admin state shows the same error.
+    """
+    if tool.validate_ is None and tool.post_process is None:
+        return None, None
+    try:
+        vfn = hooks_mod.load_hook(tool.validate_) if tool.validate_ else None
+        pfn = hooks_mod.load_hook(tool.post_process) if tool.post_process else None
+    except hooks_mod.HookError as exc:
+        structlog.get_logger("mcp-gateway").error(
+            "hook_load_error",
+            backend=backend_name,
+            tool=tool.original,
+            error=str(exc),
+        )
+        return hooks_mod.make_failing_hook_fn(tool.original, str(exc)), str(exc)
+    return hooks_mod.make_hook_fn(vfn, pfn), None
+
+
 def build_transforms(  # noqa: PLR0912 — one branch per override field; splitting would scatter the transform assembly
     cfg: GatewayConfig,
     backend: Backend,
@@ -498,7 +548,17 @@ def build_transforms(  # noqa: PLR0912 — one branch per override field; splitt
         # per-backend pin below.
         if b.enabled and (tool.always_load or b.always_load):
             tc_kwargs["meta"] = pin_meta(key)
-        transforms[key] = ToolTransformConfig(**tc_kwargs)
+        # #16: behavior hooks ride the same transform (FastMCP's config model
+        # has no transform_fn field, so a hooked tool uses the gateway's
+        # subclass). Hooks are loaded here — every transform (re)build picks up
+        # an edited hook file — and a load failure fails closed per tool.
+        hook_fn, _hook_error = tool_hook_fn(b.name, tool)
+        if hook_fn is not None:
+            transforms[key] = hooks_mod.HookedToolTransformConfig(
+                **tc_kwargs, transform_fn=hook_fn
+            )
+        else:
+            transforms[key] = ToolTransformConfig(**tc_kwargs)
 
     # Backend disabled (#38): force EVERY live tool off, including ones with no
     # override entry. Runs before the always_load pin so "disabled" wins over a
@@ -782,6 +842,10 @@ def to_raw(cfg: GatewayConfig) -> dict:  # noqa: PLR0915 — field-by-field TOML
         d["enabled"] = t.enabled
         if t.always_load:
             d["always_load"] = True
+        if t.validate_ is not None:  # #16: TOML key is `validate` (field aliased)
+            d["validate"] = t.validate_
+        if t.post_process is not None:
+            d["post_process"] = t.post_process
         params = [_param(p) for p in t.params]
         if params:
             d["params"] = params
