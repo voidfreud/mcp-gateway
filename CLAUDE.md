@@ -89,6 +89,11 @@ layout, console script `mcp-gateway`). MIT; distributed via
   ToolTransformConfig(..., arguments={p: ArgTransformConfig(...)})})`. Private
   attrs we rely on (`proxy._transforms`, `_mcp_server.notification_options`,
   MessageHandler dispatch) are tripwired by tests.
+- **Downstream list-change capabilities:** every backend proxy and the shared
+  `/virtual/mcp` server advertise tools/resources/prompts `listChanged=false`.
+  Admin hot swaps are immediately visible to an explicit re-list, but FastMCP
+  3.4.4 exposes only a per-session public sender—never advertise a server-wide
+  push until the gateway owns a tested downstream-session registry.
 - Tools are exposed BARE per endpoint; apply `add_transform` AFTER `_reconcile`
   (reconcile must see source names).
 - **Transform target names are globally unique per backend — enabled OR

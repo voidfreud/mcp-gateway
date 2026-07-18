@@ -34,6 +34,8 @@ uses `alpha` and `beta`; their generated stable IDs remain unchanged when alpha
 is renamed, and the final receipt requires the binding to remain resolved.
 
 The receipts require `/virtual/mcp` to be mounted before any tool is active,
+to truthfully negotiate `tools.listChanged=false` until server-wide downstream
+notifications exist,
 then cover draft lifecycle, all-dispatch concurrency, keyword selection and
 explicit fallback, rich MCP result-block and structured-output preservation,
 partial/timeout/total failures, a strict aggregate budget, and stable references.

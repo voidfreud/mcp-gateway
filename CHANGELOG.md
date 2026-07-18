@@ -8,6 +8,12 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Truthful Virtual Tools capabilities** — `/virtual/mcp` now advertises
+  `tools.listChanged=false` (along with resources/prompts) because its Admin
+  hot swaps do not yet have a server-wide downstream-session broadcast API.
+  Explicit `tools/list` immediately observes every committed swap; clients are
+  no longer promised a notification the gateway cannot deliver.
+
 - **Admin UI visual revamp** (#170) — the single-file admin page got a
   deliberate design pass: a light theme (follows `prefers-color-scheme`, dark
   stays the base), inline-SVG iconography replacing the mixed emoji/text

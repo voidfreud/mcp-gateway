@@ -840,6 +840,11 @@ def _build_app(  # noqa: PLR0913, PLR0915 — composition root; takes what it wi
                             log,
                             hooks.setdefault("virtual_status", {}),
                         )
+                        # Virtual Tools hot-swap their provider map from Admin
+                        # routes but cannot yet broadcast to every connected
+                        # downstream session. Keep the negotiated capability
+                        # truthful until a server-wide session registry exists.
+                        _suppress_list_changed(server)
                         sub = server.http_app(path="/mcp")
                         await stack.enter_async_context(sub.lifespan(sub))
                         app.router.routes.append(

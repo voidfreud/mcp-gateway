@@ -1461,6 +1461,27 @@ def test_suppress_list_changed_clears_capability():
     assert caps.prompts.listChanged is False
 
 
+def test_virtual_endpoint_applies_static_catalog_capabilities(tmp_path, monkeypatch):
+    """The permanent Virtual Tools mount must not keep FastMCP's true default."""
+    seen = []
+    monkeypatch.setattr(
+        server, "_suppress_list_changed", lambda fastmcp: seen.append(fastmcp.name)
+    )
+    cfg = cl.GatewayConfig()
+    path = tmp_path / "config.toml"
+    cl.save(cfg, path)
+    app = server._build_app(
+        cfg, structlog.get_logger("test"), {}, {}, {}, config_path=str(path)
+    )
+    with TestClient(app) as client:
+        assert client.get("/health").status_code == 200
+        for _ in range(100):
+            if seen:
+                break
+            time.sleep(0.01)
+    assert seen == ["mcp-gateway-virtual"]
+
+
 # ---------------------------------------------------------------------------
 # #78 — disabled backends are never mounted (endpoint 404s); unmount cleans up
 # ---------------------------------------------------------------------------
