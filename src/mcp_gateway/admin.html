@@ -393,6 +393,24 @@
            padding: 10px 16px; border-radius: 8px; display: none; z-index: 11; font-size: 12.5px;
            box-shadow: var(--shadow-lg); }
   .toast.show { display: block; animation: toast-in .18s ease; }
+  .vt-modal { width: 820px; max-height: 90vh; overflow: auto; }
+  .vt-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .vt-row { border: 1px solid var(--b1); border-radius: 8px; padding: 10px; margin-top: 8px; background: var(--s2); }
+  .vt-row-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+  .vt-row-head b { font: 600 12px system-ui; color: var(--t); }
+  .vt-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; margin-top: 12px; }
+  .vt-status { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: var(--tm); }
+  .vt-status::before { content: ''; width: 7px; height: 7px; border-radius: 50%; background: var(--td); }
+  .vt-status.ok::before { background: var(--gn); }
+  .vt-status.err::before { background: var(--rd); }
+  .vt-status.warn::before { background: var(--am); }
+  .vt-binding { font: 11px var(--mono); color: var(--tm); overflow-wrap: anywhere; }
+  .vt-original { color: var(--td); }
+  .vt-empty { padding: 30px; text-align: center; color: var(--tm); border: 1px dashed var(--b2); border-radius: 10px; }
+  .vt-members, .vt-inputs { margin-top: 12px; }
+  .vt-member-grid { display:grid; grid-template-columns: 1.3fr .8fr .55fr; gap:8px; }
+  .vt-inline { display:flex; align-items:center; gap:8px; }
+  @media (max-width: 760px) { .vt-grid, .vt-member-grid { grid-template-columns: 1fr; } }
 </style>
 </head>
 <body>
@@ -476,7 +494,7 @@
   <div class="modal">
     <h3>Rename backend <code id="rn_cur" style="font:600 12px var(--mono);color:var(--ac)"></code></h3>
     <p class="hint" style="margin:0 0 10px">This is a <b>real identity change</b> — unlike the cosmetic display
-      name. The endpoint URL becomes <code>/&lt;new name&gt;/mcp</code>, the gateway <b>restarts</b>, and the
+      name. The endpoint URL becomes <code>/&lt;new name&gt;/mcp</code>, the gateway hot-mounts that route, and the
       Claude Code registration changes from <code>gateway-&lt;old&gt;</code> to <code>gateway-&lt;new&gt;</code> —
       Claude Code must be re-registered or the server disappears from it.</p>
     <label>New name</label>
@@ -487,7 +505,64 @@
     <div class="err" id="rn_err"></div>
     <div class="foot">
       <button onclick="closeRename()">Cancel</button>
-      <button class="btn-pri" id="rn_go" onclick="doRename()">Rename &amp; restart</button>
+      <button class="btn-pri" id="rn_go" onclick="doRename()">Rename backend</button>
+    </div>
+  </div>
+</div>
+<div class="modal-bg" id="virtualBg">
+  <div class="modal vt-modal">
+    <h3 id="vt_title">Create Virtual Tool</h3>
+    <input type="hidden" id="vt_original_name">
+    <div class="vt-grid">
+      <div><label>Public tool name</label><input id="vt_name" class="mono" autocomplete="off" spellcheck="false" placeholder="search_everywhere"></div>
+      <div><label>Dispatch</label><select id="vt_dispatch" onchange="virtualDispatchChanged()"><option value="all">all · every member</option><option value="keyword">keyword · local rules</option><option value="llm">llm · external router</option></select></div>
+    </div>
+    <label>Description</label><textarea id="vt_description" class="grow" data-cap="2048" placeholder="When and why an agent should use this tool"></textarea>
+    <div class="vt-grid">
+      <div><label>Aggregate budget (bytes)</label><input id="vt_budget" type="number" min="1024" step="1" value="262144"></div>
+      <div><label>Failure policy</label><select id="vt_failure"><option value="partial">partial · succeed when any member succeeds</option><option value="strict">strict · fail when any member fails</option></select></div>
+    </div>
+    <label class="chk" style="margin-top:12px"><input type="checkbox" class="tgl" id="vt_always"> load upfront in every client session</label>
+
+    <div class="vt-inputs">
+      <div class="vt-row-head"><b>Public inputs</b><span class="si">the schema callers see</span><span class="spacer"></span><button onclick="addVirtualInput()">+ Input</button></div>
+      <div id="vt_inputs"></div>
+    </div>
+    <div class="vt-members">
+      <div class="vt-row-head"><b>Members</b><span class="si">stable original bindings; effective names shown beside them</span><span class="spacer"></span><button onclick="addVirtualMember()">+ Member</button></div>
+      <div id="vt_members"></div>
+    </div>
+
+    <div id="vt_router" class="vt-row" style="display:none">
+      <div class="vt-row-head"><b>OpenRouter LLM router and external data egress</b></div>
+      <div class="vt-grid">
+        <div><label>OpenRouter model</label><input id="vt_model" class="mono" placeholder="provider/model"></div>
+        <div><label>API key reference</label><input id="vt_api_key" class="mono" placeholder="${ROUTER_API_KEY}" autocomplete="off" spellcheck="false"></div>
+        <div><label>Timeout (seconds)</label><input id="vt_router_timeout" type="number" min="0.1" step="0.1" value="3"></div>
+        <div><label>Fallback</label><input id="vt_fallback" class="mono" value="all" placeholder="all or member label"></div>
+      </div>
+      <label>Routing policy</label><textarea id="vt_conditions" placeholder="Prefer one member; use both when ambiguous"></textarea>
+      <div class="hint">The external provider is OpenRouter. It receives virtual-tool input values, member routing descriptions, and this policy. Routing responses are capped at 200 output tokens. Provider pricing applies to every routed call; check the selected model's current OpenRouter price before activation. The API key reference is stored, but its resolved value must never be returned or logged.</div>
+      <label class="chk" style="margin-top:10px"><input type="checkbox" class="tgl tgl-red" id="vt_egress"> I acknowledge these fields may be sent to OpenRouter using the named model</label>
+    </div>
+    <div class="err" id="vt_err"></div>
+    <div class="foot">
+      <button onclick="closeVirtualEditor()">Cancel</button>
+      <button id="vt_validate" onclick="saveVirtualTool(false)">Save draft</button>
+      <button class="btn-pri" id="vt_activate" onclick="saveVirtualTool(true)">Save &amp; activate</button>
+    </div>
+  </div>
+</div>
+<div class="modal-bg" id="virtualTestBg">
+  <div class="modal">
+    <h3>Test Virtual Tool <code id="vtt_name" style="font:600 12px var(--mono);color:var(--ac)"></code></h3>
+    <p class="hint" style="margin:0 0 10px">Run the saved definition against its live resolved members without changing activation state.</p>
+    <label>Arguments (JSON object)</label>
+    <textarea id="vtt_args" class="mono" rows="8" spellcheck="false">{}</textarea>
+    <div class="err" id="vtt_err"></div>
+    <div class="foot">
+      <button onclick="closeVirtualTest()">Cancel</button>
+      <button class="btn-pri" id="vtt_run" onclick="runVirtualTest()">Run test</button>
     </div>
   </div>
 </div>
@@ -505,7 +580,11 @@ const ICON = {
   plug: '<svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 8a4 4 0 0 1 4-4h.75V1.75a.75.75 0 0 1 1.5 0V4h1a2 2 0 0 1 2 2v1.5a3.5 3.5 0 0 1-3.5 3.5h-.5v3.25a.75.75 0 0 1-1.5 0V11H8a4 4 0 0 1-4-4Z" opacity=".85"/></svg>',
 };
 const GATEWAY = '__gateway__';  // sentinel for the gateway pseudo-item
+const VIRTUAL = '__virtual__';  // first-class Virtual Tools category
 let STATE = null, SELECTED = null;
+let VIRTUAL_STATE = { mounted: false, tools: [], unavailable: true };
+let VIRTUAL_CATALOG = { backends: [] };
+let VIRTUAL_TEST_NAME = null;
 let STATUS = null;  // #23: backend name -> {state, ms, tools, error}, async
 let CC_REG = null;  // #46: {available, registered:{backend:bool}}, async
 const timers = {};
@@ -549,10 +628,22 @@ function chipT(t) { return t === 'streamable-http' ? 'shttp' : t; }
 
 async function load() {
   STATE = await api('GET', '/admin/api/state');
+  await loadVirtualState();
   renderList();
   if (SELECTED === GATEWAY) renderDetail(GATEWAY);
+  else if (SELECTED === VIRTUAL) renderDetail(VIRTUAL);
   else if (SELECTED && STATE.backends.find(b => b.name === SELECTED)) renderDetail(SELECTED);
   else { SELECTED = null; $('#detail').innerHTML = `<div class="empty">${ICON.plug}Select a backend on the left — or the Gateway row for the system overview.</div>`; }
+}
+
+async function loadVirtualState() {
+  try {
+    VIRTUAL_STATE = await api('GET', '/admin/api/virtual-tools');
+    VIRTUAL_STATE.unavailable = false;
+  } catch (e) {
+    // Allows the UI branch to remain usable while the production API lands.
+    VIRTUAL_STATE = { mounted: false, tools: [], unavailable: true, error: e.message };
+  }
 }
 
 // --- #23 connection status + #43 dashboard-load refresh -------------------
@@ -652,6 +743,16 @@ function renderList() {
   gw.onclick = () => { SELECTED = GATEWAY; renderList(); renderDetail(GATEWAY); };
   gw.innerHTML = `<div class="gw-nm">Gateway</div><div class="gw-sub">System overview</div>`;
   el.appendChild(gw);
+  const vt = document.createElement('div');
+  const activeVirtual = (VIRTUAL_STATE.tools || []).filter(t => t.enabled).length;
+  const virtualBad = (VIRTUAL_STATE.tools || []).filter(t => virtualResolutionState(t) === 'err').length;
+  vt.className = 'b-item' + (SELECTED === VIRTUAL ? ' sel-bg' : '');
+  vt.onclick = () => { SELECTED = VIRTUAL; renderList(); renderDetail(VIRTUAL); };
+  vt.innerHTML = `<div class="b-row"><span class="st-dot ${VIRTUAL_STATE.unavailable || !VIRTUAL_STATE.mounted ? 'st-err' : 'st-ok'}"></span>
+      <div class="nm">Virtual Tools</div><span class="chip">/virtual/mcp</span></div>
+    <div class="b-sub"><span class="cnt">${activeVirtual}/${(VIRTUAL_STATE.tools || []).length} active</span>
+      ${virtualBad ? `<span class="warn">${virtualBad} unresolved</span>` : ''}</div>`;
+  el.appendChild(vt);
   STATE.backends.forEach(b => {
     const d = document.createElement('div');
     d.className = 'b-item' + (b.name === SELECTED ? ' sel-bg' : '') + (b.enabled ? '' : ' off');
@@ -688,6 +789,7 @@ function renderList() {
 
 function renderDetail(name) {
   if (name === GATEWAY) return renderGateway();
+  if (name === VIRTUAL) return renderVirtualTools();
   const b = STATE.backends.find(x => x.name === name);
   const m = $('#detail');
   const conn = b.transport === 'stdio'
@@ -704,7 +806,7 @@ function renderDetail(name) {
       <span class="btn-group">
         <button class="btn" style="font-size:11px" onclick="reintrospect('${escJS(b.name)}')">Re-inspect</button>
         <button class="btn" style="font-size:11px" onclick="openRename('${escJS(b.name)}')"
-          title="hard-rename: changes the endpoint URL + Claude Code registration (restart)">Rename…</button>
+          title="hard-rename: changes the endpoint URL + Claude Code registration">Rename…</button>
         <button class="btn" style="font-size:11px" onclick="loadSnapshot('${escJS(b.name)}')"
           title="restore this backend's field values from a saved JSON file">Load fields</button>
       </span>
@@ -1083,6 +1185,226 @@ function renderGateway() {
   au.addEventListener('change', () => localStorage.setItem('autoUniquify', au.checked ? '1' : '0'));
   paintStatus();  // #23
 }
+
+// Virtual Tools — first-class draft → validate/test → activate lifecycle.
+function virtualResolutionState(t) {
+  const r = t.resolution || t.status || {};
+  if (r.ok === false || r.state === 'unresolved' || r.state === 'error' || (r.errors || []).length) return 'err';
+  if (!t.enabled || r.state === 'degraded') return 'warn';
+  return 'ok';
+}
+function virtualStatusText(t) {
+  const r = t.resolution || t.status || {};
+  if (virtualResolutionState(t) === 'err') return (r.errors || []).join('; ') || 'unresolved reference';
+  if (!t.enabled) return 'draft · inactive';
+  return r.state === 'degraded' ? 'active · degraded' : 'active · resolved';
+}
+function virtualMemberBinding(member) {
+  const resolved = member.resolution || member.resolved || {};
+  const original = `${member.backend_id || '?'} / ${member.tool_original || '?'}`;
+  const effectiveBackend = resolved.backend_effective || resolved.backend_name || member.backend_effective;
+  const effectiveTool = resolved.tool_effective || resolved.tool_name || member.tool_effective;
+  const effective = effectiveBackend && effectiveTool ? `${effectiveBackend} / ${effectiveTool}` : null;
+  return `<span class="vt-original">${esc(original)}</span>${effective ? ` → ${esc(effective)}` : ''}`;
+}
+function renderVirtualTools() {
+  const m = $('#detail'), tools = VIRTUAL_STATE.tools || [];
+  const unavailable = VIRTUAL_STATE.unavailable
+    ? `<div class="hook-err">${ICON.warn} Virtual Tools API is not available in this build yet. The MCP Server editor remains usable.</div>` : '';
+  const endpoint = VIRTUAL_STATE.mounted
+    ? '<span class="vt-status ok">endpoint mounted</span>'
+    : '<span class="vt-status err">endpoint unavailable</span>';
+  const cards = tools.map(t => {
+    const status = virtualResolutionState(t);
+    const members = (t.members || []).map(x => `<div class="vt-binding">${virtualMemberBinding(x)}</div>`).join('');
+    const tested = t.last_test ? `last test: ${esc(t.last_test.status || t.last_test.outcome || 'recorded')} · runtime-only` : 'not tested yet · runtime-only';
+    const dispatched = t.last_dispatch ? ` · last dispatch: ${esc(t.last_dispatch.status || t.last_dispatch.outcome || 'recorded')}` : '';
+    return `<div class="card">
+      <div class="c-head"><span class="c-title"><code>${esc(t.name)}</code></span>
+        <span class="chip">${esc(t.dispatch || 'all')}</span>
+        <span class="vt-status ${status}">${esc(virtualStatusText(t))}</span><span class="spacer"></span>
+        <button onclick="openVirtualEditor('${escJS(t.name)}')">Edit</button>
+        <button onclick="duplicateVirtualTool('${escJS(t.name)}')">Duplicate</button>
+        <button class="btn-danger" onclick="deleteVirtualTool('${escJS(t.name)}')">Delete</button></div>
+      <div style="font-size:12.5px;color:var(--tm);margin-bottom:9px">${esc(t.description || '')}</div>
+      ${members || '<div class="si">no members</div>'}
+      <div class="vt-actions">
+        <button onclick="validateVirtualTool('${escJS(t.name)}')">Validate &amp; resolve</button>
+        <button onclick="testVirtualTool('${escJS(t.name)}')">${ICON.play} Test draft</button>
+        ${t.enabled
+          ? `<button onclick="disableVirtualTool('${escJS(t.name)}')">Disable</button>`
+          : `<button class="btn-pri" onclick="activateVirtualTool('${escJS(t.name)}')">Activate</button>`}
+        <span class="si">${tested}${dispatched}</span>
+      </div></div>`;
+  }).join('');
+  m.innerHTML = `<div class="b-head"><h2>Virtual Tools</h2><span class="chip">first-class</span>${endpoint}<span class="spacer"></span>
+      <button class="btn-pri" onclick="openVirtualEditor()">+ Create Virtual Tool</button></div>
+    <div class="b-sub-line">Stable source bindings, live effective-name resolution, optional live testing, and fidelity-preserving aggregation at <code>/virtual/mcp</code>.</div>
+    ${unavailable}${cards || `<div class="vt-empty">No Virtual Tools yet.<br><button class="btn-pri" style="margin-top:12px" onclick="openVirtualEditor()">Create the first draft</button></div>`}`;
+}
+
+async function ensureVirtualCatalog() {
+  // Effective names and source parameters can change after reinspection or a
+  // backend rename, so every editor open gets a fresh stable-identity catalog.
+  VIRTUAL_CATALOG = await api('GET', '/admin/api/virtual-catalog');
+}
+function virtualCatalogTools() {
+  const rows = [];
+  (VIRTUAL_CATALOG.backends || []).forEach(b => (b.tools || []).forEach(t => rows.push({
+    backend_id: b.id || b.backend_id,
+    backend_effective: b.effective_name || b.name,
+    tool_original: t.original || t.tool_original,
+    tool_effective: t.effective_name || t.name,
+    params: t.params || t.parameters || [],
+  })));
+  return rows;
+}
+function virtualSourceOptions(selectedBackend, selectedTool) {
+  const options = virtualCatalogTools().map((x, i) => {
+    const selected = x.backend_id === selectedBackend && x.tool_original === selectedTool;
+    const original = `${x.backend_id} / ${x.tool_original}`;
+    const effective = `${x.backend_effective} / ${x.tool_effective}`;
+    return `<option value="${i}" ${selected ? 'selected' : ''}>${esc(effective)} · original ${esc(original)}</option>`;
+  });
+  return '<option value="">Choose backend tool…</option>' + options.join('');
+}
+function addVirtualInput(value = {}) {
+  const row = document.createElement('div');
+  row.className = 'vt-row vt-input';
+  row.innerHTML = `<div class="vt-row-head"><b>Input</b><span class="spacer"></span><button class="btn-danger" onclick="this.closest('.vt-row').remove()">Remove</button></div>
+    <div class="vt-member-grid"><input class="vi-name mono" placeholder="query" value="${esc(value.name || '')}">
+      <select class="vi-type">${['string','integer','number','boolean'].map(x => `<option ${value.type === x ? 'selected' : ''}>${x}</option>`).join('')}</select>
+      <label class="chk"><input class="tgl vi-required" type="checkbox" ${value.required !== false ? 'checked' : ''}> required</label></div>
+    <div class="vt-grid"><div><label>Description</label><input class="vi-description" value="${esc(value.description || '')}"></div>
+      <div><label>Optional default (JSON)</label><input class="vi-default mono" value="${value.default === undefined ? '' : esc(JSON.stringify(value.default))}" placeholder="unset"></div></div>`;
+  $('#vt_inputs').appendChild(row);
+}
+function addVirtualMember(value = {}) {
+  const row = document.createElement('div');
+  row.className = 'vt-row vt-member';
+  row.innerHTML = `<div class="vt-row-head"><b>Member</b><span class="spacer"></span><button class="btn-danger" onclick="this.closest('.vt-row').remove()">Remove</button></div>
+    <label>Source identity <span class="si">effective name first · immutable original binding after dot</span></label>
+    <select class="vm-source">${virtualSourceOptions(value.backend_id, value.tool_original)}</select>
+    <div class="vt-member-grid"><div><label>Label</label><input class="vm-label mono" value="${esc(value.label || '')}" placeholder="provider-a"></div>
+      <div><label>Timeout (s)</label><input class="vm-timeout" type="number" min="0.1" step="0.1" value="${Number(value.timeout) || 30}"></div><div></div></div>
+    <div class="vt-grid"><div><label>Argument map (JSON) <span class="si">original member param → virtual input</span></label><textarea class="vm-args mono" rows="2">${esc(JSON.stringify(value.args || {}, null, 2))}</textarea></div>
+      <div><label>Static arguments (JSON)</label><textarea class="vm-static mono" rows="2">${esc(JSON.stringify(value.static_args || {}, null, 2))}</textarea></div></div>
+    <div class="vt-grid"><div><label>Keyword patterns <span class="si">one regex per line</span></label><textarea class="vm-patterns mono" rows="2">${esc((value.route_patterns || []).join('\n'))}</textarea></div>
+      <div><label>LLM route description</label><textarea class="vm-route-desc" rows="2">${esc(value.route_description || '')}</textarea></div></div>`;
+  $('#vt_members').appendChild(row);
+}
+function virtualDispatchChanged() {
+  const dispatch = $('#vt_dispatch').value;
+  $('#vt_router').style.display = dispatch === 'llm' ? '' : 'none';
+  document.querySelectorAll('.vm-patterns').forEach(x => x.closest('.vt-grid').style.display = dispatch === 'all' ? 'none' : 'grid');
+}
+async function openVirtualEditor(name, duplicate = false) {
+  $('#vt_err').textContent = '';
+  try { await ensureVirtualCatalog(); } catch (e) { toast('catalog unavailable: ' + e.message, 5000); return; }
+  const source = name ? (VIRTUAL_STATE.tools || []).find(t => t.name === name) : null;
+  const t = source ? JSON.parse(JSON.stringify(source)) : {};
+  $('#vt_title').textContent = source ? (duplicate ? 'Duplicate Virtual Tool' : 'Edit Virtual Tool') : 'Create Virtual Tool';
+  $('#vt_original_name').value = source && !duplicate ? source.name : '';
+  $('#vt_name').value = duplicate ? `${t.name}_copy` : (t.name || '');
+  $('#vt_description').value = t.description || '';
+  $('#vt_dispatch').value = t.dispatch || 'all';
+  $('#vt_budget').value = t.max_result_bytes || 262144;
+  $('#vt_failure').value = t.failure_policy || 'partial';
+  $('#vt_always').checked = !!t.always_load;
+  $('#vt_model').value = (t.router || {}).model || '';
+  $('#vt_api_key').value = (t.router || {}).api_key || '';
+  $('#vt_router_timeout').value = (t.router || {}).timeout || 3;
+  $('#vt_fallback').value = (t.router || {}).fallback || 'all';
+  $('#vt_conditions').value = (t.router || {}).conditions || '';
+  $('#vt_egress').checked = !!(t.router || {}).egress_acknowledged;
+  $('#vt_inputs').innerHTML = ''; $('#vt_members').innerHTML = '';
+  (t.inputs || []).forEach(addVirtualInput);
+  (t.members || []).forEach(addVirtualMember);
+  if (!(t.inputs || []).length) addVirtualInput({ name: 'query', type: 'string', required: true });
+  if (!(t.members || []).length) addVirtualMember();
+  virtualDispatchChanged();
+  $('#virtualBg').classList.add('show');
+}
+function closeVirtualEditor() { $('#virtualBg').classList.remove('show'); }
+function parseVirtualJSON(text, label) {
+  try { return JSON.parse(text || '{}'); } catch { throw new Error(label + ' must be valid JSON'); }
+}
+function gatherVirtualTool() {
+  const inputs = [...document.querySelectorAll('.vt-input')].map(row => {
+    const value = { name: $('.vi-name', row).value.trim(), type: $('.vi-type', row).value,
+      description: $('.vi-description', row).value.trim(), required: $('.vi-required', row).checked };
+    const raw = $('.vi-default', row).value.trim(); if (raw) value.default = parseVirtualJSON(raw, `default for ${value.name}`);
+    return value;
+  });
+  const catalog = virtualCatalogTools();
+  const members = [...document.querySelectorAll('.vt-member')].map(row => {
+    const index = $('.vm-source', row).value;
+    if (index === '') throw new Error('every member needs a source tool');
+    const source = catalog[Number(index)];
+    return { backend_id: source.backend_id, tool_original: source.tool_original,
+      label: $('.vm-label', row).value.trim(), args: parseVirtualJSON($('.vm-args', row).value, 'argument map'),
+      static_args: parseVirtualJSON($('.vm-static', row).value, 'static arguments'),
+      timeout: Number($('.vm-timeout', row).value),
+      route_patterns: $('.vm-patterns', row).value.split('\n').map(x => x.trim()).filter(Boolean),
+      route_description: $('.vm-route-desc', row).value.trim() };
+  });
+  const dispatch = $('#vt_dispatch').value;
+  const definition = { name: $('#vt_name').value.trim(), description: $('#vt_description').value.trim(),
+    always_load: $('#vt_always').checked, dispatch, inputs, members,
+    max_result_bytes: Number($('#vt_budget').value), failure_policy: $('#vt_failure').value };
+  if (dispatch === 'llm') definition.router = { model: $('#vt_model').value.trim(), api_key: $('#vt_api_key').value.trim(),
+    conditions: $('#vt_conditions').value.trim(), timeout: Number($('#vt_router_timeout').value),
+    fallback: $('#vt_fallback').value.trim(), egress_acknowledged: $('#vt_egress').checked };
+  return definition;
+}
+async function saveVirtualTool(activate) {
+  const err = $('#vt_err'); err.textContent = '';
+  try {
+    const definition = gatherVirtualTool(), original = $('#vt_original_name').value;
+    if (!definition.name || !definition.description) throw new Error('name and description are required');
+    const saved = original
+      ? await api('PUT', `/admin/api/virtual-tools/${encodeURIComponent(original)}`, definition)
+      : await api('POST', '/admin/api/virtual-tools', definition);
+    const finalName = (saved.tool || saved.definition || saved).name || definition.name;
+    if (activate) await api('POST', `/admin/api/virtual-tools/${encodeURIComponent(finalName)}/activate`);
+    closeVirtualEditor(); await load(); SELECTED = VIRTUAL; renderList(); renderDetail(VIRTUAL);
+    toast(activate ? 'Virtual Tool saved and activated' : 'Virtual Tool draft saved'); flashSaved();
+  } catch (e) { err.textContent = e.message; }
+}
+function duplicateVirtualTool(name) { return openVirtualEditor(name, true); }
+async function validateVirtualTool(name) {
+  try { const r = await api('POST', `/admin/api/virtual-tools/${encodeURIComponent(name)}/validate`);
+    await load(); SELECTED = VIRTUAL; renderList(); renderDetail(VIRTUAL);
+    toast(r.ok ? 'resolved and valid' : 'validation failed: ' + (r.errors || []).join('; '), 5000);
+  } catch (e) { toast(e.message, 5000); }
+}
+function testVirtualTool(name) {
+  const tool = (VIRTUAL_STATE.tools || []).find(x => x.name === name);
+  const arguments_ = {};
+  (tool && tool.inputs || []).forEach(input => {
+    if (input.default !== undefined) arguments_[input.name] = input.default;
+    else if (input.required) arguments_[input.name] = input.type === 'boolean' ? false : input.type === 'string' ? '' : 0;
+  });
+  VIRTUAL_TEST_NAME = name;
+  $('#vtt_name').textContent = name;
+  $('#vtt_args').value = JSON.stringify(arguments_, null, 2);
+  $('#vtt_err').textContent = '';
+  $('#virtualTestBg').classList.add('show');
+}
+function closeVirtualTest() { $('#virtualTestBg').classList.remove('show'); VIRTUAL_TEST_NAME = null; }
+async function runVirtualTest() {
+  const name = VIRTUAL_TEST_NAME, err = $('#vtt_err'); err.textContent = '';
+  try { const arguments_ = parseVirtualJSON($('#vtt_args').value, 'test arguments');
+    const r = await api('POST', `/admin/api/virtual-tools/${encodeURIComponent(name)}/test`, { arguments: arguments_ });
+    closeVirtualTest();
+    await load(); SELECTED = VIRTUAL; renderList(); renderDetail(VIRTUAL);
+    const ms = r.last_test && r.last_test.ms;
+    toast(`test ${r.ok === false ? 'failed' : 'passed'}${ms != null ? ` · ${ms} ms` : ''}`, 5000);
+  } catch (e) { err.textContent = e.message; }
+}
+async function activateVirtualTool(name) { try { await api('POST', `/admin/api/virtual-tools/${encodeURIComponent(name)}/activate`); await load(); SELECTED = VIRTUAL; renderList(); renderDetail(VIRTUAL); toast('activated ' + name); } catch (e) { toast('activation blocked: ' + e.message, 5000); } }
+async function disableVirtualTool(name) { try { await api('POST', `/admin/api/virtual-tools/${encodeURIComponent(name)}/disable`); await load(); SELECTED = VIRTUAL; renderList(); renderDetail(VIRTUAL); toast('disabled ' + name); } catch (e) { toast(e.message, 5000); } }
+async function deleteVirtualTool(name) { if (!confirm(`Delete Virtual Tool ${name}?`)) return; try { await api('DELETE', `/admin/api/virtual-tools/${encodeURIComponent(name)}`); await load(); SELECTED = VIRTUAL; renderList(); renderDetail(VIRTUAL); toast('deleted ' + name); } catch (e) { toast(e.message, 5000); } }
 
 // Tool card — editable fields prefilled with effective values (#62 semantics).
 function toolCard(b, t) {
@@ -1871,8 +2193,13 @@ async function doRename() {
     closeRename();
     SELECTED = newName;
     toast(`renamed — new endpoint ${r.new_endpoint} · re-register in Claude Code as ${r.new_registration}`, 6000);
-    if (r.reloaded === 'restarting') await waitReload();  // poll /health, then reload state
-    else { await load(); toast('renamed (dev: no launchd restart — endpoint moves on next manual restart)'); }
+    if (r.reloaded === 'restarting') await waitReload();
+    else {
+      await load();
+      toast(r.reloaded === 'hot-rename'
+        ? 'renamed and hot-mounted · update the Claude Code registration'
+        : 'renamed in config · endpoint moves on the next manual restart');
+    }
     if (rereg) await reRegisterCC(oldName, newName);
   } catch (e) { $('#rn_err').textContent = e.message; }
   finally { $('#rn_go').disabled = false; }

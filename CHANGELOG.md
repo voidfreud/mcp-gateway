@@ -26,6 +26,18 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **First-class Virtual Tools** — the Admin UI now has a separate Virtual
+  Tools catalog for composing and routing live backend tools behind one
+  permanent `/virtual/mcp` endpoint. Definitions use stable backend IDs and
+  original tool/parameter identities, support concurrent `all`, deterministic
+  `keyword`, and consent-gated OpenRouter `llm` dispatch, preserve rich MCP
+  result content under a strict serialized-byte budget, and follow an explicit
+  draft → validate/test → activate lifecycle. The endpoint participates in
+  readiness and remains mounted with an empty catalog; backend removal is
+  blocked while referenced. An isolated socket-level acceptance harness covers
+  lifecycle, concurrency, routing/fallback, failures, rich results, budgeting,
+  and backend rename stability.
+
 - **Age-gated post-mount baseline refresh** (#157) — a new top-level
   `baseline_max_age` config knob (seconds, default `86400` = 24 h, `0`
   disables the gate). At boot/remount, a backend whose captured baseline is

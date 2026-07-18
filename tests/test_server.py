@@ -841,6 +841,57 @@ def test_rename_backend_unknown_is_400(tmp_path):
     assert r.status_code == 400
 
 
+def test_backend_name_virtual_is_explicitly_rejected_on_add_and_rename(tmp_path):
+    client = TestClient(_admin_app(tmp_path))
+    renamed = client.post("/admin/api/backend/b/rename", json={"value": "virtual"})
+    assert renamed.status_code == 400
+    assert "reserved" in renamed.json()["error"]
+    added = client.post(
+        "/admin/api/backend",
+        json={"name": "virtual", "transport": "stdio", "command": "/bin/x"},
+    )
+    assert added.status_code == 400
+    assert "reserved" in added.json()["error"]
+    assert [item.name for item in cl.load(_cfg_path(tmp_path)).backends] == ["b"]
+
+
+def test_hot_rename_mount_failure_restores_config_defaults_and_old_mount(tmp_path):
+    cfg = cl.GatewayConfig.model_validate(
+        {"backends": [{"name": "b", "transport": "stdio", "command": "/bin/x"}]}
+    )
+    path = tmp_path / "config.toml"
+    cl.save(cfg, path)
+    _write_defaults("b")
+    old_proxy = object()
+    registry = {"b": old_proxy}
+    calls = []
+
+    async def add(backend):
+        calls.append(("add", backend.name))
+        return False
+
+    def remove(name):
+        calls.append(("remove", name))
+
+    app = Starlette()
+    admin.register(
+        app,
+        str(path),
+        structlog.get_logger("test"),
+        registry,
+        {},
+        {"add": add, "remove": remove},
+    )
+    response = TestClient(app).post("/admin/api/backend/b/rename", json={"value": "nb"})
+    assert response.status_code == 500
+    assert response.json()["reloaded"] == "mount-failed-rolled-back"
+    assert [item.name for item in cl.load(path).backends] == ["b"]
+    assert registry["b"] is old_proxy
+    assert calls == [("add", "nb"), ("remove", "nb")]
+    assert (admin.DEFAULTS_DIR / "b.json").is_file()
+    assert not (admin.DEFAULTS_DIR / "nb.json").exists()
+
+
 # ---------------------------------------------------------------------------
 # #45 — one-click Claude Code registration via the `claude` CLI
 # ---------------------------------------------------------------------------
@@ -1846,6 +1897,53 @@ def test_admin_html_inline_script_parses():
         assert proc.returncode == 0, proc.stderr
     finally:
         os.unlink(js_path)
+
+
+def test_admin_html_has_first_class_virtual_tools_surface():
+    text = (REPO_ROOT / "src" / "mcp_gateway" / "admin.html").read_text(
+        encoding="utf-8"
+    )
+    assert "Virtual Tools" in text
+    assert "Create Virtual Tool" in text
+    assert (
+        'const VIRTUAL = "__virtual__"' in text
+        or "const VIRTUAL = '__virtual__'" in text
+    )
+    assert "/virtual/mcp" in text
+    for lifecycle in (
+        "Save draft",
+        "Save &amp; activate",
+        "Validate &amp; resolve",
+        "Test draft",
+        "Disable",
+        "Delete",
+    ):
+        assert lifecycle in text
+
+
+def test_admin_html_virtual_tools_uses_adr_api_contract():
+    text = (REPO_ROOT / "src" / "mcp_gateway" / "admin.html").read_text(
+        encoding="utf-8"
+    )
+    for endpoint in (
+        "/admin/api/virtual-tools",
+        "/admin/api/virtual-catalog",
+        "/validate",
+        "/test",
+        "/activate",
+        "/disable",
+    ):
+        assert endpoint in text
+    for stable_identity in ("backend_id", "tool_original"):
+        assert stable_identity in text
+    assert "Arguments (JSON object)" in text
+    assert "prompt('Test arguments as JSON:'" not in text
+    for security_field in (
+        "egress_acknowledged",
+        "API key reference",
+        "external provider",
+    ):
+        assert security_field in text
 
 
 def test_interval_refresh_loop_sweeps_and_stops(tmp_path, monkeypatch):

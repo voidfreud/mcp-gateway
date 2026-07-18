@@ -36,6 +36,8 @@ log_file = "~/.local/state/mcp-gateway/gateway.log"
 # transport = "stdio" -> needs `command` (+ optional args, env)
 # ===========================================================================
 [[backends]]
+# id = "1d78c28d-9cb5-4b69-b6ca-efdc17862822" # stable Virtual Tool identity;
+                                   # assigned/persisted automatically on first use
 name = "exa"                       # routing identity: drives the /exa/mcp
                                    # endpoint + the gateway-exa Claude Code
                                    # registration. Renaming it is a topology
@@ -141,3 +143,38 @@ stateless = true                   # parsed; shared-session reuse is a
 # args = ["serena-mcp"]
 # env = { SOME_KEY = "${SOME_ENV}" }
 # stateless = false
+
+# ===========================================================================
+# Virtual Tools — gateway-owned tools on the permanent /virtual/mcp endpoint.
+# Prefer the Admin UI: create draft -> validate -> test -> activate.
+# The member IDs below must match the stable `id` fields assigned to backends.
+# ===========================================================================
+# [[virtual_tools]]
+# name = "web_search_everywhere"
+# description = "Search both providers concurrently and preserve every result."
+# enabled = false
+# dispatch = "all"                 # all | keyword | llm
+# max_result_bytes = 262144
+# failure_policy = "partial"       # partial | strict
+#
+#   [[virtual_tools.inputs]]
+#   name = "query"
+#   type = "string"
+#   description = "What to search for."
+#   required = true
+#
+#   [[virtual_tools.members]]
+#   backend_id = "1d78c28d-9cb5-4b69-b6ca-efdc17862822"
+#   tool_original = "web_search_exa"
+#   label = "exa"
+#   args = { query = "query" }     # original member param -> virtual input
+#   timeout = 15
+#   route_patterns = ["research|paper"] # keyword dispatch only
+#   route_description = "Use for semantic research." # llm dispatch only
+#
+#   [virtual_tools.router]
+#   model = "openai/gpt-4o-mini"
+#   api_key = "${ROUTER_API_KEY}"
+#   timeout = 3
+#   fallback = "all"
+#   egress_acknowledged = true

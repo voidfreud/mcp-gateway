@@ -15,6 +15,7 @@ transforms are keyed by that bare original name.
 
 from __future__ import annotations
 
+import hashlib
 import ipaddress
 import json
 import os
@@ -241,6 +242,10 @@ class PromptOverride(BaseModel, extra="forbid"):
 class Backend(BaseModel, extra="forbid"):
     """One backend MCP server and its per-tool text overrides."""
 
+    # Stable, non-display identity used by Virtual Tool bindings. Legacy configs
+    # may omit it; the first Virtual Tool write assigns and persists IDs before
+    # storing any reference. Backend rename therefore changes only ``name``.
+    id: str | None = None
     name: str
     # Optional display-only label for the admin UI (#42). Cosmetic ONLY: it does
     # NOT change routing, the endpoint URL, config keys, or the Claude Code
@@ -328,6 +333,396 @@ class Backend(BaseModel, extra="forbid"):
         return v
 
 
+_VIRTUAL_NAME_RE = r"[A-Za-z0-9_-]{1,64}"
+MAX_VIRTUAL_ROUTE_PATTERNS = 32
+MAX_VIRTUAL_ROUTE_PATTERN_CHARS = 256
+DEFAULT_VIRTUAL_ROUTING_INPUT_CHARS = 4_096
+MAX_VIRTUAL_ROUTING_INPUT_CHARS = 32_768
+
+
+def _route_quantifier_end(pattern: str, position: int) -> int | None:
+    """Return the position after a regex quantifier beginning at *position*."""
+
+    if pattern[position] in "*+?":
+        return position + 1
+    if pattern[position] != "{":
+        return None
+    end = pattern.find("}", position + 1)
+    if end == -1:
+        return None
+    if re.fullmatch(r"\d+(?:,\d*)?", pattern[position + 1 : end]):
+        return end + 1
+    return None
+
+
+def _validate_route_pattern(  # noqa: PLR0912, PLR0915 - small regex parser state machine
+    pattern: str, tool_original: str
+) -> None:
+    """Accept a bounded, non-recursive subset of Python's regex syntax.
+
+    Keyword routes run for every virtual invocation, so valid Python regexes are
+    not automatically safe enough.  In particular, lookarounds, backreferences,
+    and a quantified group containing another quantifier make catastrophic
+    backtracking practical on caller-controlled input.
+    """
+
+    if not pattern.strip():
+        raise ConfigError(
+            f"virtual member {tool_original!r}: route pattern cannot be empty"
+        )
+    if len(pattern) > MAX_VIRTUAL_ROUTE_PATTERN_CHARS:
+        raise ConfigError(
+            f"virtual member {tool_original!r}: route pattern exceeds "
+            f"{MAX_VIRTUAL_ROUTE_PATTERN_CHARS} characters"
+        )
+
+    groups: list[bool] = []
+    in_class = False
+    position = 0
+    while position < len(pattern):
+        char = pattern[position]
+        if char == "\\":
+            if position + 1 < len(pattern):
+                escaped = pattern[position + 1]
+                if escaped.isdigit() or (
+                    escaped in {"g", "k"}
+                    and position + 2 < len(pattern)
+                    and pattern[position + 2] == "<"
+                ):
+                    raise ConfigError(
+                        f"virtual member {tool_original!r}: route patterns "
+                        "cannot use backreferences"
+                    )
+            position += 2
+            continue
+        if in_class:
+            if char == "]":
+                in_class = False
+            position += 1
+            continue
+        if char == "[":
+            in_class = True
+            position += 1
+            continue
+        if char == "(":
+            prefix = pattern[position : position + 4]
+            if (
+                prefix.startswith("(?=")
+                or prefix.startswith("(?!")
+                or prefix.startswith("(?<=")
+                or prefix.startswith("(?<!")
+                or prefix.startswith("(?P=")
+                or prefix.startswith("(?(")
+            ):
+                raise ConfigError(
+                    f"virtual member {tool_original!r}: route patterns cannot "
+                    "use lookarounds, conditionals, or backreferences"
+                )
+            groups.append(False)
+            position += 1
+            continue
+        if char == ")":
+            # Python's own compiler reports unmatched parentheses below.
+            contains_quantifier = groups.pop() if groups else False
+            quantifier_end = (
+                _route_quantifier_end(pattern, position + 1)
+                if (position + 1 < len(pattern))
+                else None
+            )
+            if quantifier_end is not None and contains_quantifier:
+                raise ConfigError(
+                    f"virtual member {tool_original!r}: route patterns cannot "
+                    "use nested quantifiers"
+                )
+            if groups:
+                groups[-1] = (
+                    groups[-1] or contains_quantifier or (quantifier_end is not None)
+                )
+            position += 1
+            continue
+        quantifier_end = _route_quantifier_end(pattern, position)
+        if quantifier_end is not None:
+            # The '?' in a non-capturing or named-group prefix is not a
+            # quantifier.  It cannot create a backtracking repetition.
+            if not (char == "?" and position > 0 and pattern[position - 1] == "("):
+                if groups:
+                    groups[-1] = True
+            position = quantifier_end
+            continue
+        position += 1
+
+    try:
+        re.compile(pattern)
+    except re.error as exc:
+        raise ConfigError(
+            f"virtual member {tool_original!r}: invalid route pattern "
+            f"{pattern!r}: {exc}"
+        ) from None
+
+
+def routing_input_text(arguments: dict[str, object], max_chars: int) -> str:
+    """Return bounded routing text for keyword/LLM selection.
+
+    Callers must apply this before regex matching or sending arguments to an
+    external router.  The limit is character-based because route regexes work
+    on Python strings, and it excludes schema defaults that are not part of a
+    call.
+    """
+
+    text = " ".join(str(value) for value in arguments.values())
+    if len(text) > max_chars:
+        raise ValueError(
+            f"virtual routing input exceeds configured {max_chars}-character limit"
+        )
+    return text
+
+
+class VirtualInput(BaseModel, extra="forbid"):
+    """One public JSON-Schema input of a gateway-owned Virtual Tool."""
+
+    name: str
+    type: Literal["string", "integer", "number", "boolean"] = "string"
+    description: str | None = None
+    required: bool = True
+    default: str | int | float | bool | None = None
+
+    @model_validator(mode="after")
+    def _check(self) -> VirtualInput:
+        if not re.fullmatch(_VIRTUAL_NAME_RE, self.name):
+            raise ConfigError(
+                f"invalid virtual input name {self.name!r}: use only letters, "
+                f"digits, '_' or '-' (max 64 chars)"
+            )
+        if self.required and self.default is not None:
+            raise ConfigError(
+                f"virtual input {self.name!r}: a required input cannot have a default"
+            )
+        if self.default is not None:
+            if isinstance(self.default, bool):
+                valid = self.type == "boolean"
+            elif self.type == "integer":
+                valid = isinstance(self.default, int)
+            elif self.type == "number":
+                valid = isinstance(self.default, int | float)
+            elif self.type == "string":
+                valid = isinstance(self.default, str)
+            else:
+                valid = False
+            if not valid:
+                raise ConfigError(
+                    f"virtual input {self.name!r}: default {self.default!r} does "
+                    f"not match type {self.type!r}"
+                )
+        return self
+
+
+class VirtualMember(BaseModel, extra="forbid"):
+    """Stable binding from a Virtual Tool to one original backend tool."""
+
+    backend_id: str
+    tool_original: str
+    label: str | None = None
+    # Original member parameter -> Virtual Tool input name.
+    args: dict[str, str] = Field(default_factory=dict)
+    # Original member parameter -> injected scalar.
+    static_args: dict[str, str | int | float | bool] = Field(default_factory=dict)
+    timeout: float = Field(default=30.0, gt=0, le=300)
+    route_patterns: list[str] = Field(default_factory=list)
+    route_description: str | None = None
+
+    @model_validator(mode="after")
+    def _check(self) -> VirtualMember:
+        if not self.backend_id.strip() or not self.tool_original.strip():
+            raise ConfigError(
+                "virtual member backend_id and tool_original are required"
+            )
+        overlap = set(self.args) & set(self.static_args)
+        if overlap:
+            raise ConfigError(
+                f"virtual member {self.tool_original!r}: parameter(s) "
+                f"{sorted(overlap)} appear in both args and static_args"
+            )
+        if len(self.route_patterns) > MAX_VIRTUAL_ROUTE_PATTERNS:
+            raise ConfigError(
+                f"virtual member {self.tool_original!r}: no more than "
+                f"{MAX_VIRTUAL_ROUTE_PATTERNS} route patterns are allowed"
+            )
+        for pattern in self.route_patterns:
+            _validate_route_pattern(pattern, self.tool_original)
+        return self
+
+
+class VirtualRouter(BaseModel, extra="forbid"):
+    """Keyword/LLM member selection and explicit local fallback."""
+
+    model: str = "openai/gpt-4o-mini"
+    api_key: str | None = None
+    conditions: str | None = None
+    timeout: float = Field(default=3.0, gt=0, le=30)
+    fallback: str = "all"
+    egress_acknowledged: bool = False
+    # SHA-256 consent receipt for the exact external-routing payload contract.
+    # It is intentionally stored alongside the acknowledgement, never derived
+    # during serialization: an operator must explicitly reconfirm a changed
+    # model, API reference, prompt context, or public input contract.
+    egress_consent_fingerprint: str | None = None
+
+    @field_validator("api_key")
+    @classmethod
+    def _key_must_be_env_ref(cls, value: str | None) -> str | None:
+        if value is not None and not re.fullmatch(
+            r"\$\{[A-Za-z_][A-Za-z0-9_]*\}", value
+        ):
+            raise ConfigError("virtual router api_key must be a ${ENV_VAR} reference")
+        return value
+
+    @field_validator("egress_consent_fingerprint")
+    @classmethod
+    def _fingerprint_must_be_sha256(cls, value: str | None) -> str | None:
+        if value is not None and not re.fullmatch(r"sha256:[0-9a-f]{64}", value):
+            raise ConfigError(
+                "virtual router egress_consent_fingerprint must be a sha256 digest"
+            )
+        return value
+
+
+class VirtualTool(BaseModel, extra="forbid"):
+    """A gateway-owned tool served from the shared ``/virtual/mcp`` endpoint."""
+
+    name: str
+    description: str
+    enabled: bool = False
+    always_load: bool = False
+    dispatch: Literal["all", "keyword", "llm"] = "all"
+    inputs: list[VirtualInput] = Field(default_factory=list)
+    members: list[VirtualMember]
+    router: VirtualRouter | None = None
+    routing_input_max_chars: int = Field(
+        default=DEFAULT_VIRTUAL_ROUTING_INPUT_CHARS,
+        ge=64,
+        le=MAX_VIRTUAL_ROUTING_INPUT_CHARS,
+    )
+    max_result_bytes: int = Field(default=262_144, ge=1_024, le=16_777_216)
+    failure_policy: Literal["partial", "strict"] = "partial"
+
+    @model_validator(mode="after")
+    def _check(self) -> VirtualTool:  # noqa: PLR0912 - cohesive model invariants
+        if not re.fullmatch(_VIRTUAL_NAME_RE, self.name):
+            raise ConfigError(
+                f"invalid virtual tool name {self.name!r}: use only letters, "
+                f"digits, '_' or '-' (max 64 chars)"
+            )
+        if not self.description.strip():
+            raise ConfigError(f"virtual tool {self.name!r}: description is required")
+        if not self.members:
+            raise ConfigError(
+                f"virtual tool {self.name!r}: at least one member is required"
+            )
+        names = [item.name for item in self.inputs]
+        dupes = {name for name in names if names.count(name) > 1}
+        if dupes:
+            raise ConfigError(
+                f"virtual tool {self.name!r}: duplicate input name(s): {sorted(dupes)}"
+            )
+        declared = set(names)
+        for member in self.members:
+            unknown = set(member.args.values()) - declared
+            if unknown:
+                raise ConfigError(
+                    f"virtual tool {self.name!r}: member maps undeclared input(s): "
+                    f"{sorted(unknown)}"
+                )
+        if self.dispatch == "keyword" and not any(
+            member.route_patterns for member in self.members
+        ):
+            raise ConfigError(
+                f"virtual tool {self.name!r}: keyword dispatch needs route_patterns"
+            )
+        if self.dispatch == "llm":
+            if self.router is None or not self.router.api_key:
+                raise ConfigError(
+                    f"virtual tool {self.name!r}: llm dispatch needs router.api_key"
+                )
+            if not self.router.egress_acknowledged:
+                raise ConfigError(
+                    f"virtual tool {self.name!r}: llm dispatch requires explicit "
+                    f"egress acknowledgement"
+                )
+            if self.enabled:
+                expected_fingerprint = llm_egress_consent_fingerprint(self)
+                if self.router.egress_consent_fingerprint != expected_fingerprint:
+                    raise ConfigError(
+                        f"virtual tool {self.name!r}: active llm dispatch requires "
+                        "an egress consent fingerprint matching its routing "
+                        "configuration"
+                    )
+        if self.router is not None and self.router.fallback != "all":
+            labels = {
+                member.label or f"{member.backend_id}/{member.tool_original}"
+                for member in self.members
+            }
+            if self.router.fallback not in labels:
+                raise ConfigError(
+                    f"virtual tool {self.name!r}: router fallback "
+                    f"{self.router.fallback!r} matches no member label"
+                )
+        return self
+
+
+def llm_egress_consent_fingerprint(tool: VirtualTool) -> str:
+    """Return the consent fingerprint for an LLM's externally-visible contract.
+
+    This deliberately mirrors every configuration field that changes the
+    router destination, selection prompt, or public call surface.  It is a
+    fingerprint of configuration only: caller-provided argument *values* stay
+    out of durable configuration and are instead bounded at invocation time by
+    :func:`routing_input_text`.
+    """
+
+    router = tool.router
+    if router is None:
+        raise ConfigError("llm egress fingerprint needs a virtual router")
+    payload = {
+        "version": 1,
+        "tool": {
+            "name": tool.name,
+            "description": tool.description,
+            "inputs": [
+                {
+                    "name": item.name,
+                    "type": item.type,
+                    "description": item.description,
+                    "required": item.required,
+                    "default": item.default,
+                }
+                for item in tool.inputs
+            ],
+            "routing_input_max_chars": tool.routing_input_max_chars,
+        },
+        "routing": {
+            "model": router.model,
+            "api_key": router.api_key,
+            "conditions": router.conditions,
+            "timeout": router.timeout,
+            "fallback": router.fallback,
+        },
+        "members": [
+            {
+                "backend_id": member.backend_id,
+                "tool_original": member.tool_original,
+                "label": member.label,
+                "route_patterns": member.route_patterns,
+                "route_description": member.route_description,
+            }
+            for member in tool.members
+        ],
+    }
+    canonical = json.dumps(
+        payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+    ).encode()
+    return f"sha256:{hashlib.sha256(canonical).hexdigest()}"
+
+
 def _is_loopback_host(host: str) -> bool:
     """True when ``host`` can only be reached from this machine.
 
@@ -370,15 +765,40 @@ class GatewayConfig(BaseModel, extra="forbid"):
     # (see server.BearerAuthMiddleware).
     bearer_token: str | None = None
     backends: list[Backend] = Field(default_factory=list)
+    virtual_tools: list[VirtualTool] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _check_backends(self) -> GatewayConfig:
-        if not self.backends:
-            raise ConfigError("config has no [[backends]]")
+        # An empty gateway is valid: the permanent Virtual Tools endpoint still
+        # mounts with an empty catalog, and the Admin UI can import the first
+        # backend later. Virtual member validation below still rejects dangling
+        # backend IDs.
         names = [b.name for b in self.backends]
         dupes = {n for n in names if names.count(n) > 1}
         if dupes:
             raise ConfigError(f"duplicate backend name(s): {sorted(dupes)}")
+        if "virtual" in names:
+            raise ConfigError("backend name 'virtual' is reserved for Virtual Tools")
+        backend_ids = [b.id for b in self.backends if b.id is not None]
+        duplicate_ids = {value for value in backend_ids if backend_ids.count(value) > 1}
+        if duplicate_ids:
+            raise ConfigError(f"duplicate backend id(s): {sorted(duplicate_ids)}")
+        virtual_names = [tool.name for tool in self.virtual_tools]
+        duplicate_virtual = {
+            name for name in virtual_names if virtual_names.count(name) > 1
+        }
+        if duplicate_virtual:
+            raise ConfigError(
+                f"duplicate virtual tool name(s): {sorted(duplicate_virtual)}"
+            )
+        known_ids = set(backend_ids)
+        for tool in self.virtual_tools:
+            for member in tool.members:
+                if member.backend_id not in known_ids:
+                    raise ConfigError(
+                        f"virtual tool {tool.name!r}: member references unknown "
+                        f"backend id {member.backend_id!r}"
+                    )
         # #18: a non-loopback bind exposes config writes and tool execution to
         # the network, so it is refused outright without the bearer token.
         if self.bearer_token is None and not _is_loopback_host(self.host):
@@ -862,6 +1282,8 @@ def to_raw(cfg: GatewayConfig) -> dict:  # noqa: PLR0915 — field-by-field TOML
 
     def _backend(b: Backend) -> dict:  # noqa: PLR0912 — one branch per optional config field
         d: dict = {"name": b.name, "transport": b.transport}
+        if b.id is not None:
+            d["id"] = b.id
         if b.display_name:
             d["display_name"] = b.display_name
         if b.transport != "stdio":  # http / streamable-http / sse — url-based
@@ -961,6 +1383,58 @@ def to_raw(cfg: GatewayConfig) -> dict:  # noqa: PLR0915 — field-by-field TOML
             d["default"] = p.default
         return d
 
+    def _virtual(tool: VirtualTool) -> dict:  # noqa: PLR0912
+        item: dict = {
+            "name": tool.name,
+            "description": tool.description,
+            "enabled": tool.enabled,
+            "dispatch": tool.dispatch,
+            "routing_input_max_chars": tool.routing_input_max_chars,
+            "max_result_bytes": tool.max_result_bytes,
+            "failure_policy": tool.failure_policy,
+        }
+        if tool.always_load:
+            item["always_load"] = True
+        if tool.inputs:
+            item["inputs"] = [
+                {
+                    key: value
+                    for key, value in {
+                        "name": inp.name,
+                        "type": inp.type,
+                        "description": inp.description,
+                        "required": inp.required,
+                        "default": inp.default,
+                    }.items()
+                    if value is not None
+                }
+                for inp in tool.inputs
+            ]
+        item["members"] = [
+            {
+                key: value
+                for key, value in {
+                    "backend_id": member.backend_id,
+                    "tool_original": member.tool_original,
+                    "label": member.label,
+                    "args": dict(member.args) or None,
+                    "static_args": dict(member.static_args) or None,
+                    "timeout": member.timeout,
+                    "route_patterns": list(member.route_patterns) or None,
+                    "route_description": member.route_description,
+                }.items()
+                if value is not None
+            }
+            for member in tool.members
+        ]
+        if tool.router is not None:
+            item["router"] = {
+                key: value
+                for key, value in tool.router.model_dump().items()
+                if value is not None
+            }
+        return item
+
     out: dict = {
         "host": cfg.host,
         "port": cfg.port,
@@ -973,6 +1447,8 @@ def to_raw(cfg: GatewayConfig) -> dict:  # noqa: PLR0915 — field-by-field TOML
     if cfg.bearer_token is not None:  # default None — only persist when set (#26)
         out["bearer_token"] = cfg.bearer_token
     out["backends"] = [_backend(b) for b in cfg.backends]
+    if cfg.virtual_tools:
+        out["virtual_tools"] = [_virtual(tool) for tool in cfg.virtual_tools]
     return out
 
 

@@ -89,6 +89,23 @@ the new header.
 The token comparison is constant-time, and the token is redacted from anything
 the gateway echoes back (logs, the register button's output).
 
+The same middleware protects `/virtual/mcp` and every Virtual Tool CRUD,
+validation, and live-test route. Virtual Tools do not create an authentication
+side door around the underlying backend endpoints.
+
+### LLM routing data egress
+
+`all` and `keyword` dispatch stay local to the gateway and selected backends.
+`llm` dispatch sends the Virtual Tool inputs, routing descriptions, and policy to
+OpenRouter. Activation is rejected unless the administrator acknowledges the
+exact model, key reference, fields, member descriptions, and routing policy;
+that consent fingerprint becomes stale whenever those settings change. The
+router requests at most 200 output tokens, and the selected OpenRouter model's
+pricing applies. The API key must be a single
+`${ENV_VAR}` reference; only the resolved secret is placed in the provider request
+and it is never returned or logged. Router timeout, malformed output, or provider
+failure uses the configured local fallback.
+
 ## What is *not* protected
 
 Be clear-eyed about the boundaries:
