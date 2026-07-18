@@ -40,7 +40,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse
 from starlette.routing import Mount, Route
 
-from mcp_gateway import admin, config_loader
+from mcp_gateway import admin, config_loader, virtual_tools
 
 
 def default_config_path() -> str:
@@ -820,6 +820,53 @@ def _build_app(  # noqa: PLR0913, PLR0915 — composition root; takes what it wi
                 stops.pop(b.name, None)
                 _unmount(app, b.name, registry, holders)
 
+        async def virtual_runner():
+            """Own the permanent gateway-authored ``/virtual/mcp`` endpoint.
+
+            Unlike backend runners, absence is never an acceptable steady state:
+            the endpoint mounts even with an empty tool list, and readiness stays
+            red if its build or lifespan fails.
+            """
+            ev = anyio.Event()
+            stops[virtual_tools.VIRTUAL_ROUTE] = ev
+            hooks.pop("virtual_mount_error", None)
+            try:
+                async with AsyncExitStack() as stack:
+                    try:
+                        server = virtual_tools.build_virtual_server(
+                            cfg,
+                            lambda: config_loader.load(config_path),
+                            registry,
+                            log,
+                            hooks.setdefault("virtual_status", {}),
+                        )
+                        sub = server.http_app(path="/mcp")
+                        await stack.enter_async_context(sub.lifespan(sub))
+                        app.router.routes.append(
+                            Mount(f"/{virtual_tools.VIRTUAL_ROUTE}", app=sub)
+                        )
+                        hooks["virtual_server"] = server
+                        log.info(
+                            "virtual_tools_mounted",
+                            path=f"/{virtual_tools.VIRTUAL_ROUTE}/mcp",
+                            tools=[
+                                tool.name for tool in cfg.virtual_tools if tool.enabled
+                            ],
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        hooks["virtual_mount_error"] = f"{type(exc).__name__}: {exc}"
+                        log.error("virtual_tools_mount_failed", error=str(exc))
+                        return
+                    await ev.wait()
+            finally:
+                stops.pop(virtual_tools.VIRTUAL_ROUTE, None)
+                hooks.pop("virtual_server", None)
+                app.router.routes[:] = [
+                    route
+                    for route in app.router.routes
+                    if getattr(route, "path", None) != f"/{virtual_tools.VIRTUAL_ROUTE}"
+                ]
+
         async def hot_recycle(name: str) -> None:
             """Tear a warm backend's runner down like hot_remove AND immediately
             re-run it — fresh AsyncExitStack, fresh client, re-mount (#161). This
@@ -873,6 +920,7 @@ def _build_app(  # noqa: PLR0913, PLR0915 — composition root; takes what it wi
             tg.start_soon(recycle_worker)  # #161: warm-session recycle consumer
             if refresher.interval > 0:
                 tg.start_soon(refresher.interval_loop)
+            tg.start_soon(virtual_runner)
             # #61: start every backend's runner CONCURRENTLY and don't block
             # readiness on any of them — boot ≈ the slowest backend instead of
             # the sum, and a slow/hung backend delays only its own endpoint
@@ -911,7 +959,8 @@ def _build_app(  # noqa: PLR0913, PLR0915 — composition root; takes what it wi
                 backends=[b.name for b in cfg.backends],
                 endpoints=[
                     f"http://{cfg.host}:{cfg.port}/{b.name}/mcp" for b in cfg.backends
-                ],
+                ]
+                + [f"http://{cfg.host}:{cfg.port}/virtual/mcp"],
                 admin=f"http://{cfg.host}:{cfg.port}/admin",
             )
             try:
@@ -938,14 +987,21 @@ def _build_app(  # noqa: PLR0913, PLR0915 — composition root; takes what it wi
         live = config_loader.load(config_path)
         want = [b.name for b in live.backends if b.enabled]
         missing = [n for n in want if n not in registry]
+        virtual_ready = "virtual_server" in hooks
+        ready = not missing and virtual_ready
         return JSONResponse(
             {
-                "ready": not missing,
+                "ready": ready,
                 "mounted": sorted(registry),
                 "enabled": want,
                 "missing": missing,
+                "virtual": {
+                    "mounted": virtual_ready,
+                    "endpoint": "/virtual/mcp",
+                    "error": hooks.get("virtual_mount_error"),
+                },
             },
-            status_code=200 if not missing else 503,
+            status_code=200 if ready else 503,
         )
 
     # MCP mounts are added during the lifespan (they need connected clients).

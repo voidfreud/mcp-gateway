@@ -31,7 +31,7 @@ of this — but it is here when you want it.
 | Method | Path | Response |
 |--------|------|----------|
 | GET | `/health` | `text/plain`: `ok mcp-gateway <version> @ <resolved code path>`. Names the directory the daemon actually runs from. |
-| GET | `/ready` | JSON `{ready, mounted, enabled, missing}`. Status `200` when every enabled backend is mounted, `503` otherwise. |
+| GET | `/ready` | JSON `{ready, mounted, enabled, missing, virtual}`. Status `200` when every enabled backend and the permanent `/virtual/mcp` endpoint are mounted, `503` otherwise. `virtual` carries `{mounted, endpoint, error}`. |
 
 ## General
 
@@ -62,7 +62,7 @@ of this — but it is here when you want it.
 |--------|------|------|----------|
 | POST | `/admin/api/backend` | `{name, transport, url?/command?/args?, auth_header?, auth_value?, headers?, auth?, headers_helper?, stateless?}` | Imports a new backend: validates, connects and captures its baseline, then restarts. `400` on a name clash, invalid fields, or a failed connection. |
 | DELETE | `/admin/api/backend/{name}` | — | Removes the backend and prunes its captured defaults; restarts. `{ok, reloaded}`. |
-| POST | `/admin/api/backend/{name}/rename` | `{value: "<new name>"}` | Hard rename (endpoint, config key, defaults, registration all move); restarts. Response includes `old_endpoint`, `new_endpoint`, `old_registration`, `new_registration`. |
+| POST | `/admin/api/backend/{name}/rename` | `{value: "<new name>"}` | Hard rename (endpoint, config key, defaults, registration all move). A live daemon hot-mounts the new route; external Claude Code registration still needs updating. Response includes `old_endpoint`, `new_endpoint`, `old_registration`, `new_registration`. |
 | POST | `/admin/api/backend/{name}/display-name` | `{value: "<label>"}` | Sets the cosmetic display label (empty clears it). `{ok}`. No restart. |
 | POST | `/admin/api/backend/{name}/enabled` | `{value: bool}` | Enable (mount live) or disable (unmount) the backend. `{ok, reloaded: "in-process"}`. |
 | POST | `/admin/api/enabled` | `{value: bool}` | Master switch: enable/disable every backend, mounting or unmounting each. `{ok, reloaded: "in-process"}`. |
@@ -84,6 +84,29 @@ added to the registration and redacted from the response.
 | POST | `/admin/api/backend/{name}/deregister` | `{scope}` | Runs `claude mcp remove gateway-<name>`. Works even if the backend is already gone (post-remove cleanup). Same response shape. |
 | GET | `/admin/api/cc-registrations` | — (`?fresh=1` busts the 60s cache) | Which configured backends are registered in Claude Code, parsed from `claude mcp list`. `{available, registered: {<backend>: bool}}`; `{available:false}` without the CLI. |
 | POST | `/admin/api/cc-reregister-all` | `{scope}` | Deregister + register every **enabled** backend, sequentially; one failure doesn't stop the rest. `{ok, count, ok_count, backends: [...]}`. |
+
+## Virtual Tools
+
+Virtual Tools are gateway-owned tools on the always-mounted `/virtual/mcp`
+endpoint. Definitions bind to stable backend IDs and original source identities;
+current effective names are resolved from the live transformed proxies.
+
+| Method | Path | Body | Response |
+|--------|------|------|----------|
+| GET | `/admin/api/virtual-tools` | — | `{mounted, endpoint, tools}` with full definitions, live member resolution, and last test/dispatch status. Router API keys are `${ENV}` references, never resolved values. |
+| GET | `/admin/api/virtual-catalog` | — | Picker catalog: backend IDs plus original/effective backend, tool, and parameter names. |
+| POST | `/admin/api/virtual-tools` | Full definition | Creates a disabled draft after model validation and dry-build. `{ok, tool, lifecycle:"draft"}`. |
+| PUT | `/admin/api/virtual-tools/{name}` | Full definition | Atomically saves a disabled draft, including when editing an active definition. Submitted consent fingerprints are ignored; activation binds consent to the resulting definition. |
+| DELETE | `/admin/api/virtual-tools/{name}` | — | Deletes the definition and hot-reloads `/virtual/mcp`; rolls back on reload failure. |
+| POST | `/admin/api/virtual-tools/{name}/validate` | — | Live resolution receipt `{ok, members, errors}` without member calls. |
+| POST | `/admin/api/virtual-tools/{name}/test` | `{arguments}` | Calls the saved definition without changing activation and returns its fidelity-preserving MCP result receipt. |
+| POST | `/admin/api/virtual-tools/{name}/activate` | — | Live-resolves, dry-builds, persists `enabled=true`, then hot-reloads atomically. |
+| POST | `/admin/api/virtual-tools/{name}/disable` | — | Persists `enabled=false` and removes the tool from the shared endpoint without unmounting it. |
+
+Backend removal is rejected while a Virtual Tool references its stable ID.
+Backend rename preserves the ID and proves the new effective route can mount
+before removing the old route. Mutations that would make an active Virtual Tool
+unresolved are rejected before persistence.
 
 ## Operations
 

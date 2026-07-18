@@ -34,6 +34,7 @@ from starlette.routing import Route
 
 from mcp_gateway import config_loader as cl
 from mcp_gateway import hooks as hooks_mod
+from mcp_gateway import virtual_tools as virtual_mod
 from mcp_gateway.config_loader import (
     Backend,
     GatewayConfig,
@@ -756,6 +757,7 @@ def build_state(cfg: GatewayConfig) -> dict:
             )
         backends.append(
             {
+                "id": virtual_mod.stable_backend_id(b),
                 "name": b.name,
                 "display_name": b.display_name,
                 "enabled": b.enabled,
@@ -1751,6 +1753,83 @@ def _err(msg: str, status: int = 400) -> JSONResponse:
     return JSONResponse({"ok": False, "error": msg}, status_code=status)
 
 
+def _validate_active_virtual_references(cfg: GatewayConfig) -> None:
+    """Reject a save that would strand a currently published Virtual Tool.
+
+    This is deliberately structural and synchronous: admin override handlers
+    call it before persistence and before their live transform is swapped. Live
+    reachability remains the activation/test concern; here we prove the stable
+    source tool/parameter still exists in the captured baseline and is enabled.
+    """
+    virtual_mod.ensure_backend_ids(cfg)
+    by_id = {backend.id: backend for backend in cfg.backends}
+    for tool in cfg.virtual_tools:
+        if not tool.enabled:
+            continue
+        for member in tool.members:
+            backend = by_id.get(member.backend_id)
+            label = virtual_mod.member_label(member)
+            if backend is None:
+                raise cl.ConfigError(
+                    f"active Virtual Tool {tool.name!r} member {label!r} "
+                    "references a missing backend"
+                )
+            if not backend.enabled:
+                raise cl.ConfigError(
+                    f"cannot disable backend {backend.name!r}: active Virtual "
+                    f"Tool {tool.name!r} references it"
+                )
+            defaults = load_defaults(backend.name) or {}
+            source = next(
+                (
+                    item
+                    for item in defaults.get("tools", [])
+                    if item.get("original") == member.tool_original
+                ),
+                None,
+            )
+            if source is None:
+                raise cl.ConfigError(
+                    f"active Virtual Tool {tool.name!r} source "
+                    f"{backend.name}/{member.tool_original} is not in the "
+                    "captured catalog; disable or repair the Virtual Tool first"
+                )
+            override = next(
+                (
+                    item
+                    for item in backend.tools
+                    if item.original == member.tool_original
+                ),
+                None,
+            )
+            if override is not None and not override.enabled:
+                raise cl.ConfigError(
+                    f"cannot disable {backend.name}/{member.tool_original}: "
+                    f"active Virtual Tool {tool.name!r} references it"
+                )
+            params = {item.get("original") for item in source.get("params", [])}
+            referenced = set(member.args) | set(member.static_args)
+            missing = sorted(referenced - params)
+            if missing:
+                raise cl.ConfigError(
+                    f"active Virtual Tool {tool.name!r} source "
+                    f"{backend.name}/{member.tool_original} is missing original "
+                    f"parameter(s): {missing}"
+                )
+            hidden = {
+                item.original
+                for item in (override.params if override is not None else [])
+                if item.hide
+            }
+            blocked = sorted(referenced & hidden)
+            if blocked:
+                raise cl.ConfigError(
+                    f"cannot hide parameter(s) {blocked} on "
+                    f"{backend.name}/{member.tool_original}: active Virtual Tool "
+                    f"{tool.name!r} references them"
+                )
+
+
 @dataclass
 class _AdminCtx:
     """Shared plumbing for the admin route groups (#89): config access, the
@@ -1772,10 +1851,18 @@ class _AdminCtx:
     def load(self) -> GatewayConfig:
         return cl.load(self.config_path)
 
-    def commit(self, cfg: GatewayConfig, *backends: str) -> None:
+    def commit(
+        self,
+        cfg: GatewayConfig,
+        *backends: str,
+        validate_virtual_refs: bool = True,
+    ) -> None:
         """The shared tail of every mutating handler: backup, atomic save, then
         hot-reload each named backend that is currently mounted (hot_reload
         itself skips unmounted ones with a warning)."""
+        GatewayConfig.model_validate(cfg.model_dump())
+        if validate_virtual_refs:
+            _validate_active_virtual_references(cfg)
         backup_config(self.config_path)
         cl.save(cfg, self.config_path)
         for name in backends:
@@ -1788,7 +1875,10 @@ class _AdminCtx:
 
         async def inner(request: Request):
             async with self.lock:
-                return await handler(request)
+                try:
+                    return await handler(request)
+                except cl.ConfigError as exc:
+                    return _err(str(exc))
 
         return inner
 
@@ -2179,7 +2269,7 @@ def _backend_routes(ctx: _AdminCtx) -> list[Route]:  # noqa: PLR0915 — stateme
         ctx.commit(cfg)
         return JSONResponse({"ok": True})
 
-    async def rename_backend(request: Request):
+    async def rename_backend(request: Request):  # noqa: PLR0911, PLR0912, PLR0915 - transactional validation/rollback exits
         """Hard-rename a backend (#44) — a REAL identity change, unlike the
         cosmetic display_name (#42). ``name`` drives the endpoint mount
         (``/{name}/mcp``), the Claude Code registration (``gateway-{name}``),
@@ -2196,41 +2286,100 @@ def _backend_routes(ctx: _AdminCtx) -> list[Route]:  # noqa: PLR0915 — stateme
                 f"invalid backend name {new_name!r}: use only letters, digits, "
                 f"'_' or '-' (max 64 chars)"
             )
+        if new_name == virtual_mod.VIRTUAL_ROUTE:
+            return _err("backend name 'virtual' is reserved for Virtual Tools")
         cfg = ctx.load()
-        b = next((x for x in cfg.backends if x.name == name), None)
-        if b is None:
+        old_backend = next((x for x in cfg.backends if x.name == name), None)
+        if old_backend is None:
             return _err("unknown backend")
         if any(x.name == new_name for x in cfg.backends):
             return _err(
                 f"backend name {new_name!r} already exists — pick a different one"
             )
-        b.name = new_name  # display_name, tools, params — everything else rides
-        # Topology change: commit WITHOUT a hot-reload arg (the endpoint itself
-        # moves; the restart below rebuilds the mounts under the new name).
-        ctx.commit(cfg)
+        candidate = cfg.model_copy(deep=True)
+        new_backend = next(x for x in candidate.backends if x.name == name)
+        new_backend.name = new_name
+        try:
+            candidate = GatewayConfig.model_validate(candidate.model_dump())
+        except Exception as exc:  # noqa: BLE001 - complete candidate validation
+            return _err(str(exc))
+        # Persist the complete valid candidate first, but keep the old live mount
+        # until the new identity has mounted successfully. This makes the runtime
+        # topology transactional even though two names briefly coexist.
+        ctx.commit(candidate, validate_virtual_refs=False)
         # Migrate the captured defaults (the immutable baseline) old → new so
         # overrides keep diffing against it; tolerate a never-introspected
         # backend (no file — the restart re-captures under the new name).
         old_defaults = DEFAULTS_DIR / f"{name}.json"
-        if old_defaults.is_file():
-            data = json.loads(old_defaults.read_text(encoding="utf-8"))
+        new_defaults = DEFAULTS_DIR / f"{new_name}.json"
+        old_defaults_data = (
+            json.loads(old_defaults.read_text(encoding="utf-8"))
+            if old_defaults.is_file()
+            else None
+        )
+        if old_defaults_data is not None:
+            data = dict(old_defaults_data)
             data["backend"] = new_name
             save_defaults(data)
             old_defaults.unlink(missing_ok=True)
-        base = f"http://{cfg.host}:{cfg.port}"
-        return ctx.restart_response(
-            {
-                "backend": new_name,
-                "old_endpoint": f"{base}/{name}/mcp",
-                "new_endpoint": f"{base}/{new_name}/mcp",
-                "old_registration": f"gateway-{name}",
-                "new_registration": f"gateway-{new_name}",
-            }
-        )
+        base = f"http://{candidate.host}:{candidate.port}"
+        response = {
+            "backend": new_name,
+            "old_endpoint": f"{base}/{name}/mcp",
+            "new_endpoint": f"{base}/{new_name}/mcp",
+            "old_registration": f"gateway-{name}",
+            "new_registration": f"gateway-{new_name}",
+        }
+        # In the live daemon, mount the new identity before responding so stable
+        # Virtual Tool references resolve immediately. Claude Code still needs
+        # its external registration moved, which the response makes explicit.
+        remove = ctx.hooks.get("remove")
+        add = ctx.hooks.get("add")
+        if remove is not None and add is not None:
+            mount_error = None
+            try:
+                mounted = await add(new_backend)
+            except Exception as exc:  # noqa: BLE001 - transaction rolls back below
+                mounted = False
+                mount_error = f": {type(exc).__name__}: {exc}"
+            if mounted:
+                remove(name)
+                return JSONResponse({"ok": True, "reloaded": "hot-rename", **response})
+            # The old runner was deliberately left alive. Remove any partial new
+            # runner, restore config/defaults, and only re-add old if it somehow
+            # disappeared independently while the new mount was attempted.
+            remove(new_name)
+            ctx.commit(cfg, validate_virtual_refs=False)
+            new_defaults.unlink(missing_ok=True)
+            if old_defaults_data is not None:
+                save_defaults(old_defaults_data)
+            recovery_error = None
+            if name not in ctx.registry:
+                try:
+                    if not await add(old_backend):
+                        recovery_error = "; old backend re-mount also failed"
+                except Exception as exc:  # noqa: BLE001 - report safe rollback state
+                    recovery_error = (
+                        f"; old backend re-mount failed: {type(exc).__name__}: {exc}"
+                    )
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "reloaded": "mount-failed-rolled-back",
+                    "error": "new backend mount failed; rename rolled back"
+                    + (mount_error or "")
+                    + (recovery_error or ""),
+                    **response,
+                },
+                status_code=500,
+            )
+        return ctx.restart_response(response)
 
     async def add_backend(request: Request):  # noqa: PLR0911 — one early return per validation/probe/mount outcome
         """Import a new backend MCP. Validates + introspects, then restarts."""
         payload = await request.json()
+        if payload.get("name") == virtual_mod.VIRTUAL_ROUTE:
+            return _err("backend name 'virtual' is reserved for Virtual Tools")
         if any(b.name == payload.get("name") for b in ctx.load().backends):
             return JSONResponse(
                 {"ok": False, "error": "backend name already exists"}, status_code=400
@@ -2251,6 +2400,7 @@ def _backend_routes(ctx: _AdminCtx) -> list[Route]:  # noqa: PLR0915 — stateme
             )
         except Exception as exc:  # noqa: BLE001 (pydantic/validation)
             return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+        b.id = virtual_mod.stable_backend_id(b)
         # Probe + capture defaults before committing it to config — and BEFORE
         # taking config_lock, so a slow backend can't block other admin edits.
         try:
@@ -2268,8 +2418,14 @@ def _backend_routes(ctx: _AdminCtx) -> list[Route]:  # noqa: PLR0915 — stateme
                     {"ok": False, "error": "backend name already exists"},
                     status_code=400,
                 )
-            cfg.backends.append(b)
-            ctx.commit(cfg)
+            candidate = cfg.model_copy(
+                update={"backends": [*cfg.backends, b]}, deep=True
+            )
+            try:
+                candidate = GatewayConfig.model_validate(candidate.model_dump())
+            except Exception as exc:  # noqa: BLE001 - complete candidate validation
+                return _err(str(exc))
+            ctx.commit(candidate)
         # Hot-add (#7): mount the new backend into the RUNNING daemon — no
         # restart, no /health polling race. Config is already saved either way,
         # so a failed mount still lands the backend on the next real restart.
@@ -2288,6 +2444,19 @@ def _backend_routes(ctx: _AdminCtx) -> list[Route]:  # noqa: PLR0915 — stateme
     async def remove_backend(request: Request):
         name = request.path_params["name"]
         cfg = ctx.load()
+        backend = next((b for b in cfg.backends if b.name == name), None)
+        if backend is None:
+            return _err("unknown backend")
+        backend_id = virtual_mod.stable_backend_id(backend)
+        referenced_by = [
+            tool.name
+            for tool in cfg.virtual_tools
+            if any(member.backend_id == backend_id for member in tool.members)
+        ]
+        if referenced_by:
+            return _err(
+                f"backend is referenced by Virtual Tool(s): {', '.join(referenced_by)}"
+            )
         before = len(cfg.backends)
         cfg.backends = [b for b in cfg.backends if b.name != name]
         if len(cfg.backends) == before:
@@ -2671,6 +2840,361 @@ def _ops_routes(ctx: _AdminCtx) -> list[Route]:  # noqa: PLR0915 — nested hand
     ]
 
 
+def _virtual_routes(ctx: _AdminCtx) -> list[Route]:  # noqa: PLR0915
+    """First-class Virtual Tool catalog, draft lifecycle, testing and activation."""
+
+    def _definition(tool: cl.VirtualTool) -> dict:
+        return tool.model_dump(mode="json", exclude_none=True)
+
+    def _find(cfg: GatewayConfig, name: str) -> cl.VirtualTool | None:
+        return next((tool for tool in cfg.virtual_tools if tool.name == name), None)
+
+    def _clean_virtual_payload(payload: dict) -> dict:
+        """Discard client-authored consent receipts; only activation may mint one."""
+        cleaned = dict(payload)
+        cleaned.pop("consent_fingerprint", None)
+        cleaned.pop("egress_consent_fingerprint", None)
+        if isinstance(cleaned.get("router"), dict):
+            cleaned["router"] = dict(cleaned["router"])
+            cleaned["router"].pop("consent_fingerprint", None)
+            cleaned["router"].pop("egress_consent_fingerprint", None)
+        return cleaned
+
+    def _consent_fingerprint(tool: cl.VirtualTool) -> str | None:
+        """Fingerprint exactly the administrator-visible OpenRouter egress shape."""
+        if tool.dispatch != "llm" or tool.router is None:
+            return None
+        return cl.llm_egress_consent_fingerprint(tool)
+
+    async def _resolution(tool: cl.VirtualTool, cfg: GatewayConfig) -> dict:
+        return await virtual_mod.resolve_tool(tool, cfg, ctx.registry)
+
+    def _hot_replace(cfg: GatewayConfig) -> None:
+        server = ctx.hooks.get("virtual_server")
+        if server is None:
+            raise cl.ConfigError("the shared /virtual/mcp endpoint is not mounted")
+        virtual_mod.replace_tools(
+            server,
+            cfg,
+            ctx.load,
+            ctx.registry,
+            ctx.log,
+            ctx.hooks.setdefault("virtual_status", {}),
+        )
+
+    async def list_virtual_tools(_request: Request):
+        cfg = ctx.load()
+        resolutions = await asyncio.gather(
+            *(_resolution(tool, cfg) for tool in cfg.virtual_tools)
+        )
+        statuses = ctx.hooks.setdefault("virtual_status", {})
+        listed = []
+        for tool, resolution in zip(cfg.virtual_tools, resolutions, strict=True):
+            definition = _definition(tool)
+            definition["members"] = [
+                {**member, "resolution": resolved}
+                for member, resolved in zip(
+                    definition["members"], resolution["members"], strict=True
+                )
+            ]
+            listed.append(
+                {
+                    **definition,
+                    "resolution": resolution,
+                    **statuses.get(tool.name, {}),
+                }
+            )
+        return JSONResponse(
+            {
+                "mounted": "virtual_server" in ctx.hooks,
+                "endpoint": "/virtual/mcp",
+                "tools": listed,
+            }
+        )
+
+    async def virtual_catalog(_request: Request):
+        cfg = ctx.load()
+        backends = []
+        for backend in cfg.backends:
+            defaults = load_defaults(backend.name) or {}
+            tools = []
+            for source in defaults.get("tools", []):
+                override = _find_tool_override(backend, source["original"])
+                effective = (
+                    override.name if override and override.name else source["original"]
+                )
+                params = []
+                overrides = {
+                    item.original: item
+                    for item in (override.params if override else [])
+                }
+                for param in source.get("params", []):
+                    changed = overrides.get(param["original"])
+                    params.append(
+                        {
+                            "original": param["original"],
+                            "effective_name": (
+                                changed.name
+                                if changed is not None and changed.name
+                                else param["original"]
+                            ),
+                            "description": param.get("description"),
+                            "required": param.get("required", False),
+                            "hidden": changed.hide if changed else False,
+                        }
+                    )
+                tools.append(
+                    {
+                        "original": source["original"],
+                        "effective_name": effective,
+                        "description": (
+                            override.description
+                            if override and override.description is not None
+                            else source.get("description")
+                        ),
+                        "enabled": backend.enabled
+                        and (override.enabled if override else True),
+                        "params": params,
+                    }
+                )
+            backends.append(
+                {
+                    "id": virtual_mod.stable_backend_id(backend),
+                    "name": backend.name,
+                    "effective_name": backend.display_name or backend.name,
+                    "enabled": backend.enabled,
+                    "tools": tools,
+                }
+            )
+        return JSONResponse({"backends": backends})
+
+    async def create_virtual(request: Request):
+        payload = _clean_virtual_payload(await request.json())
+        payload = {**payload, "enabled": False}
+        try:
+            tool = cl.VirtualTool.model_validate(payload)
+        except Exception as exc:  # noqa: BLE001 - Pydantic/config validation
+            return _err(str(exc))
+        cfg = ctx.load()
+        if _find(cfg, tool.name) is not None:
+            return _err("virtual tool name already exists")
+        virtual_mod.ensure_backend_ids(cfg)
+        try:
+            candidate = cfg.model_copy(
+                update={"virtual_tools": [*cfg.virtual_tools, tool]}, deep=True
+            )
+            candidate = GatewayConfig.model_validate(candidate.model_dump())
+            virtual_mod.build_virtual_tool(tool, candidate, ctx.registry, ctx.log)
+        except Exception as exc:  # noqa: BLE001 - dry build
+            return _err(str(exc))
+        ctx.commit(candidate)
+        return JSONResponse(
+            {"ok": True, "tool": _definition(tool), "lifecycle": "draft"},
+            status_code=201,
+        )
+
+    async def update_virtual(request: Request):  # noqa: PLR0911 - validation/rollback exits
+        name = request.path_params["name"]
+        payload = _clean_virtual_payload(await request.json())
+        cfg = ctx.load()
+        previous = _find(cfg, name)
+        if previous is None:
+            return _err("unknown virtual tool", 404)
+        # PUT always creates/replaces an inactive draft. An active revision is
+        # removed from the shared endpoint after persistence; activation is the
+        # only operation that can put the edited definition back into service.
+        payload = {**payload, "enabled": False}
+        try:
+            tool = cl.VirtualTool.model_validate(payload)
+        except Exception as exc:  # noqa: BLE001
+            return _err(str(exc))
+        if tool.name != name and _find(cfg, tool.name) is not None:
+            return _err("virtual tool name already exists")
+        virtual_mod.ensure_backend_ids(cfg)
+        tools = [tool if item.name == name else item for item in cfg.virtual_tools]
+        try:
+            candidate = GatewayConfig.model_validate(
+                cfg.model_copy(update={"virtual_tools": tools}, deep=True).model_dump()
+            )
+            virtual_mod.build_virtual_tool(tool, candidate, ctx.registry, ctx.log)
+        except Exception as exc:  # noqa: BLE001
+            return _err(str(exc))
+        ctx.commit(candidate)
+        if previous.enabled:
+            try:
+                _hot_replace(candidate)
+            except Exception as exc:  # noqa: BLE001
+                ctx.commit(cfg, validate_virtual_refs=False)
+                _hot_replace(cfg)
+                return _err(
+                    f"hot reload failed; previous definition restored: {exc}", 500
+                )
+        return JSONResponse(
+            {"ok": True, "tool": _definition(tool), "lifecycle": "draft"}
+        )
+
+    async def validate_virtual(request: Request):
+        cfg = ctx.load()
+        tool = _find(cfg, request.path_params["name"])
+        if tool is None:
+            return _err("unknown virtual tool", 404)
+        resolution = await _resolution(tool, cfg)
+        return JSONResponse(resolution, status_code=200 if resolution["ok"] else 400)
+
+    async def test_virtual(request: Request):
+        cfg = ctx.load()
+        tool = _find(cfg, request.path_params["name"])
+        if tool is None:
+            return _err("unknown virtual tool", 404)
+        payload = await request.json()
+        resolution = await _resolution(tool, cfg)
+        if not resolution["ok"]:
+            return JSONResponse(resolution, status_code=400)
+        started = time.perf_counter()
+        try:
+            result = await virtual_mod.run_virtual(
+                tool, payload.get("arguments") or {}, cfg, ctx.registry, ctx.log
+            )
+            receipt = result.model_dump(mode="json", by_alias=True)
+            status = {
+                "last_test": {
+                    "ok": not result.is_error,
+                    "status": "passed" if not result.is_error else "failed",
+                    "ms": round((time.perf_counter() - started) * 1000, 1),
+                }
+            }
+            ctx.hooks.setdefault("virtual_status", {})[tool.name] = status
+            return JSONResponse(
+                {"ok": not result.is_error, "result": receipt, **status}
+            )
+        except Exception as exc:  # noqa: BLE001
+            status = {"last_test": {"ok": False, "status": "failed", "error": str(exc)}}
+            ctx.hooks.setdefault("virtual_status", {})[tool.name] = status
+            return _err(str(exc))
+
+    async def activate_virtual(request: Request):
+        cfg = ctx.load()
+        name = request.path_params["name"]
+        tool = _find(cfg, name)
+        if tool is None:
+            return _err("unknown virtual tool", 404)
+        fingerprint = _consent_fingerprint(tool)
+        consent_store = ctx.hooks.setdefault("virtual_consent_fingerprints", {})
+        if fingerprint is None:
+            consent_store.pop(name, None)
+        else:
+            consent_store[name] = fingerprint
+        ctx.hooks.setdefault("virtual_status", {}).setdefault(name, {})[
+            "consent_fingerprint"
+        ] = fingerprint
+        resolution = await _resolution(tool, cfg)
+        if not resolution["ok"]:
+            return JSONResponse(resolution, status_code=400)
+        candidate = cfg.model_copy(deep=True)
+        active = _find(candidate, name)
+        assert active is not None
+        active.enabled = True
+        if active.router is not None:
+            active.router.egress_consent_fingerprint = fingerprint
+        try:
+            candidate = GatewayConfig.model_validate(candidate.model_dump())
+            virtual_mod.build_virtual_tool(active, candidate, ctx.registry, ctx.log)
+        except Exception as exc:  # noqa: BLE001
+            return _err(str(exc))
+        # Full live resolution immediately above is stronger than the captured
+        # baseline guard used for synchronous legacy mutations.
+        ctx.commit(candidate, validate_virtual_refs=False)
+        try:
+            _hot_replace(candidate)
+        except Exception as exc:  # noqa: BLE001
+            ctx.commit(cfg, validate_virtual_refs=False)
+            _hot_replace(cfg)
+            return _err(f"activation failed; draft restored: {exc}", 500)
+        return JSONResponse({"ok": True, "enabled": True, "reloaded": "hot"})
+
+    async def disable_virtual(request: Request):
+        cfg = ctx.load()
+        tool = _find(cfg, request.path_params["name"])
+        if tool is None:
+            return _err("unknown virtual tool", 404)
+        candidate = cfg.model_copy(deep=True)
+        disabled = _find(candidate, tool.name)
+        assert disabled is not None
+        disabled.enabled = False
+        candidate = GatewayConfig.model_validate(candidate.model_dump())
+        ctx.commit(candidate)
+        try:
+            _hot_replace(candidate)
+        except Exception as exc:  # noqa: BLE001
+            ctx.commit(cfg, validate_virtual_refs=False)
+            _hot_replace(cfg)
+            return _err(f"disable failed; active definition restored: {exc}", 500)
+        return JSONResponse({"ok": True, "enabled": False, "reloaded": "hot"})
+
+    async def delete_virtual(request: Request):
+        cfg = ctx.load()
+        name = request.path_params["name"]
+        if _find(cfg, name) is None:
+            return _err("unknown virtual tool", 404)
+        candidate = cfg.model_copy(
+            update={
+                "virtual_tools": [
+                    tool for tool in cfg.virtual_tools if tool.name != name
+                ]
+            },
+            deep=True,
+        )
+        candidate = GatewayConfig.model_validate(candidate.model_dump())
+        ctx.commit(candidate)
+        try:
+            _hot_replace(candidate)
+        except Exception as exc:  # noqa: BLE001
+            ctx.commit(cfg, validate_virtual_refs=False)
+            _hot_replace(cfg)
+            return _err(f"delete failed; definition restored: {exc}", 500)
+        return JSONResponse({"ok": True})
+
+    return [
+        Route("/admin/api/virtual-tools", list_virtual_tools, methods=["GET"]),
+        Route("/admin/api/virtual-catalog", virtual_catalog, methods=["GET"]),
+        Route(
+            "/admin/api/virtual-tools",
+            _needs_json(ctx.locked(create_virtual)),
+            methods=["POST"],
+        ),
+        Route(
+            "/admin/api/virtual-tools/{name}",
+            _needs_json(ctx.locked(update_virtual)),
+            methods=["PUT"],
+        ),
+        Route(
+            "/admin/api/virtual-tools/{name}",
+            ctx.locked(delete_virtual),
+            methods=["DELETE"],
+        ),
+        Route(
+            "/admin/api/virtual-tools/{name}/validate",
+            validate_virtual,
+            methods=["POST"],
+        ),
+        Route(
+            "/admin/api/virtual-tools/{name}/test",
+            _needs_json(test_virtual),
+            methods=["POST"],
+        ),
+        Route(
+            "/admin/api/virtual-tools/{name}/activate",
+            ctx.locked(activate_virtual),
+            methods=["POST"],
+        ),
+        Route(
+            "/admin/api/virtual-tools/{name}/disable",
+            ctx.locked(disable_virtual),
+            methods=["POST"],
+        ),
+    ]
+
+
 def register(  # noqa: PLR0913 — public API; callers pass the lifespan plumbing
     app,
     config_path: str,
@@ -2701,6 +3225,7 @@ def register(  # noqa: PLR0913 — public API; callers pass the lifespan plumbin
             *_gateway_settings_routes(ctx),
             *_backend_routes(ctx),
             *_claude_routes(ctx),
+            *_virtual_routes(ctx),
             *_ops_routes(ctx),
         ]
     )

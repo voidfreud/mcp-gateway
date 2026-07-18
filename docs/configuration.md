@@ -69,12 +69,13 @@ diff-vs-default model (see below).
 | `baseline_max_age` | integer (seconds) | `86400` (24 h) | How long a captured baseline counts as fresh for the **post-mount** refresh: at boot (or remount) a backend whose stored baseline is younger than this is not re-introspected, sparing slow stdio backends a second cold start per boot. `0` disables the gate (re-capture on every mount). Only the mount-time trigger is gated — a backend's own change notification, an admin page load, and the manual Re-inspect button always refresh. |
 | `bearer_token` | string or unset | unset | Optional access token. When set (as a `${ENV}` reference), every backend endpoint **and** the admin API require `Authorization: Bearer <token>`. See [security.md](security.md#the-optional-bearer-token). |
 | `backends` | list | required | One `[[backends]]` block per backend. At least one is required. |
+| `virtual_tools` | list | empty | Gateway-owned tools served together at the permanent `/virtual/mcp` endpoint. Normally managed through the Admin UI. |
 
 ## Backend settings (`[[backends]]`)
 
 | Key | Type | Default | Meaning |
 |-----|------|---------|---------|
-| `name` | string | required | The backend's identity. Drives the `/<name>/mcp` endpoint, the config key, the captured-defaults file, and the `gateway-<name>` Claude Code registration. Letters, digits, `_`, `-`, up to 64 characters. Changing it is a rename (restart + re-register). |
+| `name` | string | required | The backend's route identity. Drives the `/<name>/mcp` endpoint, the config key, the captured-defaults file, and the `gateway-<name>` Claude Code registration. Letters, digits, `_`, `-`, up to 64 characters. A live rename hot-mounts the new route; Claude Code still needs re-registration. Stable Virtual Tool identity is the separate auto-managed `id`. |
 | `display_name` | string or unset | unset | Cosmetic label shown in the admin UI only. Does not affect routing, the endpoint, or registration. Empty falls back to `name`. |
 | `transport` | `"http"` \| `"streamable-http"` \| `"sse"` \| `"stdio"` | required | How to reach the backend. `http` and `streamable-http` are the same modern remote transport; `sse` is the legacy remote transport; `stdio` runs a local command. |
 | `url` | string or unset | unset | The backend's URL. **Required for `http`/`streamable-http`/`sse`.** May contain `${ENV}` references. |
@@ -213,6 +214,31 @@ original name.
 | `description` | string or unset | unset | The description Claude reads. |
 | `enabled` | boolean | `true` | `false` drops the prompt from the listing and blocks `prompts/get`. |
 | `args` | list | empty | One `[[backends.prompts.args]]` block per argument whose **description** you override. Argument *names* are not renameable — the call forwards the arguments to the backend verbatim. Each block: `original` (the argument name) + `description`. |
+
+## Virtual Tools (`[[virtual_tools]]`)
+
+A Virtual Tool exposes one authored schema and dispatches to live backend tools.
+Use the Admin UI for the draft → validate → test → activate lifecycle. Hand-edited
+definitions use these fields:
+
+| Key | Type | Default | Meaning |
+|-----|------|---------|---------|
+| `name`, `description` | string | required | Public tool identity and instructions. Names use letters, digits, `_`, or `-` (max 64). |
+| `enabled` | boolean | `false` | Active definitions are broadcast; drafts remain stored but absent from `tools/list`. |
+| `dispatch` | `all`, `keyword`, or `llm` | `all` | Concurrent fan-out, local regex selection, or external LLM selection. |
+| `inputs` | list | empty | Public inputs: `name`, `type` (`string`/`integer`/`number`/`boolean`), `description`, `required`, and optional `default`. |
+| `members` | list | required | Stable `backend_id` + `tool_original` binding, optional `label`, original-parameter maps in `args`/`static_args`, timeout, and routing hints. |
+| `router` | table or unset | unset | Fallback plus OpenRouter model, `${ENV}` API-key reference, deadline, policy, and activation-bound egress consent for `llm`. Use the Admin UI to acknowledge the exact routing configuration; editing it returns the definition to draft. |
+| `max_result_bytes` | integer | `262144` | Strict limit on the final serialized MCP `ToolResult`. Whole content/structured items that do not fit are omitted with a bounded marker and metadata. |
+| `failure_policy` | `partial` or `strict` | `partial` | Partial succeeds when any selected member succeeds; strict fails if any selected member fails. |
+| `always_load` | boolean | `false` | Adds the same eager-load metadata used by backend tools. |
+
+Member `args` maps an original member parameter to a Virtual Tool input. Stable
+IDs and original names are stored; effective backend/tool/parameter names are
+resolved at validation and call time, so normal gateway renames remain effective.
+Source disappearance is unresolved and blocks activation rather than remapping.
+Keyword patterns are intentionally restricted to a safe regular-expression
+subset and evaluate only a bounded prefix of routing input.
 
 ## Secrets
 

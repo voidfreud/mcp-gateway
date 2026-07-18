@@ -6,9 +6,9 @@ broadcasts to Claude Code, and register the results. The page is served by the
 same daemon that does the proxying, and is reachable only from your own machine
 (loopback).
 
-Everything you change **auto-saves** — there are no save buttons. Edits are
-written to `config.toml` (debounced by about half a second, and flushed when a
-field loses focus or you close the page), so nothing is lost.
+Backend text overrides **auto-save**. Virtual Tools use explicit **Save draft**
+and **Save & activate** actions because their validate/test/activate lifecycle is
+deliberately transactional. Everything is written to `config.toml`.
 
 This guide walks the UI top to bottom. For what each change means in practice —
 whether it takes effect instantly or needs a restart — see
@@ -16,8 +16,7 @@ whether it takes effect instantly or needs a restart — see
 
 ## The sidebar and status dots
 
-The left pane lists every backend, plus a **⚙ Gateway** item at the top for
-gateway-wide settings.
+The left pane lists every backend, plus **Gateway** and **Virtual Tools** items.
 
 Each backend carries a **connection-status dot**, probed live through the running
 proxy — the same path Claude Code uses to list tools:
@@ -29,6 +28,35 @@ proxy — the same path Claude Code uses to list tools:
 - **Grey / disabled** — the backend is turned off, or not currently mounted.
 
 The probe runs asynchronously, so a slow or dead backend marks only itself.
+
+## Virtual Tools
+
+Virtual Tools are a separate first-class category, not another backend import.
+They are tools the gateway owns and serves together at the permanent
+`/virtual/mcp` endpoint. The endpoint remains mounted with an empty tool list
+when no definition is active.
+
+The editor walks one definition through:
+
+1. Public name, description, and input schema.
+2. Stable source members selected from the live backend catalog. The UI shows
+   current effective names but stores backend IDs and original tool/parameter
+   identities, so ordinary renames do not silently break the binding.
+3. Dispatch: **all** (concurrent fan-out), **keyword** (local regex rules), or
+   **llm** (external selection with explicit local fallback and data-egress
+   acknowledgement).
+4. Partial/strict failure policy and an aggregate byte budget. Text, images,
+   audio, embedded resources, resource links, and structured output remain
+   representable; omissions carry an explicit marker and metadata.
+
+Save a draft first, use **Validate & resolve**, then normally **Test draft** with
+a JSON argument object. Testing is optional because source tools may cost money
+or have side effects; activation is still blocked if a source disappeared, a schema no
+longer resolves, the live endpoint cannot dry-build, or LLM consent/key settings
+are incomplete. Editing an active definition returns it to draft. Activate/disable
+hot-reload the shared endpoint without removing it. Last-test and last-dispatch
+badges are runtime-only and reset with the gateway process. Removing a referenced backend is rejected until its Virtual Tools are
+updated, disabled/deleted, or moved to another source.
 
 ## Importing a backend
 
@@ -90,12 +118,13 @@ backend-wide controls:
 These look similar but do very different things:
 
 - **Display name** is cosmetic. Nothing about routing changes.
-- **Rename…** changes the backend's *real identity*: its endpoint URL
+- **Rename…** changes the backend's *route identity*: its endpoint URL
   (`/<name>/mcp`), its key in `config.toml`, its captured-defaults file, and its
   `gateway-<name>` registration in Claude Code. Because the endpoint itself
-  moves, a rename restarts the daemon and then prompts you to re-register in
-  Claude Code (one click, and it cleans up the old registration for you). The
-  UI tells you the exact old and new endpoint and registration names.
+  moves. The gateway hot-mounts the new route before responding, while the
+  stable backend ID used by Virtual Tools stays unchanged. You still need to
+  re-register Claude Code (one click cleans up the old registration). The UI
+  tells you the exact old and new endpoint and registration names.
 
 ### Registering in Claude Code
 

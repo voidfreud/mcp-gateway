@@ -52,6 +52,8 @@ Now open the admin UI at **http://127.0.0.1:9100/admin** and:
 1. Click **Import MCP** and add a backend (its URL, or its local command).
 2. Click **Register** (in the backend's Claude Code cluster) to wire it into Claude Code.
 3. Edit the backend's tool names and descriptions to taste — edits auto-save.
+4. Optionally open **Virtual Tools** to compose or route several backend tools
+   behind one gateway-owned tool on `/virtual/mcp`.
 
 That's it. See [docs/admin-guide.md](docs/admin-guide.md) for the full tour.
 
@@ -59,6 +61,10 @@ That's it. See [docs/admin-guide.md](docs/admin-guide.md) for the full tour.
 
 - **One endpoint per backend** — each backend is its own MCP server in Claude
   Code (`/<backend>/mcp`), with its own instructions budget.
+- **First-class Virtual Tools** — create, validate, live-test, and activate
+  gateway-owned composite/routing tools from the UI. Stable source bindings,
+  concurrent fan-out, keyword/LLM selection, explicit fallbacks, rich MCP result
+  preservation, and output budgets share one permanent `/virtual/mcp` endpoint.
 - **Live editing with hot reload** — rewrite any tool name, title, description, or
   parameter doc; text changes apply to the running gateway instantly, no restart.
 - **Connection status dots** — each backend shows a live green/red health dot with
