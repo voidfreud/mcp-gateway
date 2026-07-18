@@ -85,10 +85,12 @@ layout, console script `mcp-gateway`). MIT; distributed via
 
 ## Gotchas (verified against FastMCP 3.4.4)
 
-- v3 API: `create_proxy()`; transforms are `ToolTransform({original:
+- **FastMCP is exact-pinned at 3.4.4.** Upgrade it deliberately: change the
+  `pyproject.toml` pin, refresh `uv.lock`, then run `just check` and the live
+  receipts before shipping. v3 API: `create_proxy()`; transforms are `ToolTransform({original:
   ToolTransformConfig(..., arguments={p: ArgTransformConfig(...)})})`. Private
   attrs we rely on (`proxy._transforms`, `_mcp_server.notification_options`,
-  MessageHandler dispatch) are tripwired by tests.
+  `local_provider._components`, MessageHandler dispatch) are tripwired by tests.
 - **Downstream list-change capabilities:** every backend proxy and the shared
   `/virtual/mcp` server advertise tools/resources/prompts `listChanged=false`.
   Admin hot swaps are immediately visible to an explicit re-list, but FastMCP

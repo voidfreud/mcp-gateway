@@ -21,7 +21,9 @@ classifiers = [
     "Topic :: Software Development :: Libraries",
 ]
 dependencies = [
-    "fastmcp>=3.4.4",
+    # Private compatibility seams are guarded in tests/test_fastmcp_compat.py.
+    # Upgrade deliberately: change this pin, refresh uv.lock, and run the full gate.
+    "fastmcp==3.4.4",
     "pydantic>=2.13.4",
     "structlog>=26.1.0",
     "tomli-w>=1.2.0",

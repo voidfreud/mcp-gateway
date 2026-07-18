@@ -32,7 +32,7 @@ jobs:
       # the lockfile must be consistent with pyproject — catches a dependency
       # edit that forgot `uv lock`
       - run: uv lock --check
-      - run: uv sync
+      - run: uv sync --locked
       - run: just check
       # the wheel must build and carry its data files (admin.html + the seed
       # config ship inside the package — a packaging regression breaks install)

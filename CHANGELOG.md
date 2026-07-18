@@ -8,6 +8,12 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Exact-pin FastMCP 3.4.4 and add explicit compatibility tripwires for every
+  private runtime seam used by proxy hot reload, capability suppression, and
+  virtual-tool catalog replacement. CI and releases now install strictly from
+  the lock; a separate daily canary runs the full gate against the newest
+  FastMCP without weakening the production pin.
+
 - **Truthful Virtual Tools capabilities** — `/virtual/mcp` now advertises
   `tools.listChanged=false` (along with resources/prompts) because its Admin
   hot swaps do not yet have a server-wide downstream-session broadcast API.
