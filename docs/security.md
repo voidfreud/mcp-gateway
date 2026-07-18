@@ -86,6 +86,18 @@ Note the `--header` option must come **after** the name and URL. If you add or
 change the token later, you must re-register your backends so Claude Code sends
 the new header.
 
+**Consequence for Codex.** Codex's CLI accepts a bearer-token environment
+variable rather than a literal header. With `bearer_token = "${MCP_GATEWAY_TOKEN}"`,
+the dashboard registers a backend using:
+
+```bash
+codex mcp add gateway-<name> --url http://127.0.0.1:9100/<name>/mcp --bearer-token-env-var MCP_GATEWAY_TOKEN
+```
+
+Only the variable name is written to Codex configuration. The Codex desktop,
+CLI, or IDE process must itself receive that environment variable; putting the
+value only in the gateway's secrets file is not sufficient for Codex calls.
+
 The token comparison is constant-time, and the token is redacted from anything
 the gateway echoes back (logs, the register button's output).
 

@@ -35,8 +35,8 @@ layout, console script `mcp-gateway`). MIT; distributed via
   guard → body limit → optional bearer. `_AutoRefresh` (baseline refresh) and
   the recycle worker (#161) live in the lifespan.
 - `src/mcp_gateway/admin.py` — admin API + helpers: capture/defaults, override
-  diffing, collision + transform-dry-build validation, hot reload, Claude Code
-  CLI integration, settings, stale-override migration.
+  diffing, collision + transform-dry-build validation, hot reload, independent
+  Claude Code and Codex CLI registration, settings, stale-override migration.
 - `src/mcp_gateway/admin.html` — single-file vanilla-JS admin UI (no build,
   no external assets; light+dark via prefers-color-scheme, #170). Guarded by
   tests: no merge-conflict markers, ONE inline `<script>` that must pass
@@ -125,7 +125,10 @@ layout, console script `mcp-gateway`). MIT; distributed via
   execution for any local process); only `/health`, `/ready`, bare `GET
   /admin` stay open. Origin guard 403s foreign browser origins on every route
   (MCP-spec MUST, DNS rebinding). `claude mcp add --header` is VARIADIC — it
-  must come after `<name> <url>` or it swallows them.
+  must come after `<name> <url>` or it swallows them. Codex accepts only
+  `--bearer-token-env-var`; its one-click registration therefore requires the
+  gateway token to be a single `${ENV_VAR}` reference, and that variable must
+  also exist in the Codex process environment.
 - **Admin editing model:** every broadcast text is editable; original names
   read-only. Fields prefill with effective values; only diffs vs captured
   defaults are stored (`_override_vs_default`). Hiding a REQUIRED param needs

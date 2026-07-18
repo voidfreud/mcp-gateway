@@ -2,13 +2,14 @@
 
 [![check](https://github.com/voidfreud/mcp-gateway/actions/workflows/check.yml/badge.svg)](https://github.com/voidfreud/mcp-gateway/actions/workflows/check.yml)
 
-A local service that sits between Claude Code and the MCP servers it talks to, and
+A local service that sits between MCP clients such as Claude Code and Codex and
+the MCP servers they talk to, and
 **rewrites everything those servers broadcast** — tool names, titles,
 descriptions, parameter docs, resource and prompt text, and the server's own
 instructions — while passing the actual tool calls through untouched. When an MCP server is written badly
 enough that Claude can't tell what its tools do, you fix what Claude reads about
 it here, without forking the server. It runs as one background daemon on your Mac,
-shared by every Claude Code session, with a web admin UI at
+shared by every client session, with a web admin UI at
 **http://127.0.0.1:9100/admin**.
 
 ![The admin UI's backend view — live status, grouped controls, stale-override
@@ -50,7 +51,8 @@ curl -s http://127.0.0.1:9100/health   # -> ok mcp-gateway <version> @ /path/to/
 Now open the admin UI at **http://127.0.0.1:9100/admin** and:
 
 1. Click **Import MCP** and add a backend (its URL, or its local command).
-2. Click **Register** (in the backend's Claude Code cluster) to wire it into Claude Code.
+2. Use the backend's **Claude Code** or **Codex** controls to register that
+   independent MCP with either client.
 3. Edit the backend's tool names and descriptions to taste — edits auto-save.
 4. Optionally open **Virtual Tools** to compose or route several backend tools
    behind one gateway-owned tool on `/virtual/mcp`.
@@ -78,6 +80,9 @@ That's it. See [docs/admin-guide.md](docs/admin-guide.md) for the full tour.
   registration) in one action, with a prompt to re-register.
 - **One-click Claude Code registration** — register or remove a backend's endpoint
   from the UI, at the scope you choose, no terminal.
+- **One-click Codex registration** — add or remove that same independent backend
+  through Codex's own CLI/config. Codex discovers its tools after restart or in a
+  new task; backends are never collapsed into one aggregate MCP.
 - **Collision handling** — two tools can never share a broadcast name; bulk
   renames can auto-uniquify with a suffix.
 - **Resource & prompt rewriting** — the same override story for everything else

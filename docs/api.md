@@ -85,6 +85,19 @@ added to the registration and redacted from the response.
 | GET | `/admin/api/cc-registrations` | — (`?fresh=1` busts the 60s cache) | Which configured backends are registered in Claude Code, parsed from `claude mcp list`. `{available, registered: {<backend>: bool}}`; `{available:false}` without the CLI. |
 | POST | `/admin/api/cc-reregister-all` | `{scope}` | Deregister + register every **enabled** backend, sequentially; one failure doesn't stop the rest. `{ok, count, ok_count, backends: [...]}`. |
 
+## Codex registration
+
+These routes use the `codex` CLI and keep every backend as a separate MCP
+server. Codex has no Claude-style registration scope. When gateway bearer auth
+is enabled, the configured token must be a single `${ENV_VAR}` reference; only
+the variable name is stored in Codex configuration.
+
+| Method | Path | Body | Response |
+|--------|------|------|----------|
+| POST | `/admin/api/backend/{name}/codex/register` | `{}` | Runs `codex mcp add gateway-<name> --url <backend endpoint>`, with `--bearer-token-env-var` when applicable. `{ok, exit, stdout, stderr, command, note}`. |
+| POST | `/admin/api/backend/{name}/codex/deregister` | `{}` | Runs `codex mcp remove gateway-<name>`. Works after the backend has been removed so cleanup remains possible. |
+| GET | `/admin/api/codex-registrations` | — (`?fresh=1` busts the 60s cache) | Exact registration state parsed from `codex mcp list --json`. `{available, ok, registered: {<backend>: bool}}`; `{available:false}` when the CLI is unavailable. |
+
 ## Virtual Tools
 
 Virtual Tools are gateway-owned tools on the always-mounted `/virtual/mcp`

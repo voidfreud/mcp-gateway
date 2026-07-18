@@ -1659,6 +1659,12 @@ CLAUDE_CLI_TIMEOUT = 30
 CC_REG_CACHE_TTL = 60.0
 _cc_reg_cache: dict[str, Any] = {"ts": 0.0, "output": None}
 
+# Codex uses one user-level config and exposes JSON for reliable status parsing.
+# Keep its cache independent from Claude Code so either CLI can be absent or
+# refreshed without affecting the other client integration.
+CODEX_REG_CACHE_TTL = 60.0
+_codex_reg_cache: dict[str, Any] = {"ts": 0.0, "output": None}
+
 
 def parse_cc_registrations(output: str, backends: list[str]) -> dict[str, bool]:
     """Map each configured backend to whether it is registered in Claude Code,
@@ -1721,6 +1727,80 @@ def claude_mcp_command(
     if action == "remove":
         return ["claude", "mcp", "remove", "--scope", scope, registration]
     raise cl.ConfigError(f"unknown action {action!r} (use add or remove)")
+
+
+def parse_codex_registrations(output: str, backends: list[str]) -> dict[str, bool]:
+    """Map configured backends to exact registrations from ``codex mcp list``.
+
+    Codex provides a JSON mode, so avoid depending on human-readable output.
+    Registration state is intentionally distinct from ``enabled`` and
+    ``auth_status``: a disabled or unauthenticated entry still exists in Codex.
+    """
+    try:
+        items = json.loads(output)
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise cl.ConfigError("codex mcp list returned malformed JSON") from exc
+    if not isinstance(items, list):
+        raise cl.ConfigError("codex mcp list returned JSON other than a list")
+    names = {
+        item.get("name")
+        for item in items
+        if isinstance(item, dict) and isinstance(item.get("name"), str)
+    }
+    return {name: f"gateway-{name}" in names for name in backends}
+
+
+def codex_bearer_env_var(bearer_token: str | None) -> str | None:
+    """Return the environment variable Codex should use for gateway auth.
+
+    ``codex mcp add`` deliberately accepts an environment-variable *name*, not
+    a literal token. Requiring a single ``${ENV}`` reference keeps credentials
+    out of argv, API responses, and ``~/.codex/config.toml``.
+    """
+    if bearer_token is None:
+        return None
+    match = re.fullmatch(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}", bearer_token.strip())
+    if match is None:
+        raise cl.ConfigError(
+            "Codex registration requires bearer_token to be a single ${ENV_VAR} "
+            "reference; literal tokens are never written to Codex config"
+        )
+    return match.group(1)
+
+
+def codex_mcp_command(
+    action: str,
+    name: str,
+    url: str | None = None,
+    bearer_env_var: str | None = None,
+) -> list[str]:
+    """Build the Codex CLI argv for one independent gateway backend."""
+    registration = f"gateway-{name}"
+    if action == "add":
+        if not url:
+            raise cl.ConfigError("register needs the backend's endpoint url")
+        argv = ["codex", "mcp", "add", registration, "--url", url]
+        if bearer_env_var:
+            argv += ["--bearer-token-env-var", bearer_env_var]
+        return argv
+    if action == "remove":
+        return ["codex", "mcp", "remove", registration]
+    raise cl.ConfigError(f"unknown action {action!r} (use add or remove)")
+
+
+def codex_cli_path() -> str | None:
+    """Locate Codex for both interactive shells and the macOS login daemon."""
+    found = shutil.which("codex")
+    if found:
+        return found
+    candidates = [
+        os.environ.get("CODEX_CLI_PATH"),
+        "/Applications/ChatGPT.app/Contents/Resources/codex",
+    ]
+    for candidate in candidates:
+        if candidate and Path(candidate).is_file() and os.access(candidate, os.X_OK):
+            return candidate
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -2709,6 +2789,132 @@ def _claude_routes(ctx: _AdminCtx) -> list[Route]:  # noqa: PLR0915 — nested h
     ]
 
 
+def _codex_routes(ctx: _AdminCtx) -> list[Route]:
+    """One-click registration of each backend as an independent Codex MCP.
+
+    Codex and Claude Code intentionally remain separate client integrations:
+    this uses Codex's own CLI/config and never changes the backend mounts or
+    combines their tool catalogs.
+    """
+
+    async def _cli_raw(argv: list[str]) -> tuple[int, str, str]:
+        try:
+            result = await asyncio.to_thread(
+                subprocess.run,
+                argv,
+                capture_output=True,
+                text=True,
+                timeout=CLAUDE_CLI_TIMEOUT,
+                check=False,
+            )
+            return result.returncode, result.stdout, result.stderr
+        except (subprocess.SubprocessError, OSError) as exc:
+            return -1, "", f"{type(exc).__name__}: {exc}"
+
+    def _binary() -> str | JSONResponse:
+        binary = codex_cli_path()
+        if binary is None:
+            return _err(
+                "Codex CLI not found — install Codex/ChatGPT desktop or expose "
+                "the codex executable to the gateway daemon, then retry"
+            )
+        return binary
+
+    async def register_backend(request: Request):
+        name = request.path_params["name"]
+        cfg = ctx.load()
+        if not any(backend.name == name for backend in cfg.backends):
+            return _err("unknown backend")
+        binary = _binary()
+        if isinstance(binary, JSONResponse):
+            return binary
+        url = f"http://{cfg.host}:{cfg.port}/{name}/mcp"
+        try:
+            bearer_env_var = codex_bearer_env_var(cfg.bearer_token)
+            argv = codex_mcp_command(
+                "add", name, url=url, bearer_env_var=bearer_env_var
+            )
+        except cl.ConfigError as exc:
+            return _err(str(exc))
+        argv[0] = binary
+        rc, stdout, stderr = await _cli_raw(argv)
+        return JSONResponse(
+            {
+                "ok": rc == 0,
+                "exit": rc,
+                "stdout": stdout,
+                "stderr": stderr,
+                "command": " ".join(argv),
+                "note": "Restart Codex or open a new task to load the server",
+            }
+        )
+
+    async def deregister_backend(request: Request):
+        name = request.path_params["name"]
+        binary = _binary()
+        if isinstance(binary, JSONResponse):
+            return binary
+        argv = codex_mcp_command("remove", name)
+        argv[0] = binary
+        rc, stdout, stderr = await _cli_raw(argv)
+        return JSONResponse(
+            {
+                "ok": rc == 0,
+                "exit": rc,
+                "stdout": stdout,
+                "stderr": stderr,
+                "command": " ".join(argv),
+                "note": "Restart Codex or open a new task to unload the server",
+            }
+        )
+
+    async def registrations(request: Request):
+        binary = _binary()
+        if isinstance(binary, JSONResponse):
+            return JSONResponse({"available": False})
+        fresh = request.query_params.get("fresh") in ("1", "true")
+        now = time.monotonic()
+        output = _codex_reg_cache.get("output")
+        if (
+            fresh
+            or output is None
+            or now - _codex_reg_cache["ts"] > CODEX_REG_CACHE_TTL
+        ):
+            rc, stdout, stderr = await _cli_raw([binary, "mcp", "list", "--json"])
+            if rc != 0:
+                return JSONResponse(
+                    {
+                        "available": True,
+                        "ok": False,
+                        "error": stderr or stdout or f"codex mcp list exited {rc}",
+                    }
+                )
+            output = stdout
+            _codex_reg_cache["output"] = output
+            _codex_reg_cache["ts"] = now
+        try:
+            registered = parse_codex_registrations(
+                output, [backend.name for backend in ctx.load().backends]
+            )
+        except cl.ConfigError as exc:
+            return JSONResponse({"available": True, "ok": False, "error": str(exc)})
+        return JSONResponse({"available": True, "ok": True, "registered": registered})
+
+    return [
+        Route(
+            "/admin/api/backend/{name}/codex/register",
+            _needs_json(register_backend),
+            methods=["POST"],
+        ),
+        Route(
+            "/admin/api/backend/{name}/codex/deregister",
+            _needs_json(deregister_backend),
+            methods=["POST"],
+        ),
+        Route("/admin/api/codex-registrations", registrations, methods=["GET"]),
+    ]
+
+
 def _ops_routes(ctx: _AdminCtx) -> list[Route]:  # noqa: PLR0915 — nested handlers; the group is cohesive
     """Operational endpoints: mini-inspector, manual restart, re-introspect,
     liveness status (#23), and the dashboard-load refresh sweep (#43)."""
@@ -3225,6 +3431,7 @@ def register(  # noqa: PLR0913 — public API; callers pass the lifespan plumbin
             *_gateway_settings_routes(ctx),
             *_backend_routes(ctx),
             *_claude_routes(ctx),
+            *_codex_routes(ctx),
             *_virtual_routes(ctx),
             *_ops_routes(ctx),
         ]

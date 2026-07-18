@@ -22,9 +22,11 @@ separately. To install `uv`:
 curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-To register backends from inside the admin UI (the one-click "Register"
-button (Claude Code cluster)), you also need the `claude` command line tool (Claude Code) available.
-That is optional — you can always register backends by hand.
+To register backends from inside the admin UI, install the client CLI you want
+the gateway to manage: `claude` for the Claude Code controls and/or `codex` for
+the Codex controls. On macOS the gateway also detects the Codex executable
+bundled with ChatGPT desktop. Both integrations are optional—you can always
+register each `/<backend>/mcp` endpoint by hand.
 
 ## Path A — clone and install as a login service (macOS)
 

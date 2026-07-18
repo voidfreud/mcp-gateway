@@ -26,6 +26,14 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **One-click Codex registration** — every backend remains an independent MCP
+  and now has its own Codex status plus **Add/Remove** control in the Admin UI.
+  Import and hard-rename can update Codex explicitly; backend removal performs
+  best-effort cleanup. The integration uses `codex mcp add/remove/list --json`,
+  detects ChatGPT desktop's bundled CLI, and passes bearer authentication only
+  as an environment-variable name—never a resolved secret. Codex must be
+  restarted or a new task opened after registration changes.
+
 - **First-class Virtual Tools** — the Admin UI now has a separate Virtual
   Tools catalog for composing and routing live backend tools behind one
   permanent `/virtual/mcp` endpoint. Definitions use stable backend IDs and

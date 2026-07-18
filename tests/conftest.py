@@ -24,6 +24,7 @@ def isolated_state_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(admin, "_last_refresh", {})
     # #46: the cc-registrations cache is likewise module state — reset per test.
     monkeypatch.setattr(admin, "_cc_reg_cache", {"ts": 0.0, "output": None})
+    monkeypatch.setattr(admin, "_codex_reg_cache", {"ts": 0.0, "output": None})
     # #161: the warm-session recycle cooldown is module state too — reset per test.
     monkeypatch.setattr(server, "_last_recycle", {})
     return state

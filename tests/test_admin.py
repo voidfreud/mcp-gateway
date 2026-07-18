@@ -1222,6 +1222,69 @@ def test_claude_mcp_command_add_requires_url():
         admin.claude_mcp_command("add", "b")
 
 
+# --- per-backend Codex registration ----------------------------------------
+
+
+def test_codex_mcp_command_add_remove_argv():
+    url = "http://127.0.0.1:9100/b/mcp"
+    assert admin.codex_mcp_command("add", "b", url=url) == [
+        "codex",
+        "mcp",
+        "add",
+        "gateway-b",
+        "--url",
+        url,
+    ]
+    assert admin.codex_mcp_command("remove", "b") == [
+        "codex",
+        "mcp",
+        "remove",
+        "gateway-b",
+    ]
+
+
+def test_codex_mcp_command_uses_bearer_env_var_only():
+    argv = admin.codex_mcp_command(
+        "add",
+        "b",
+        url="http://h/b/mcp",
+        bearer_env_var="GATEWAY_TOKEN",
+    )
+    assert argv[-2:] == ["--bearer-token-env-var", "GATEWAY_TOKEN"]
+    assert admin.codex_bearer_env_var("${GATEWAY_TOKEN}") == "GATEWAY_TOKEN"
+    assert admin.codex_bearer_env_var(None) is None
+    for unsafe in ("literal-secret", "Bearer ${TOKEN}", "${BAD-NAME}"):
+        with pytest.raises(cl.ConfigError, match=r"single \$\{ENV_VAR\}"):
+            admin.codex_bearer_env_var(unsafe)
+
+
+def test_codex_mcp_command_rejects_invalid_requests():
+    with pytest.raises(cl.ConfigError, match="url"):
+        admin.codex_mcp_command("add", "b")
+    with pytest.raises(cl.ConfigError, match="action"):
+        admin.codex_mcp_command("list", "b")
+
+
+def test_parse_codex_registrations_exact_names():
+    output = json.dumps(
+        [
+            {"name": "gateway-a", "enabled": False},
+            {"name": "gateway-a-long", "enabled": True},
+        ]
+    )
+    assert admin.parse_codex_registrations(output, ["a", "a-long", "missing"]) == {
+        "a": True,
+        "a-long": True,
+        "missing": False,
+    }
+
+
+@pytest.mark.parametrize("output", ["not-json", "{}", "null"])
+def test_parse_codex_registrations_rejects_malformed_shape(output):
+    with pytest.raises(cl.ConfigError, match="codex mcp list"):
+        admin.parse_codex_registrations(output, ["b"])
+
+
 def test_effective_tools_scopes_to_one_backend(defaults_dir):
     _write_defaults(defaults_dir, "b1", "t1")
     _write_defaults(defaults_dir, "b2", "t2")

@@ -34,7 +34,14 @@ free_text = st.text(
 
 @st.composite
 def gw_config_dict(draw) -> dict:
-    names = draw(st.lists(ident, min_size=1, max_size=4, unique=True))
+    names = draw(
+        st.lists(
+            ident.filter(lambda name: name != "virtual"),
+            min_size=1,
+            max_size=4,
+            unique=True,
+        )
+    )
     backends = []
     for nm in names:
         transport = draw(st.sampled_from(["http", "streamable-http", "sse", "stdio"]))

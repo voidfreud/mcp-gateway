@@ -1020,6 +1020,89 @@ def test_deregister_bad_scope_is_400(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Per-backend Codex registration via the `codex` CLI
+# ---------------------------------------------------------------------------
+
+
+def _fake_codex_cli(monkeypatch, calls, rc=0, stdout="", stderr=""):
+    monkeypatch.setattr(admin, "codex_cli_path", lambda: "/usr/bin/codex")
+
+    def fake_run(argv, **_kwargs):
+        calls.append(list(argv))
+        return subprocess.CompletedProcess(argv, rc, stdout=stdout, stderr=stderr)
+
+    monkeypatch.setattr(admin.subprocess, "run", fake_run)
+
+
+def test_codex_register_backend_runs_independent_mcp_add(tmp_path, monkeypatch):
+    calls = []
+    _fake_codex_cli(monkeypatch, calls, stdout="added")
+    response = TestClient(_admin_app(tmp_path)).post(
+        "/admin/api/backend/b/codex/register", json={}
+    )
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert calls == [
+        [
+            "/usr/bin/codex",
+            "mcp",
+            "add",
+            "gateway-b",
+            "--url",
+            "http://127.0.0.1:9100/b/mcp",
+        ]
+    ]
+    assert "new task" in response.json()["note"]
+
+
+def test_codex_register_passes_env_name_not_secret(tmp_path, monkeypatch):
+    calls = []
+    _fake_codex_cli(monkeypatch, calls)
+    app = _cfg_app(
+        tmp_path,
+        {
+            "bearer_token": "${GATEWAY_TOKEN}",
+            "backends": [{"name": "b", "transport": "stdio", "command": "/bin/x"}],
+        },
+    )
+    response = TestClient(app).post("/admin/api/backend/b/codex/register", json={})
+    assert response.status_code == 200
+    assert calls[0][-2:] == ["--bearer-token-env-var", "GATEWAY_TOKEN"]
+    assert "${GATEWAY_TOKEN}" not in response.json()["command"]
+
+
+def test_codex_register_unknown_backend_and_missing_cli(tmp_path, monkeypatch):
+    monkeypatch.setattr(admin, "codex_cli_path", lambda: None)
+    client = TestClient(_admin_app(tmp_path))
+    unknown = client.post("/admin/api/backend/ghost/codex/register", json={})
+    assert unknown.status_code == 400 and "unknown" in unknown.json()["error"]
+    missing = client.post("/admin/api/backend/b/codex/register", json={})
+    assert missing.status_code == 400
+    assert "Codex CLI not found" in missing.json()["error"]
+
+
+def test_codex_cli_failure_is_ok_false_without_500(tmp_path, monkeypatch):
+    calls = []
+    _fake_codex_cli(monkeypatch, calls, rc=1, stderr="duplicate server")
+    response = TestClient(_admin_app(tmp_path)).post(
+        "/admin/api/backend/b/codex/register", json={}
+    )
+    assert response.status_code == 200
+    assert response.json()["ok"] is False
+    assert response.json()["stderr"] == "duplicate server"
+
+
+def test_codex_deregister_runs_remove_even_after_backend_removed(tmp_path, monkeypatch):
+    calls = []
+    _fake_codex_cli(monkeypatch, calls)
+    response = TestClient(_admin_app(tmp_path)).post(
+        "/admin/api/backend/gone/codex/deregister", json={}
+    )
+    assert response.status_code == 200 and response.json()["ok"] is True
+    assert calls == [["/usr/bin/codex", "mcp", "remove", "gateway-gone"]]
+
+
+# ---------------------------------------------------------------------------
 # #153 — stale-override migrate/discard routes
 # ---------------------------------------------------------------------------
 
@@ -1202,6 +1285,43 @@ def test_cc_registrations_caches_and_fresh_busts(tmp_path, monkeypatch):
     assert len(calls) == 2
     client.get("/admin/api/cc-registrations?fresh=1")  # explicit bust
     assert len(calls) == 3
+
+
+def test_codex_registrations_missing_cli_reports_unavailable(tmp_path, monkeypatch):
+    monkeypatch.setattr(admin, "codex_cli_path", lambda: None)
+    response = TestClient(_admin_app(tmp_path)).get("/admin/api/codex-registrations")
+    assert response.status_code == 200
+    assert response.json() == {"available": False}
+
+
+def test_codex_registrations_route_uses_json_and_caches(tmp_path, monkeypatch):
+    calls = []
+    output = json.dumps([{"name": "gateway-b", "enabled": True}])
+    _fake_codex_cli(monkeypatch, calls, stdout=output)
+    client = TestClient(_admin_app(tmp_path))
+    first = client.get("/admin/api/codex-registrations")
+    second = client.get("/admin/api/codex-registrations")
+    assert first.json() == {
+        "available": True,
+        "ok": True,
+        "registered": {"b": True},
+    }
+    assert second.json() == first.json()
+    assert calls == [["/usr/bin/codex", "mcp", "list", "--json"]]
+    client.get("/admin/api/codex-registrations?fresh=1")
+    assert len(calls) == 2
+
+
+def test_codex_registrations_malformed_json_is_not_false_all_clear(
+    tmp_path, monkeypatch
+):
+    calls = []
+    _fake_codex_cli(monkeypatch, calls, stdout="not json")
+    response = TestClient(_admin_app(tmp_path)).get("/admin/api/codex-registrations")
+    assert response.status_code == 200
+    assert response.json()["available"] is True
+    assert response.json()["ok"] is False
+    assert "malformed" in response.json()["error"]
 
 
 # ---------------------------------------------------------------------------
@@ -1897,6 +2017,20 @@ def test_admin_html_inline_script_parses():
         assert proc.returncode == 0, proc.stderr
     finally:
         os.unlink(js_path)
+
+
+def test_admin_html_has_per_backend_codex_registration_controls():
+    text = (REPO_ROOT / "src" / "mcp_gateway" / "admin.html").read_text(
+        encoding="utf-8"
+    )
+    for contract in (
+        "also add to Codex",
+        "toggleCodex",
+        "/admin/api/codex-registrations",
+        "/codex/register",
+        "/codex/deregister",
+    ):
+        assert contract in text
 
 
 def test_admin_html_has_first_class_virtual_tools_surface():
