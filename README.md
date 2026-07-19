@@ -48,6 +48,17 @@ state unless you add `--purge` (see
 curl -s http://127.0.0.1:9100/health   # -> ok mcp-gateway <version> @ /path/to/clone
 ```
 
+To update a Path A installation after changes are merged to GitHub, run the
+single guarded deployment command from a clean checkout on `main`:
+
+```bash
+just update
+```
+
+It fast-forwards from `origin/main`, synchronizes the locked environment,
+reloads the LaunchAgent, and verifies `/health` and `/ready`. It preserves your
+admin-edited configuration and runtime state.
+
 Now open the admin UI at **http://127.0.0.1:9100/admin** and:
 
 1. Click **Import MCP** and add a backend (its URL, or its local command).

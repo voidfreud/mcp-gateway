@@ -129,16 +129,29 @@ the full reference.
 
 ## Upgrading (Path A)
 
+From a **clean checkout on `main`**, run:
+
 ```bash
 cd /path/to/mcp-gateway
-git pull
+just update
+```
+
+The guarded recipe fast-forwards from `origin/main`, runs `uv sync --locked`,
+reloads the LaunchAgent through `./install.sh`, and verifies both `/health` and
+`/ready`. It refuses to deploy a feature branch or a dirty checkout. Your
+`config.toml`, captured defaults, backups, and runtime state are not part of the
+Git update and are preserved.
+
+If you prefer to run the steps separately:
+
+```bash
+git pull --ff-only origin main
+uv sync --locked
 ./install.sh
 ```
 
-`git pull` fetches the new code; `./install.sh` rebuilds the environment and
-restarts the service. Your `config.toml` is not part of the repository, so an
-upgrade never touches your settings. Confirm the new version with the `/health`
-check above.
+Confirm the new version with the `/health` check above. A restart briefly drops
+active MCP sessions; clients reconnect to the freshly loaded daemon.
 
 For Path B, upgrade with:
 

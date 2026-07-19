@@ -29,6 +29,18 @@ If you installed as a standalone tool (Path B) there is no login service — you
 started `mcp-gateway` yourself, and you stop it the same way (close it, or
 Ctrl-C).
 
+### Updating the login service
+
+After a change is merged to GitHub, use `just update` from a clean checkout on
+`main`. It fast-forwards the source, synchronizes the locked dependencies,
+reloads launchd, and verifies `/health` plus `/ready`. It does not overwrite
+`config.toml` or runtime state. See [installation.md](installation.md#upgrading-path-a).
+
+The update command intentionally refuses dirty worktrees and feature branches;
+this prevents an accidental local experiment from being deployed as the
+service. A restart drops active MCP sessions briefly, after which clients can
+reconnect.
+
 ## Health and readiness
 
 Two HTTP endpoints report status. Both are always reachable (no bearer token

@@ -28,6 +28,18 @@ verify url="http://127.0.0.1:9100":
 restart:
     launchctl kickstart -k gui/$(id -u)/com.void.mcp-gateway
 
+# Pull the merged main branch, sync the locked environment, reload launchd,
+# and verify the new daemon. This is deliberately explicit and fail-closed:
+# never deploy a feature branch, a dirty checkout, or a half-ready service.
+update:
+    @if test "$$(git branch --show-current)" != "main"; then echo "error: just update must run from the main branch" >&2; exit 1; fi
+    @if test -n "$$(git status --porcelain=v1)"; then echo "error: just update requires a clean checkout" >&2; git status --short >&2; exit 1; fi
+    git pull --ff-only origin main
+    uv sync --locked
+    ./install.sh
+    @curl --fail --silent --show-error http://127.0.0.1:9100/health
+    @curl --fail --silent --show-error http://127.0.0.1:9100/ready
+
 # Install/sync the LaunchAgent via the ~/.local/opt symlink (#149).
 # Re-run after moving the repo. Preview with: ./install.sh --dry-run
 install:
