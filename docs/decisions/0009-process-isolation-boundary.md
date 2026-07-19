@@ -1,6 +1,14 @@
-# 9. Process isolation is conditional, not a default gateway mode
+# ADR-0009: Process isolation is conditional, not a default gateway mode
 
-**Status:** accepted (2026-07-19)
+**Status:** Accepted
+
+**Decision date:** 2026-07-19
+
+**Deciding issue / PR:** [#191](https://github.com/voidfreud/mcp-gateway/pull/191),
+merged as
+[`52a35d7`](https://github.com/voidfreud/mcp-gateway/commit/52a35d7e67cd77d6675545f09f5c210823bd852e)
+
+**Related to:** [ADR-0004](0004-per-session-isolation.md)
 
 ## Context
 

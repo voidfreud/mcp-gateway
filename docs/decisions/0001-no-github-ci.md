@@ -1,13 +1,12 @@
-# 1. No GitHub Actions CI
+# ADR-0001: No hosted CI for the full live gate
 
-Status: Accepted (2026-06-28), amended by
-[ADR-0003](0003-check-only-ci.md) (2026-07-03) — issue
-[#24](https://github.com/voidfreud/mcp-gateway/issues/24)
+**Status:** Superseded
 
-> **Amendment (ADR-0003):** the "no CI" decision below is narrowed to the
-> LIVE gate (`just verify`) only. The pure-logic gate (`just check`) runs in
-> GitHub Actions on every PR since #98 — it needs no backends and no launchd,
-> so the original reasoning never applied to it.
+**Decision date:** 2026-06-28
+
+**Deciding issue / PR:** [#24](https://github.com/voidfreud/mcp-gateway/issues/24)
+
+**Superseded by:** [ADR-0003](0003-check-only-ci.md)
 
 ## Context
 
@@ -22,18 +21,23 @@ neither of which GitHub Actions can provide.
 
 ## Decision
 
-We will not add a GitHub Actions CI workflow for this repo. The local gate is
-`just check` (ruff + pytest + import smoke) before commit, plus `just verify`
-against the live daemon for behavior.
+At the time, the project chose not to add a GitHub Actions workflow. The local
+gate was `just check` (ruff + pytest + import smoke) before commit, plus
+`just verify` against the live daemon for behavior.
 
 ## Consequences
 
-- No green/red badge on PRs. Acceptable: this is a private solo repo, no external
-  contributors.
-- The pure-logic suite (which IS CI-able) is verified locally each commit, same
-  as everything else.
-- If circumstances change (a contributor joins, or the test layers split so the
-  pure-logic suite stands alone as a meaningful signal), revisit.
+- There was no green/red PR signal; the pure-logic suite was verified locally
+  with everything else.
+- The decision required revisiting if the test layers split into a meaningful
+  hermetic signal.
+
+## Supersession
+
+[ADR-0003](0003-check-only-ci.md) replaced this decision for the hermetic
+`just check` gate. The only enduring boundary from this record is that the live
+`just verify` gate needs a configured local daemon and backends, so it is not a
+hosted-CI responsibility.
 
 ## Alternatives considered
 

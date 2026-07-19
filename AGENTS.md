@@ -22,6 +22,7 @@ tool-specific instruction files.
 | Package metadata and current version | [pyproject.toml](pyproject.toml) |
 | Release history | [CHANGELOG.md](CHANGELOG.md) |
 | Automated checks and releases | [.github/workflows/](.github/workflows/) |
+| Accepted architecture decisions and their process | [docs/decisions/](docs/decisions/README.md) |
 | Example configuration | [config.example.toml](config.example.toml) |
 | Verified behavior | [tests/](tests/) and the implementation in [src/](src/) |
 
@@ -51,8 +52,9 @@ GitHub Issues are the tracker for bugs, deferred work, parked features,
 follow-ups, questions, and proposed decisions. Open or use an issue before
 parking work; link the pull request to the issue it resolves. Do not leave
 private backlogs, durable TODOs, or decision records in ad-hoc notes. A
-decision is not settled merely because code exists: record the rationale
-through the project’s established decision process when it is accepted.
+decision is not settled merely because code exists. Follow the canonical
+[Issue-to-ADR process](docs/decisions/README.md): discuss and defer decisions
+in Issues, then add or update an ADR only when a decision is accepted.
 
 ## Change and review workflow
 

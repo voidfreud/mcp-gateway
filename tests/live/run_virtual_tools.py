@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Opt-in black-box acceptance receipts for ADR-0005 Virtual Tools.
+"""Opt-in black-box acceptance receipts for ADR-0005.
+
+See docs/decisions/0005-virtual-tools.md.
 
 The expected Admin API is intentionally defined here while the product surface
 is implemented. A missing endpoint is a useful failing receipt, not a reason to

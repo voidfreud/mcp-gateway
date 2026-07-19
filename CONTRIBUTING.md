@@ -27,3 +27,6 @@ Use a focused branch and a GitHub Issue for bugs, deferred work, features,
 follow-ups, or decisions. Include the relevant tests and documentation, explain
 which verification layers ran, and open a pull request for CI and review.
 Approved changes are squash-merged; do not push directly to `main`.
+
+For a decision proposal or accepted ADR, follow the
+[decision process](docs/decisions/README.md).
