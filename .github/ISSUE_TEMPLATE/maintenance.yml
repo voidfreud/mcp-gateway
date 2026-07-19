@@ -1,0 +1,52 @@
+name: Maintenance or deferred work
+description: Track cleanup, dependencies, tests, documentation, or explicitly parked work.
+title: "maintenance: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include passwords, tokens, private URLs, customer data, or vulnerability details. Report security vulnerabilities privately: https://github.com/voidfreud/mcp-gateway/security/advisories/new
+  - type: textarea
+    id: context
+    attributes:
+      label: Context and reason to track
+      description: Describe the maintenance need, debt, or why this work is deferred.
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope, out of scope, and acceptance criteria
+      description: State the intended work, boundaries, and the condition for completion or re-evaluation.
+    validations:
+      required: true
+  - type: textarea
+    id: validation
+    attributes:
+      label: Validation plan or evidence
+      description: List CI or hermetic checks and any applicable redacted local/live validation receipt.
+      placeholder: "CI: ...\nLocal/live (if applicable): ..."
+    validations:
+      required: true
+  - type: textarea
+    id: impact
+    attributes:
+      label: Risk, security, docs, and release impact
+      description: Include rollback or migration concerns, non-sensitive security implications, and docs/skill/release impact.
+    validations:
+      required: true
+  - type: textarea
+    id: follow_up
+    attributes:
+      label: Related and deferred follow-up
+      description: Link the originating, dependent, or superseding Issues; write None if there are none.
+      value: None
+    validations:
+      required: true
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety check
+      options:
+        - label: This Issue contains no secrets, tokens, private URLs, or sensitive logs.
+          required: true

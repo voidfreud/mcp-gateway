@@ -1,49 +1,66 @@
-This file duplicates CLAUDE.md's GitNexus block **intentionally** (#103): `gitnexus analyze`
-rewrites the marked section in BOTH files on every run, and upstream offers no
-single-file option (`--skip-agents-md` skips both). Do not hand-dedupe — it
-comes back on the next re-index. Project conventions live in CLAUDE.md.
+# mcp-gateway contributor entrypoint
 
-<!-- gitnexus:start -->
-# GitNexus — Code Intelligence
+Read [the project policy](docs/project-policy.md) before planning, changing, or
+shipping work. It is the authoritative workflow and release policy. This file
+is a concise session entrypoint; it does not replace the policy, an Issue, or
+focused documentation.
 
-This project is indexed by GitNexus as **mcp-gateway** (941 symbols, 2025 relationships, 83 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+## Product and architecture
 
-> Index stale? Run `node .gitnexus/run.cjs analyze` from the project root — it auto-selects an available runner. No `.gitnexus/run.cjs` yet? `npx gitnexus analyze` (npm 11 crash → `npm i -g gitnexus`; #1939).
+mcp-gateway is a local MCP gateway. It exposes each configured backend at its
+own MCP endpoint, rewrites the metadata that backend broadcasts, forwards tool
+calls, and provides gateway-owned Virtual Tools. It has a local admin UI and
+supports Claude Code, Codex, and other compatible MCP clients; do not describe
+a client-specific behavior as generic MCP behavior.
 
-## Always Do
+Key boundaries:
 
-- **MUST run impact analysis before editing any symbol.** Before modifying a function, class, or method, run `impact({target: "symbolName", direction: "upstream"})` and report the blast radius (direct callers, affected processes, risk level) to the user.
-- **MUST run `detect_changes()` before committing** to verify your changes only affect expected symbols and execution flows. For regression review, compare against the default branch: `detect_changes({scope: "compare", base_ref: "main"})`.
-- **MUST warn the user** if impact analysis returns HIGH or CRITICAL risk before proceeding with edits.
-- When exploring unfamiliar code, use `query({search_query: "concept"})` to find execution flows instead of grepping. It returns process-grouped results ranked by relevance.
-- When you need full context on a specific symbol — callers, callees, which execution flows it participates in — use `context({name: "symbolName"})`.
-- For security review, `explain({target: "fileOrSymbol"})` lists taint findings (source→sink flows; needs `analyze --pdg`).
+- `src/mcp_gateway/config_loader.py` owns configuration models, validation,
+  transforms, and persistence.
+- `src/mcp_gateway/server.py` owns the application, endpoint mounting, and
+  backend lifecycle.
+- `src/mcp_gateway/admin.py` is the admin composition root; client registration
+  routes live in `admin_routes_claude.py` and `admin_routes_codex.py`.
+- `src/mcp_gateway/runtime.py` owns mounted-backend runtime state.
+- `src/mcp_gateway/virtual_tools.py` owns gateway-managed composite tools.
+- `tests/` is the behavioral contract; `docs/` is the maintained user and
+  operator manual.
 
-## Never Do
+## Canonical commands
 
-- NEVER edit a function, class, or method without first running `impact` on it.
-- NEVER ignore HIGH or CRITICAL risk warnings from impact analysis.
-- NEVER rename symbols with find-and-replace — use `rename` which understands the call graph.
-- NEVER commit changes without running `detect_changes()` to check affected scope.
+- `just` lists supported development and operational commands.
+- `just check` runs the local hermetic quality gate.
+- `uv run mcp-gateway` starts a development gateway.
+- `just verify [url]` exercises a running gateway; use it only when its live
+  scenario is applicable.
+- `just install`, `just update`, and `just uninstall` manage the macOS service.
+  Read [installation](docs/installation.md) and [operations](docs/operations.md)
+  before using them.
 
-## Resources
+## Before changing code or documentation
 
-| Resource | Use for |
-|----------|---------|
-| `gitnexus://repo/mcp-gateway/context` | Codebase overview, check index freshness |
-| `gitnexus://repo/mcp-gateway/clusters` | All functional areas |
-| `gitnexus://repo/mcp-gateway/processes` | All execution flows |
-| `gitnexus://repo/mcp-gateway/process/{name}` | Step-by-step execution trace |
+1. Start or link a GitHub Issue; capture deferred work, risks, and decisions
+   there rather than in repository instructions.
+2. Read the affected code, tests, and user documentation. Preserve public
+   configuration, endpoint, command, and client-workflow compatibility unless
+   the linked Issue declares a migration or breaking release.
+3. Choose the smallest safe change and update the relevant tests and docs.
+4. Follow the policy's validation tiers. CI does not prove a contributor's
+   daemon, credentials, clients, or real backend integrations.
 
-## CLI
+## Definition of done
 
-| Task | Read this skill file |
-|------|---------------------|
-| Understand architecture / "How does X work?" | `.claude/skills/gitnexus/gitnexus-exploring/SKILL.md` |
-| Blast radius / "What breaks if I change X?" | `.claude/skills/gitnexus/gitnexus-impact-analysis/SKILL.md` |
-| Trace bugs / "Why is X failing?" | `.claude/skills/gitnexus/gitnexus-debugging/SKILL.md` |
-| Rename / extract / split / refactor | `.claude/skills/gitnexus/gitnexus-refactoring/SKILL.md` |
-| Tools, resources, schema reference | `.claude/skills/gitnexus/gitnexus-guide/SKILL.md` |
-| Index, status, clean, wiki CLI commands | `.claude/skills/gitnexus/gitnexus-cli/SKILL.md` |
+Before requesting merge, confirm that the linked Issue's acceptance criteria,
+required CI, applicable local/live receipt, documentation, security review,
+and follow-ups meet [the policy's definition of done](docs/project-policy.md#definition-of-done).
+Use [CONTRIBUTING.md](CONTRIBUTING.md) for the operating procedure and
+[security guidance](docs/security.md) for safe reporting and handling.
 
-<!-- gitnexus:end -->
+## User documentation
+
+- [Installation](docs/installation.md)
+- [Admin UI guide](docs/admin-guide.md)
+- [Configuration reference](docs/configuration.md)
+- [Operations](docs/operations.md)
+- [Security](docs/security.md)
+- [Admin API](docs/api.md)

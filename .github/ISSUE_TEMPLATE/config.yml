@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability privately
+    url: https://github.com/voidfreud/mcp-gateway/security/advisories/new
+    about: Do not disclose vulnerabilities, secrets, or exploit details in a public Issue.

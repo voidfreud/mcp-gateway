@@ -137,6 +137,13 @@ Distribution is uv-from-GitHub by choice — the package is not on PyPI.
   what isn't.
 - **[docs/api.md](docs/api.md)** — the admin HTTP API for scripting.
 
+## Contributing
+
+Contributions are Issue-first and merged through pull requests with the
+repository's required validation. Read [CONTRIBUTING.md](CONTRIBUTING.md) for
+the day-to-day workflow and [the project policy](docs/project-policy.md) for
+the authoritative rules on decisions, security, validation, and releases.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).

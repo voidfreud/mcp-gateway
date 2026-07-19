@@ -1,0 +1,87 @@
+name: Proposal or decision
+description: Propose a product, architecture, policy, or workflow decision.
+title: "proposal: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include passwords, tokens, private URLs, customer data, or vulnerability details. Report security vulnerabilities privately: https://github.com/voidfreud/mcp-gateway/security/advisories/new
+  - type: dropdown
+    id: proposal_kind
+    attributes:
+      label: Requested proposal kind
+      description: Choose the primary kind; triage applies repository labels separately.
+      options:
+        - Decision
+        - Product or feature work
+        - Architecture
+        - Policy or workflow
+        - Investigation
+    validations:
+      required: true
+  - type: dropdown
+    id: lifecycle
+    attributes:
+      label: Current lifecycle or status
+      description: New proposals normally begin as Proposed. Choose another status only when it already applies.
+      options:
+        - Proposed
+        - Accepted
+        - Superseded
+        - Blocked
+        - Deferred
+        - Parked
+        - Release-blocker
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Context and decision needed
+      description: What problem, opportunity, or trade-off requires a decision?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed approach and alternatives
+      description: State the proposal, alternatives considered, and why this choice is preferable.
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope and acceptance criteria
+      description: State what will and will not change, plus the outcome that makes this decision complete.
+    validations:
+      required: true
+  - type: textarea
+    id: validation
+    attributes:
+      label: Validation plan
+      description: Specify CI or hermetic evidence and any applicable redacted local/live receipt needed before adoption.
+      placeholder: "CI: ...\nLocal/live (if applicable): ..."
+    validations:
+      required: true
+  - type: textarea
+    id: impact
+    attributes:
+      label: Risk, security, docs, and release impact
+      description: Include rollback or migration implications, non-sensitive security considerations, and docs/skill/release impact.
+    validations:
+      required: true
+  - type: textarea
+    id: follow_up
+    attributes:
+      label: Deferred follow-up and links
+      description: Link dependent, parked, or follow-up Issues; write None if there are none.
+      value: None
+    validations:
+      required: true
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety check
+      options:
+        - label: This proposal contains no secrets, tokens, private URLs, or sensitive logs.
+          required: true

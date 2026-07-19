@@ -1,0 +1,60 @@
+name: Bug report
+description: Report a reproducible, non-sensitive product defect.
+title: "bug: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include passwords, tokens, private URLs, customer data, or vulnerability details. For a suspected security vulnerability, use private reporting instead: https://github.com/voidfreud/mcp-gateway/security/advisories/new
+  - type: textarea
+    id: context
+    attributes:
+      label: Context and observed behavior
+      description: What were you trying to do, and what happened?
+      placeholder: Include a redacted error and the relevant client or environment.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction and expected behavior
+      description: Give the smallest safe reproduction and the expected result.
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope and acceptance criteria
+      description: State the affected area, what is out of scope, and how a fix can be accepted.
+    validations:
+      required: true
+  - type: textarea
+    id: validation
+    attributes:
+      label: Validation evidence
+      description: List CI or hermetic checks. Add a redacted local/live receipt when applicable; CI cannot test personal daemons, credentials, or real integrations.
+      placeholder: "CI: ...\nLocal/live (if applicable): command, environment/version, result"
+    validations:
+      required: true
+  - type: textarea
+    id: risk
+    attributes:
+      label: Risk, security, docs, and release impact
+      description: Note risk or rollback concerns, non-sensitive security implications, and expected docs/skill/release impact.
+    validations:
+      required: true
+  - type: textarea
+    id: follow_up
+    attributes:
+      label: Deferred follow-up
+      description: Link related or follow-up Issues, or write None.
+      value: None
+    validations:
+      required: true
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety check
+      options:
+        - label: I removed secrets, tokens, private URLs, and sensitive logs from this report.
+          required: true
