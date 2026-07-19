@@ -55,10 +55,6 @@ jobs:
   mcp-contract:
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    env:
-      # Both launchers retain passing/failing receipts under this directory so
-      # the artifact step can publish them with a stable glob.
-      TMPDIR: ${{ runner.temp }}
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -70,8 +66,14 @@ jobs:
           node-version: 22
       - run: uv sync --locked
       - name: Gateway raw-wire contract
+        env:
+          # Both launchers retain passing/failing receipts under this directory
+          # so the artifact step can publish them with a stable glob.
+          TMPDIR: ${{ runner.temp }}
         run: uv run python tests/live/run_mcp_wire.py --keep
       - name: Official MCP conformance smoke
+        env:
+          TMPDIR: ${{ runner.temp }}
         run: uv run python tests/conformance/run_official.py --keep
       - name: Publish protocol receipts
         if: always()

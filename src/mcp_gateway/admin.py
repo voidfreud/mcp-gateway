@@ -2177,6 +2177,7 @@ def _codex_routes(ctx: _AdminCtx) -> list[Route]:
             monotonic=time.monotonic,
             subprocess_run=subprocess.run,
             cli_timeout=CLAUDE_CLI_TIMEOUT,
+            virtual_route=virtual_mod.VIRTUAL_ROUTE,
         )
 
     return admin_routes_codex.codex_routes(ctx, deps)

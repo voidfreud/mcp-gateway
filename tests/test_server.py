@@ -1055,6 +1055,26 @@ def test_codex_register_backend_runs_independent_mcp_add(tmp_path, monkeypatch):
     assert "new task" in response.json()["note"]
 
 
+def test_codex_register_virtual_runs_independent_mcp_add(tmp_path, monkeypatch):
+    calls = []
+    _fake_codex_cli(monkeypatch, calls, stdout="added")
+    response = TestClient(_admin_app(tmp_path)).post(
+        "/admin/api/virtual/codex/register", json={}
+    )
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert calls == [
+        [
+            "/usr/bin/codex",
+            "mcp",
+            "add",
+            "gateway-virtual",
+            "--url",
+            "http://127.0.0.1:9100/virtual/mcp",
+        ]
+    ]
+
+
 def test_codex_register_passes_env_name_not_secret(tmp_path, monkeypatch):
     calls = []
     _fake_codex_cli(monkeypatch, calls)
@@ -1100,6 +1120,16 @@ def test_codex_deregister_runs_remove_even_after_backend_removed(tmp_path, monke
     )
     assert response.status_code == 200 and response.json()["ok"] is True
     assert calls == [["/usr/bin/codex", "mcp", "remove", "gateway-gone"]]
+
+
+def test_codex_deregister_virtual_runs_remove(tmp_path, monkeypatch):
+    calls = []
+    _fake_codex_cli(monkeypatch, calls)
+    response = TestClient(_admin_app(tmp_path)).post(
+        "/admin/api/virtual/codex/deregister", json={}
+    )
+    assert response.status_code == 200 and response.json()["ok"] is True
+    assert calls == [["/usr/bin/codex", "mcp", "remove", "gateway-virtual"]]
 
 
 # ---------------------------------------------------------------------------
@@ -1304,7 +1334,7 @@ def test_codex_registrations_route_uses_json_and_caches(tmp_path, monkeypatch):
     assert first.json() == {
         "available": True,
         "ok": True,
-        "registered": {"b": True},
+        "registered": {"b": True, "virtual": False},
     }
     assert second.json() == first.json()
     assert calls == [["/usr/bin/codex", "mcp", "list", "--json"]]
@@ -2052,6 +2082,8 @@ def test_admin_html_has_per_backend_codex_registration_controls():
         "/admin/api/codex-registrations",
         "/codex/register",
         "/codex/deregister",
+        "/admin/api/virtual/codex/",
+        "CODEX_VIRTUAL",
     ):
         assert contract in text
 
