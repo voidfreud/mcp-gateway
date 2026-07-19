@@ -8,6 +8,12 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Separated client registration policy** — Claude Code and Codex CLI
+  discovery, command construction, auth handling, and registration parsing now
+  live in dedicated reusable modules. The Admin API keeps compatibility
+  exports and dynamic test seams, while its typed route groups remain the one
+  path used by backend and Virtual Tools onboarding.
+
 - **Typed live-runtime ownership and a smaller Admin facade** — backend proxies
   and their transform holders now move together through `BackendRuntime`, while
   snapshot inputs and Virtual Tool proxy lookup have explicit narrow types. The
