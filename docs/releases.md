@@ -71,6 +71,15 @@ Before the release pull request is merged, close or rework it when its version,
 notes, lock refresh, or CI result is wrong. Do not merge until the lock refresh
 and required checks pass.
 
+GitHub Actions events created with a workflow's default `GITHUB_TOKEN` do not
+trigger downstream workflows. If a merge to `main` produces neither the
+expected check nor a Release Please run, treat it as a missing workflow trigger:
+investigate the event and authentication path, then merge a normal reviewed,
+non-release documentation or CI follow-up using eligible human,
+personal-access-token, or GitHub App authentication. Do not synthesize tags or
+releases, and do not use the artifact-repair workflow for a missing release
+trigger.
+
 After a tag and GitHub Release exist, never retag, delete, or rewrite normal
 release history. For an artifact-upload failure only, use the documented manual
 `workflow_dispatch` repair path. It checks the existing published release at
