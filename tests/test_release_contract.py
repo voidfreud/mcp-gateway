@@ -159,15 +159,16 @@ def test_pr_title_cli_and_versions_cli_are_directly_exercised() -> None:
     )
     assert invalid.returncode == 2
 
+    canonical_version = contract.project_version(PROJECT_ROOT)
     versions = subprocess.run(
-        [sys.executable, str(TOOL), "versions", "--tag", "v1.0.0"],
+        [sys.executable, str(TOOL), "versions", "--tag", f"v{canonical_version}"],
         cwd=PROJECT_ROOT,
         capture_output=True,
         text=True,
         check=False,
     )
     assert versions.returncode == 0, versions.stderr
-    assert versions.stdout.strip() == VERSION
+    assert versions.stdout.strip() == canonical_version
 
 
 def test_version_contract_requires_project_lock_changelog_and_tag_to_agree(
