@@ -585,13 +585,14 @@ const ICON = {
 };
 const GATEWAY = '__gateway__';  // sentinel for the gateway pseudo-item
 const VIRTUAL = '__virtual__';  // first-class Virtual Tools category
+const CODEX_VIRTUAL = 'virtual';  // Codex registration identity for /virtual/mcp
 let STATE = null, SELECTED = null;
 let VIRTUAL_STATE = { mounted: false, tools: [], unavailable: true };
 let VIRTUAL_CATALOG = { backends: [] };
 let VIRTUAL_TEST_NAME = null;
 let STATUS = null;  // #23: backend name -> {state, ms, tools, error}, async
 let CC_REG = null;  // #46: {available, registered:{backend:bool}}, async
-let CODEX_REG = null;  // independent Codex registrations, async
+let CODEX_REG = null;  // independent backend + Virtual Tools Codex registrations, async
 const timers = {};
 
 // A captured tool carries a stored override iff any editable field differs from
@@ -733,10 +734,16 @@ function paintCodexReg() {
   document.querySelectorAll('.codex-action[data-b]').forEach(el => {
     const available = CODEX_REG && CODEX_REG.available && CODEX_REG.ok !== false;
     const reg = !!(CODEX_REG && CODEX_REG.registered && CODEX_REG.registered[el.dataset.b]);
-    el.disabled = !available;
+    const virtualReady = el.dataset.b !== CODEX_VIRTUAL
+      || !!(VIRTUAL_STATE && VIRTUAL_STATE.mounted);
+    // Keep Remove available for a stale virtual registration even if the
+    // endpoint is currently unavailable; otherwise the UI could strand it.
+    el.disabled = !available || (!virtualReady && !reg);
     el.textContent = reg ? 'Remove' : 'Add';
     el.title = available
-      ? `${reg ? 'remove' : 'add'} gateway-${el.dataset.b} ${reg ? 'from' : 'to'} Codex`
+      ? (!virtualReady && !reg
+        ? 'Virtual Tools endpoint is unavailable'
+        : `${reg ? 'remove' : 'add'} gateway-${el.dataset.b} ${reg ? 'from' : 'to'} Codex`)
       : ((CODEX_REG && CODEX_REG.error) || 'Codex CLI is not available to the gateway daemon');
   });
 }
@@ -1281,9 +1288,16 @@ function renderVirtualTools() {
       </div></div>`;
   }).join('');
   m.innerHTML = `<div class="b-head"><h2>Virtual Tools</h2><span class="chip">first-class</span>${endpoint}<span class="spacer"></span>
+      <span class="btn-group"><span class="cg-cap">Codex</span>
+        <button class="btn codex-action" data-b="${CODEX_VIRTUAL}" style="font-size:11px"
+          onclick="toggleCodex('${CODEX_VIRTUAL}')" disabled>Add</button>
+        <span class="chip codex-chip" data-b="${CODEX_VIRTUAL}" style="display:none"
+          title="whether /virtual/mcp is configured as an independent Codex MCP"></span>
+      </span>
       <button class="btn-pri" onclick="openVirtualEditor()">+ Create Virtual Tool</button></div>
     <div class="b-sub-line">Stable source bindings, live effective-name resolution, optional live testing, and fidelity-preserving aggregation at <code>/virtual/mcp</code>.</div>
     ${unavailable}${cards || `<div class="vt-empty">No Virtual Tools yet.<br><button class="btn-pri" style="margin-top:12px" onclick="openVirtualEditor()">Create the first draft</button></div>`}`;
+  paintCodexReg();
 }
 
 async function ensureVirtualCatalog() {
@@ -2276,8 +2290,11 @@ async function registerCC(name, scope) {
 async function toggleCodex(name) {
   const registered = !!(CODEX_REG && CODEX_REG.registered && CODEX_REG.registered[name]);
   const action = registered ? 'deregister' : 'register';
+  const target = name === CODEX_VIRTUAL
+    ? '/admin/api/virtual/codex/' + action
+    : '/admin/api/backend/' + encodeURIComponent(name) + '/codex/' + action;
   try {
-    const r = await api('POST', '/admin/api/backend/' + encodeURIComponent(name) + '/codex/' + action, {});
+    const r = await api('POST', target, {});
     if (r.ok) toast(`${registered ? 'removed' : 'added'} gateway-${name} ${registered ? 'from' : 'to'} Codex — restart Codex or open a new task`, 6000);
     else toast(`codex mcp ${registered ? 'remove' : 'add'} failed: ` + (r.stderr || r.stdout || 'exit ' + r.exit), 8000);
     await refreshCodexReg(true);

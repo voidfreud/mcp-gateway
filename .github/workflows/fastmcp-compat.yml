@@ -36,7 +36,7 @@ jobs:
           PY
           uv lock --project "$candidate_dir" --upgrade-package fastmcp
           uv sync --project "$candidate_dir" --all-groups --no-install-project
-          version="$($candidate_dir/.venv/bin/python -c 'from importlib.metadata import version; print(version("fastmcp"))')"
+          version="$("$candidate_dir/.venv/bin/python" -c 'from importlib.metadata import version; print(version("fastmcp"))')"
           echo "dir=$candidate_dir" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "Resolved FastMCP $version"

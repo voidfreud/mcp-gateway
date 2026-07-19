@@ -9,8 +9,8 @@ check: lint test smoke
 
 # Ruff lint + format check
 lint:
-    uvx ruff check .
-    uvx ruff format --check .
+    uv run ruff check .
+    uv run ruff format --check .
 
 # Pure-logic tests (pytest + hypothesis) — no backends needed
 test:

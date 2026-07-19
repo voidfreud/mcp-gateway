@@ -36,12 +36,13 @@ class CodexRouteDeps:
     monotonic: Callable[[], float]
     subprocess_run: Callable[..., Any]
     cli_timeout: float
+    virtual_route: str = "virtual"
 
 
-def codex_routes(
+def codex_routes(  # noqa: PLR0915 - grouped registration endpoints share one policy
     ctx: AdminContext, deps_factory: Callable[[], CodexRouteDeps]
 ) -> list[Route]:
-    """Build independent-Codex MCP registration routes.
+    """Build independent-Codex MCP registration routes for backends and Virtual Tools.
 
     ``deps_factory`` intentionally resolves facade globals for every request.
     The historic ``mcp_gateway.admin`` module remains monkeypatchable by tests
@@ -62,15 +63,12 @@ def codex_routes(
             )
         return binary
 
-    async def register_backend(request: Request):
-        name = request.path_params["name"]
+    async def _register(name: str, endpoint: str):
         cfg = ctx.load()
-        if not any(backend.name == name for backend in cfg.backends):
-            return deps_factory().error("unknown backend")
         binary = _binary()
         if isinstance(binary, JSONResponse):
             return binary
-        url = f"http://{cfg.host}:{cfg.port}/{name}/mcp"
+        url = f"http://{cfg.host}:{cfg.port}/{endpoint}/mcp"
         deps = deps_factory()
         try:
             bearer_env_var = deps.bearer_env_var(cfg.bearer_token)
@@ -90,8 +88,23 @@ def codex_routes(
             }
         )
 
+    async def register_backend(request: Request):
+        name = request.path_params["name"]
+        cfg = ctx.load()
+        if not any(backend.name == name for backend in cfg.backends):
+            return deps_factory().error("unknown backend")
+        return await _register(name, name)
+
+    async def register_virtual(request: Request):
+        del request
+        deps = deps_factory()
+        return await _register(deps.virtual_route, deps.virtual_route)
+
     async def deregister_backend(request: Request):
         name = request.path_params["name"]
+        return await _deregister(name)
+
+    async def _deregister(name: str):
         binary = _binary()
         if isinstance(binary, JSONResponse):
             return binary
@@ -109,6 +122,11 @@ def codex_routes(
                 "note": "Restart Codex or open a new task to unload the server",
             }
         )
+
+    async def deregister_virtual(request: Request):
+        del request
+        deps = deps_factory()
+        return await _deregister(deps.virtual_route)
 
     async def registrations(request: Request):
         binary = _binary()
@@ -133,7 +151,9 @@ def codex_routes(
             deps.cache["ts"] = now
         try:
             registered = deps.parse_registrations(
-                output, [backend.name for backend in ctx.load().backends]
+                output,
+                [backend.name for backend in ctx.load().backends]
+                + [deps.virtual_route],
             )
         except cl.ConfigError as exc:
             return JSONResponse({"available": True, "ok": False, "error": str(exc)})
@@ -148,6 +168,16 @@ def codex_routes(
         Route(
             "/admin/api/backend/{name}/codex/deregister",
             deps_factory().needs_json(deregister_backend),
+            methods=["POST"],
+        ),
+        Route(
+            "/admin/api/virtual/codex/register",
+            deps_factory().needs_json(register_virtual),
+            methods=["POST"],
+        ),
+        Route(
+            "/admin/api/virtual/codex/deregister",
+            deps_factory().needs_json(deregister_virtual),
             methods=["POST"],
         ),
         Route("/admin/api/codex-registrations", registrations, methods=["GET"]),
