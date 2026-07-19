@@ -32,7 +32,7 @@
     <key>EnvironmentVariables</key>
     <dict>
         <!-- launchd gives a minimal PATH; include user + system bins so the
-             gateway and its stdio backends (e.g. gitnexus) resolve. -->
+             gateway and its stdio backends (for example, local tooling) resolve. -->
         <key>PATH</key>
         <string>@@HOME@@/.local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
         <!-- Absolute config path so it resolves regardless of cwd. -->

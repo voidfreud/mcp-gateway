@@ -868,8 +868,8 @@ class GatewayConfig(BaseModel, extra="forbid"):
     introspect_interval: int = Field(default=0, ge=0)
     # #157: age-gate the POST-MOUNT baseline refresh (#43 trigger 1). A boot
     # (or remount) skips re-capturing a backend whose stored baseline is
-    # younger than this many seconds — sparing slow stdio backends (gitnexus
-    # ~13s) a second cold start per boot, at the cost of up to this much
+    # younger than this many seconds — sparing slow stdio backends a second
+    # cold start per boot, at the cost of up to this much
     # staleness after an upgrade. 0 disables the gate (refresh on every
     # mount, the pre-#157 behavior). Event-driven triggers — tools/
     # list_changed, admin page load, manual Re-inspect — are NEVER gated.

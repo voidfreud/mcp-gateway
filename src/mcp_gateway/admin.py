@@ -78,7 +78,7 @@ LAUNCHD_LABEL = "com.void.mcp-gateway"
 
 # Upper bound on a single backend introspection probe (connect + list_tools).
 # A hung/slow backend must not block daemon startup or an admin import (#85).
-# Generous enough for a cold stdio backend (e.g. gitnexus' ~13s re-index).
+# Generous enough for a cold stdio backend.
 CAPTURE_TIMEOUT = 30.0
 
 # #43: minimum gap between automatic re-introspections of one backend, so

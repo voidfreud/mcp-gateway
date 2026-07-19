@@ -1,0 +1,48 @@
+"""Regression checks for repository-only release hygiene."""
+
+from __future__ import annotations
+
+import subprocess
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_tracked_deploy_material_has_no_personal_account_paths() -> None:
+    """Deployable templates must not embed a contributor's home or account."""
+    result = subprocess.run(
+        ["git", "ls-files", "--", "deploy"],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+    for relative_path in result.stdout.splitlines():
+        deploy_file = PROJECT_ROOT / relative_path
+        if not deploy_file.is_file():
+            continue
+        content = deploy_file.read_text()
+        assert "/Users/" not in content
+        assert "alexanderbass" not in content.casefold()
+
+
+def test_local_secret_and_agent_state_paths_are_ignored() -> None:
+    """Sensitive configuration and local agent state must stay out of commits."""
+    for local_path in (
+        ".env",
+        ".env.local",
+        "secrets.env",
+        "config.secret.toml",
+        ".claude/hooks/pre-commit",
+        ".claude/cache/index.json",
+    ):
+        result = subprocess.run(
+            ["git", "check-ignore", "--quiet", "--", local_path],
+            cwd=PROJECT_ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, f"{local_path} is not ignored"

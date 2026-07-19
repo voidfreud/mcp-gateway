@@ -824,7 +824,7 @@ def _build_app(  # noqa: PLR0913, PLR0915 — composition root; takes what it wi
                         # #43 trigger 1 (the load-bearing one): a (re)connect
                         # means possibly-new backend state — re-capture the
                         # baseline in the background (throttled; boot after an
-                        # upgrade catches e.g. gitnexus 13 -> 17 tools).
+                        # upgrade catches upstream tool-catalog changes).
                         # #157: age-gated — skipped while the stored baseline
                         # is younger than cfg.baseline_max_age.
                         tg.start_soon(refresher.post_mount, b)

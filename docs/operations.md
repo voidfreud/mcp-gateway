@@ -129,10 +129,9 @@ Two other files live alongside it under `~/.local/state/mcp-gateway/`:
   goes to `gateway.log`, these only catch rare pre-startup or hard-crash text and
   stay small.
 
-For a hard cap on `out.log`/`err.log`, the repo ships an optional `newsyslog`
-config at `deploy/newsyslog-mcp-gateway.conf`. It is optional and needs its
-absolute paths edited for your account; follow the comments in the file to
-install it.
+For a hard cap on `out.log`/`err.log`, create an optional local `newsyslog`
+configuration from `newsyslog.conf(5)`. It must use your own absolute paths and
+account ownership, so the repository deliberately does not ship one.
 
 ## Backups and captured defaults
 

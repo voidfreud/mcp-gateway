@@ -70,7 +70,8 @@ layout, console script `mcp-gateway`). MIT; distributed via
   change to how overrides are authored/applied/verified MUST update its
   `references/levers.md` in the same change; its `scripts/surface.py` imports
   the package.
-- `corpus/` — read-only third-party research material; excluded from GitNexus.
+- `corpus/` — retained source pointers and provenance records for research;
+  not app code or a vendored third-party corpus.
 
 ## Run / verify / ship
 
@@ -198,9 +199,8 @@ layout, console script `mcp-gateway`). MIT; distributed via
 
 ## Hard-won session learnings (2026-07-12 — read before repeating them)
 
-- **After moving this repo:** venv shebangs, the GitNexus registry, AND the
-  installed LaunchAgent all go stale. `rm -rf .venv && uv sync`,
-  `node .gitnexus/run.cjs index .`, `./install.sh` — in that order. A ghost
+- **After moving this repo:** venv shebangs and the installed LaunchAgent go
+  stale. `rm -rf .venv && uv sync`, `./install.sh` — in that order. A ghost
   daemon keeps `/health` green from deleted inodes; trust the path in the
   body, not the 200.
 - **Never judge a merge by `tail` of its output.** A CONFLICT line scrolled
@@ -221,48 +221,3 @@ layout, console script `mcp-gateway`). MIT; distributed via
 - The mcp-tool-design skill's cold-eval (fresh Opus seats, turn-0 surface
   only) is the only grading that counts — the author cannot cold-read its own
   drafts. 5/5 routes after the openrouter re-tune.
-
-<!-- gitnexus:start -->
-# GitNexus — Code Intelligence
-
-This project is indexed by GitNexus as **mcp-gateway** (941 symbols, 2025 relationships, 83 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
-
-> Index stale? Run `node .gitnexus/run.cjs analyze` from the project root — it auto-selects an available runner. No `.gitnexus/run.cjs` yet? `npx gitnexus analyze` (npm 11 crash → `npm i -g gitnexus`; #1939).
-
-## Always Do
-
-- **MUST run impact analysis before editing any symbol.** Before modifying a function, class, or method, run `analyze_impact({target: "symbolName", direction: "upstream"})` (gateway name for `impact`) and report the blast radius (direct callers, affected processes, risk level) to the user.
-- **MUST run `detect_changes()` before committing** to verify your changes only affect expected symbols and execution flows. For regression review, compare against the default branch: `detect_changes({scope: "compare", base_ref: "main"})`.
-- **MUST warn the user** if impact analysis returns HIGH or CRITICAL risk before proceeding with edits.
-- When exploring unfamiliar code, use `search_code_flows({search_query: "concept"})` (gateway name for `query`) to find execution flows instead of grepping. It returns process-grouped results ranked by relevance.
-- When you need full context on a specific symbol — callers, callees, which execution flows it participates in — use `get_symbol_context({name: "symbolName"})` (gateway name for `context`).
-- For security review, `list_taint_findings({target: "fileOrSymbol"})` (gateway name for `explain`) lists taint findings (source→sink flows; needs `analyze --pdg`).
-
-## Never Do
-
-- NEVER edit a function, class, or method without first running `impact` on it.
-- NEVER ignore HIGH or CRITICAL risk warnings from impact analysis.
-- NEVER rename symbols with find-and-replace — use `rename_symbol` (gateway name for `rename`) which understands the call graph and previews by default.
-- NEVER commit changes without running `detect_changes()` to check affected scope.
-
-## Resources
-
-| Resource | Use for |
-|----------|---------|
-| `gitnexus://repo/mcp-gateway/context` | Codebase overview, check index freshness |
-| `gitnexus://repo/mcp-gateway/clusters` | All functional areas |
-| `gitnexus://repo/mcp-gateway/processes` | All execution flows |
-| `gitnexus://repo/mcp-gateway/process/{name}` | Step-by-step execution trace |
-
-## CLI
-
-| Task | Read this skill file |
-|------|---------------------|
-| Understand architecture / "How does X work?" | `.claude/skills/gitnexus/gitnexus-exploring/SKILL.md` |
-| Blast radius / "What breaks if I change X?" | `.claude/skills/gitnexus/gitnexus-impact-analysis/SKILL.md` |
-| Trace bugs / "Why is X failing?" | `.claude/skills/gitnexus/gitnexus-debugging/SKILL.md` |
-| Rename / extract / split / refactor | `.claude/skills/gitnexus/gitnexus-refactoring/SKILL.md` |
-| Tools, resources, schema reference | `.claude/skills/gitnexus/gitnexus-guide/SKILL.md` |
-| Index, status, clean, wiki CLI commands | `.claude/skills/gitnexus/gitnexus-cli/SKILL.md` |
-
-<!-- gitnexus:end -->
