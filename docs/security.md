@@ -17,7 +17,8 @@ below exists for when it is not.
 
 Setting `host` to a non-loopback address (say, your Tailscale IP, to share one
 gateway across your own machines) is supported, with one hard rule: **the
-config refuses to load a non-loopback `host` without `bearer_token` set.**
+config refuses to load a non-loopback `host` without either `bearer_token` or a
+complete `[oauth]` profile with `oauth.admin_bearer_token`.**
 An open bind would hand config writes and tool execution to anything that can
 reach the port, so the gateway fails loudly at startup instead of running
 exposed. With the token set, every backend endpoint and every `/admin/api/*`
@@ -25,9 +26,30 @@ route demands it; `/health`, `/ready`, and the bare `GET /admin` page remain
 open, and the Origin guard still rejects foreign browser origins.
 
 Only bind to an interface you trust end-to-end (a tailnet, not a café LAN, and
-never the public internet — there is no TLS, so the token travels in clear on
-the wire). Remember the token is a shared secret: every host you give it to
-can do everything the gateway can.
+never the public internet without TLS). Remember a static Admin token is a
+shared secret: every host you give it to can do everything the gateway can.
+
+## Standard OAuth resource-server mode
+
+For a remote deployment, use `[oauth]` rather than putting a static bearer token
+on every MCP endpoint. The gateway is an OAuth **resource server**, not an
+authorization server. Your external OAuth/OIDC provider performs login,
+consent, PKCE, client registration, and token issuance. The gateway validates
+JWT signatures through `jwks_uri`, exact `issuer`, expiry, endpoint-specific
+audience, and scope.
+
+Every independent backend and `/virtual/mcp` has its own protected-resource
+identifier and RFC 9728 metadata document. A client discovers the matching
+authorization server from the endpoint's
+`/.well-known/oauth-protected-resource/<endpoint>/mcp` response. A missing or
+invalid token receives `401` with a `resource_metadata` challenge; a valid token
+without `required_scopes` receives `403 insufficient_scope` with the required
+`scope` and metadata URL.
+
+The Admin API is intentionally separate: set
+`oauth.admin_bearer_token = "${MCP_GATEWAY_ADMIN_TOKEN}"` for any non-loopback
+bind. That token gates `/admin/api/*` only and is never used as an MCP access
+token. `[oauth]` and the legacy `bearer_token` setting are mutually exclusive.
 
 ## The Origin guard (built in, always on)
 
@@ -85,6 +107,18 @@ claude mcp add --transport http --header "Authorization: Bearer ${MCP_GATEWAY_TO
 Note the `--header` option must come **after** the name and URL. If you add or
 change the token later, you must re-register your backends so Claude Code sends
 the new header.
+
+**Consequence for Codex.** Codex's CLI accepts a bearer-token environment
+variable rather than a literal header. With `bearer_token = "${MCP_GATEWAY_TOKEN}"`,
+the dashboard registers a backend using:
+
+```bash
+codex mcp add gateway-<name> --url http://127.0.0.1:9100/<name>/mcp --bearer-token-env-var MCP_GATEWAY_TOKEN
+```
+
+Only the variable name is written to Codex configuration. The Codex desktop,
+CLI, or IDE process must itself receive that environment variable; putting the
+value only in the gateway's secrets file is not sufficient for Codex calls.
 
 The token comparison is constant-time, and the token is redacted from anything
 the gateway echoes back (logs, the register button's output).
@@ -196,6 +230,14 @@ request, flip that backend to `stateless = true` (config, or
 `POST /admin/api/backend/{name}/stateless`): each call then gets a fresh,
 isolated backend session. The reasoning is recorded in
 [ADR-0004](decisions/0004-per-session-isolation.md).
+
+The gateway does not currently add a worker process per backend. Stdio
+backends already run in FastMCP-owned child processes, while remote backends
+are data-only HTTP clients; each backend still has an independent lifecycle
+runner and recycle path. A separate worker is justified only for untrusted
+in-process code, independent CPU/memory limits, caller-supplied credentials, or
+daemon-level dependency crashes. That boundary and its future acceptance
+criteria are recorded in [ADR-0009](decisions/0009-process-isolation-boundary.md).
 
 ## Related
 

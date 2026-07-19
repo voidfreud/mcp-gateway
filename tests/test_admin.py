@@ -14,7 +14,7 @@ import structlog
 from hypothesis import given
 from hypothesis import strategies as st
 
-from mcp_gateway import admin
+from mcp_gateway import admin, runtime
 from mcp_gateway import config_loader as cl
 
 ident = st.text(
@@ -1222,6 +1222,69 @@ def test_claude_mcp_command_add_requires_url():
         admin.claude_mcp_command("add", "b")
 
 
+# --- per-backend Codex registration ----------------------------------------
+
+
+def test_codex_mcp_command_add_remove_argv():
+    url = "http://127.0.0.1:9100/b/mcp"
+    assert admin.codex_mcp_command("add", "b", url=url) == [
+        "codex",
+        "mcp",
+        "add",
+        "gateway-b",
+        "--url",
+        url,
+    ]
+    assert admin.codex_mcp_command("remove", "b") == [
+        "codex",
+        "mcp",
+        "remove",
+        "gateway-b",
+    ]
+
+
+def test_codex_mcp_command_uses_bearer_env_var_only():
+    argv = admin.codex_mcp_command(
+        "add",
+        "b",
+        url="http://h/b/mcp",
+        bearer_env_var="GATEWAY_TOKEN",
+    )
+    assert argv[-2:] == ["--bearer-token-env-var", "GATEWAY_TOKEN"]
+    assert admin.codex_bearer_env_var("${GATEWAY_TOKEN}") == "GATEWAY_TOKEN"
+    assert admin.codex_bearer_env_var(None) is None
+    for unsafe in ("literal-secret", "Bearer ${TOKEN}", "${BAD-NAME}"):
+        with pytest.raises(cl.ConfigError, match=r"single \$\{ENV_VAR\}"):
+            admin.codex_bearer_env_var(unsafe)
+
+
+def test_codex_mcp_command_rejects_invalid_requests():
+    with pytest.raises(cl.ConfigError, match="url"):
+        admin.codex_mcp_command("add", "b")
+    with pytest.raises(cl.ConfigError, match="action"):
+        admin.codex_mcp_command("list", "b")
+
+
+def test_parse_codex_registrations_exact_names():
+    output = json.dumps(
+        [
+            {"name": "gateway-a", "enabled": False},
+            {"name": "gateway-a-long", "enabled": True},
+        ]
+    )
+    assert admin.parse_codex_registrations(output, ["a", "a-long", "missing"]) == {
+        "a": True,
+        "a-long": True,
+        "missing": False,
+    }
+
+
+@pytest.mark.parametrize("output", ["not-json", "{}", "null"])
+def test_parse_codex_registrations_rejects_malformed_shape(output):
+    with pytest.raises(cl.ConfigError, match="codex mcp list"):
+        admin.parse_codex_registrations(output, ["b"])
+
+
 def test_effective_tools_scopes_to_one_backend(defaults_dir):
     _write_defaults(defaults_dir, "b1", "t1")
     _write_defaults(defaults_dir, "b2", "t2")
@@ -1332,18 +1395,22 @@ def test_refresh_and_reload_hot_reloads_only_on_change(
     path = tmp_path / "config.toml"
     cl.save(cfg, str(path))
     reloads = []
-    monkeypatch.setattr(admin, "hot_reload", lambda *a, **k: reloads.append(a[3]))
+    monkeypatch.setattr(admin, "hot_reload", lambda *a, **k: reloads.append(a[2]))
     log = structlog.get_logger("test")
 
     monkeypatch.setattr(admin, "capture_defaults", _fake_capture(("t1",)))
     res = anyio.run(
-        lambda: admin.refresh_and_reload(_b(), str(path), {}, {}, log, force=True)
+        lambda: admin.refresh_and_reload(
+            _b(), str(path), runtime.BackendRuntime(), log, force=True
+        )
     )
     assert res["changed"] is False and reloads == []
 
     monkeypatch.setattr(admin, "capture_defaults", _fake_capture(("t1", "t2")))
     res = anyio.run(
-        lambda: admin.refresh_and_reload(_b(), str(path), {}, {}, log, force=True)
+        lambda: admin.refresh_and_reload(
+            _b(), str(path), runtime.BackendRuntime(), log, force=True
+        )
     )
     assert res["changed"] is True and reloads == ["b"]
 
@@ -1941,15 +2008,16 @@ def test_hot_reload_swaps_resource_prompt_transform_too(defaults_dir):
     baseline = len(proxy._transforms)
     registry, holders = {"b": proxy}, {}
     log = structlog.get_logger("test")
-    admin.hot_reload(registry, holders, cfg, "b", log)
+    backend_runtime = runtime.BackendRuntime.from_legacy(registry, holders)
+    admin.hot_reload(backend_runtime, cfg, "b", log)
     assert len(holders["b"]) == 2  # tool transform + rp transform
     assert len(proxy._transforms) == baseline + 2
     # second reload replaces, never accumulates
-    admin.hot_reload(registry, holders, cfg, "b", log)
+    admin.hot_reload(backend_runtime, cfg, "b", log)
     assert len(proxy._transforms) == baseline + 2
     # dropping the overrides drops the rp transform from the proxy
     cfg.backends[0].resources = []
-    admin.hot_reload(registry, holders, cfg, "b", log)
+    admin.hot_reload(backend_runtime, cfg, "b", log)
     assert len(holders["b"]) == 1
     assert len(proxy._transforms) == baseline + 1
 

@@ -30,6 +30,12 @@ not an API to merge as-is.
   disappear. Admin status exposes endpoint state and each tool's resolution,
   activation, last test, and last dispatch outcome. Test and dispatch status is
   runtime telemetry and resets when the gateway process restarts.
+- The endpoint advertises `tools.listChanged=false` while catalog swaps are
+  initiated outside an MCP request context and cannot be broadcast through a
+  public FastMCP server-wide API. A connected client can explicitly re-list or
+  reconnect and immediately observe the committed catalog. Advertising `true`
+  requires a later, tested registry that notifies every active downstream
+  session only after a successful atomic swap.
 
 ### Identity, editing, and lifecycle
 

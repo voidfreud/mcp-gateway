@@ -35,8 +35,12 @@ layout, console script `mcp-gateway`). MIT; distributed via
   guard → body limit → optional bearer. `_AutoRefresh` (baseline refresh) and
   the recycle worker (#161) live in the lifespan.
 - `src/mcp_gateway/admin.py` — admin API + helpers: capture/defaults, override
-  diffing, collision + transform-dry-build validation, hot reload, Claude Code
-  CLI integration, settings, stale-override migration.
+  diffing, collision + transform-dry-build validation, hot reload, independent
+  Claude Code and Codex CLI registration, settings, stale-override migration.
+- `src/mcp_gateway/admin_routes_codex.py` — typed per-backend Codex route group;
+  `admin.py` remains its compatibility facade and supplies live CLI/cache deps.
+- `src/mcp_gateway/runtime.py` — typed ownership for each mounted proxy and its
+  gateway transform holder; captured defaults remain separate snapshot inputs.
 - `src/mcp_gateway/admin.html` — single-file vanilla-JS admin UI (no build,
   no external assets; light+dark via prefers-color-scheme, #170). Guarded by
   tests: no merge-conflict markers, ONE inline `<script>` that must pass
@@ -67,8 +71,11 @@ layout, console script `mcp-gateway`). MIT; distributed via
   (auto-seeded).
 - Login service: `just install` (idempotent; re-run after moving the repo).
 - Gate: `just check` = ruff lint+format, pytest, import smoke. CI runs it on
-  every PR/push (cached, ~30s) + wheel-integrity check; pushing a `v*` tag
-  releases with the wheel attached.
+  every PR/push (cached, ~30s) + wheel-integrity check. A separate hermetic
+  `mcp-contract` job runs `tests/live/run_mcp_wire.py` and the pinned official
+  MCP 2025-11-25 smoke subset; it uses disposable fixtures, never personal
+  backends or the installed daemon. Pushing a `v*` tag releases with the wheel
+  attached.
 - Live receipts: `uv run verify_rename.py http://127.0.0.1:9100` (46 checks:
   bare names, budgets, passthrough, status, injection, bearer).
   `/health` names the daemon's resolved code path — if it isn't this repo,
@@ -85,10 +92,27 @@ layout, console script `mcp-gateway`). MIT; distributed via
 
 ## Gotchas (verified against FastMCP 3.4.4)
 
-- v3 API: `create_proxy()`; transforms are `ToolTransform({original:
+- **FastMCP is exact-pinned at 3.4.4.** Upgrade it deliberately: change the
+  `pyproject.toml` pin, refresh `uv.lock`, then run `just check` and the live
+  receipts before shipping. v3 API: `create_proxy()`; transforms are `ToolTransform({original:
   ToolTransformConfig(..., arguments={p: ArgTransformConfig(...)})})`. Private
   attrs we rely on (`proxy._transforms`, `_mcp_server.notification_options`,
-  MessageHandler dispatch) are tripwired by tests.
+  `local_provider._components`, MessageHandler dispatch) are tripwired by tests.
+- **Downstream list-change capabilities:** every backend proxy and the shared
+  `/virtual/mcp` server advertise tools/resources/prompts `listChanged=false`.
+  Admin hot swaps are immediately visible to an explicit re-list, but FastMCP
+  3.4.4 exposes only a per-session public sender—never advertise a server-wide
+  push until the gateway owns a tested downstream-session registry.
+- **Catalog pagination:** FastMCP consumes every upstream page before transforms;
+  the gateway then serves each independent backend and `/virtual/mcp` catalog
+  in 50-tool pages using gateway-owned opaque cursors. Never forward a source
+  cursor through the transform boundary. Virtual Tools advertise their stable
+  output envelope and keep upstream `_meta` namespaced per member under the
+  strict result budget.
+- **Runtime ownership:** mount/unmount and transform replacement go through one
+  `BackendRuntime`; pass only its read-only proxy mapping to Virtual Tools.
+  `hot_reload` has a critical call graph, so preserve its remove/add/instruction
+  ordering when extracting more Admin services.
 - Tools are exposed BARE per endpoint; apply `add_transform` AFTER `_reconcile`
   (reconcile must see source names).
 - **Transform target names are globally unique per backend — enabled OR
@@ -123,9 +147,23 @@ layout, console script `mcp-gateway`). MIT; distributed via
 - **Auth:** optional `bearer_token` (${ENV} ref, resolved once at boot) gates
   backend endpoints AND `/admin/api/*` (open admin = config writes + tool
   execution for any local process); only `/health`, `/ready`, bare `GET
-  /admin` stay open. Origin guard 403s foreign browser origins on every route
-  (MCP-spec MUST, DNS rebinding). `claude mcp add --header` is VARIADIC — it
-  must come after `<name> <url>` or it swallows them.
+  /admin` stay open. Standard `[oauth]` mode is mutually exclusive with the
+  legacy token: every independent backend and `/virtual/mcp` validates JWTs
+  against its own audience, publishes RFC 9728 metadata, and returns 401 for
+  authentication failures or 403 for missing scopes. Remote OAuth deployments
+  use a separate `oauth.admin_bearer_token` for `/admin/api/*`. Origin guard
+  403s foreign browser origins on every route (MCP-spec MUST, DNS rebinding).
+  `claude mcp add --header` is VARIADIC — it must come after `<name> <url>` or
+  it swallows them. Codex accepts only `--bearer-token-env-var`; its one-click
+  registration therefore requires the gateway token to be a single
+  `${ENV_VAR}` reference, and that variable must also exist in the Codex
+  process environment.
+- **Process isolation:** no worker process is added by default. Stdio backends
+  already run in child processes; per-backend lifecycle runners/recycle paths
+  and the `stateless` per-session lever contain current failures. Add a
+  supervised worker protocol only when untrusted in-process code, resource
+  limits, caller credentials, or daemon-level crash blast radius justify it;
+  see ADR-0009.
 - **Admin editing model:** every broadcast text is editable; original names
   read-only. Fields prefill with effective values; only diffs vs captured
   defaults are stored (`_override_vs_default`). Hiding a REQUIRED param needs
@@ -136,8 +174,7 @@ layout, console script `mcp-gateway`). MIT; distributed via
   `install.sh` waits out launchd's ASYNC bootout before bootstrapping (race →
   "Bootstrap failed: 5"). launchd runs the venv console script through the
   symlink; recreate the venv with `uv sync`.
-- Accepted spec gaps (#92): completions capability not forwarded; tools/list
-  served as one page. Framework-level, irrelevant to Claude Code.
+- Accepted spec gap (#92): completions capability is not forwarded.
 - Backlog (2026-07-15): the issue tracker is CLEAR except north-star #121
   (ongoing tuning mission) and the three STACKED DRAFT PRs #173→#175/#176
   (composites → smart routing / code mode) on `feat/14-composite-tools` —

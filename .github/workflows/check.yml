@@ -32,7 +32,7 @@ jobs:
       # the lockfile must be consistent with pyproject — catches a dependency
       # edit that forgot `uv lock`
       - run: uv lock --check
-      - run: uv sync
+      - run: uv sync --locked
       - run: just check
       # the wheel must build and carry its data files (admin.html + the seed
       # config ship inside the package — a packaging regression breaks install)
@@ -46,3 +46,33 @@ jobs:
               assert any(n.endswith(want) for n in names), f"{want} missing from {whl}"
           print("wheel carries its data files")
           EOF
+
+  mcp-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      # Both launchers retain passing/failing receipts under this directory so
+      # the artifact step can publish them with a stable glob.
+      TMPDIR: ${{ runner.temp }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: uv sync --locked
+      - name: Gateway raw-wire contract
+        run: uv run python tests/live/run_mcp_wire.py --keep
+      - name: Official MCP conformance smoke
+        run: uv run python tests/conformance/run_official.py --keep
+      - name: Publish protocol receipts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mcp-contract-receipts
+          path: ${{ runner.temp }}/mcp-gateway-*
+          if-no-files-found: warn
+          retention-days: 14

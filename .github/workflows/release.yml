@@ -22,7 +22,7 @@ jobs:
           cache-dependency-glob: uv.lock
       - uses: extractions/setup-just@v2
       # a release must pass the same gate as every PR
-      - run: uv sync
+      - run: uv sync --locked
       - run: just check
       - run: uv build
       - name: publish GitHub release

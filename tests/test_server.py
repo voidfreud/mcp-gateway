@@ -25,7 +25,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
-from mcp_gateway import admin, server
+from mcp_gateway import admin, runtime, server
 from mcp_gateway import config_loader as cl
 
 # ---------------------------------------------------------------------------
@@ -1020,6 +1020,89 @@ def test_deregister_bad_scope_is_400(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Per-backend Codex registration via the `codex` CLI
+# ---------------------------------------------------------------------------
+
+
+def _fake_codex_cli(monkeypatch, calls, rc=0, stdout="", stderr=""):
+    monkeypatch.setattr(admin, "codex_cli_path", lambda: "/usr/bin/codex")
+
+    def fake_run(argv, **_kwargs):
+        calls.append(list(argv))
+        return subprocess.CompletedProcess(argv, rc, stdout=stdout, stderr=stderr)
+
+    monkeypatch.setattr(admin.subprocess, "run", fake_run)
+
+
+def test_codex_register_backend_runs_independent_mcp_add(tmp_path, monkeypatch):
+    calls = []
+    _fake_codex_cli(monkeypatch, calls, stdout="added")
+    response = TestClient(_admin_app(tmp_path)).post(
+        "/admin/api/backend/b/codex/register", json={}
+    )
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert calls == [
+        [
+            "/usr/bin/codex",
+            "mcp",
+            "add",
+            "gateway-b",
+            "--url",
+            "http://127.0.0.1:9100/b/mcp",
+        ]
+    ]
+    assert "new task" in response.json()["note"]
+
+
+def test_codex_register_passes_env_name_not_secret(tmp_path, monkeypatch):
+    calls = []
+    _fake_codex_cli(monkeypatch, calls)
+    app = _cfg_app(
+        tmp_path,
+        {
+            "bearer_token": "${GATEWAY_TOKEN}",
+            "backends": [{"name": "b", "transport": "stdio", "command": "/bin/x"}],
+        },
+    )
+    response = TestClient(app).post("/admin/api/backend/b/codex/register", json={})
+    assert response.status_code == 200
+    assert calls[0][-2:] == ["--bearer-token-env-var", "GATEWAY_TOKEN"]
+    assert "${GATEWAY_TOKEN}" not in response.json()["command"]
+
+
+def test_codex_register_unknown_backend_and_missing_cli(tmp_path, monkeypatch):
+    monkeypatch.setattr(admin, "codex_cli_path", lambda: None)
+    client = TestClient(_admin_app(tmp_path))
+    unknown = client.post("/admin/api/backend/ghost/codex/register", json={})
+    assert unknown.status_code == 400 and "unknown" in unknown.json()["error"]
+    missing = client.post("/admin/api/backend/b/codex/register", json={})
+    assert missing.status_code == 400
+    assert "Codex CLI not found" in missing.json()["error"]
+
+
+def test_codex_cli_failure_is_ok_false_without_500(tmp_path, monkeypatch):
+    calls = []
+    _fake_codex_cli(monkeypatch, calls, rc=1, stderr="duplicate server")
+    response = TestClient(_admin_app(tmp_path)).post(
+        "/admin/api/backend/b/codex/register", json={}
+    )
+    assert response.status_code == 200
+    assert response.json()["ok"] is False
+    assert response.json()["stderr"] == "duplicate server"
+
+
+def test_codex_deregister_runs_remove_even_after_backend_removed(tmp_path, monkeypatch):
+    calls = []
+    _fake_codex_cli(monkeypatch, calls)
+    response = TestClient(_admin_app(tmp_path)).post(
+        "/admin/api/backend/gone/codex/deregister", json={}
+    )
+    assert response.status_code == 200 and response.json()["ok"] is True
+    assert calls == [["/usr/bin/codex", "mcp", "remove", "gateway-gone"]]
+
+
+# ---------------------------------------------------------------------------
 # #153 — stale-override migrate/discard routes
 # ---------------------------------------------------------------------------
 
@@ -1204,6 +1287,43 @@ def test_cc_registrations_caches_and_fresh_busts(tmp_path, monkeypatch):
     assert len(calls) == 3
 
 
+def test_codex_registrations_missing_cli_reports_unavailable(tmp_path, monkeypatch):
+    monkeypatch.setattr(admin, "codex_cli_path", lambda: None)
+    response = TestClient(_admin_app(tmp_path)).get("/admin/api/codex-registrations")
+    assert response.status_code == 200
+    assert response.json() == {"available": False}
+
+
+def test_codex_registrations_route_uses_json_and_caches(tmp_path, monkeypatch):
+    calls = []
+    output = json.dumps([{"name": "gateway-b", "enabled": True}])
+    _fake_codex_cli(monkeypatch, calls, stdout=output)
+    client = TestClient(_admin_app(tmp_path))
+    first = client.get("/admin/api/codex-registrations")
+    second = client.get("/admin/api/codex-registrations")
+    assert first.json() == {
+        "available": True,
+        "ok": True,
+        "registered": {"b": True},
+    }
+    assert second.json() == first.json()
+    assert calls == [["/usr/bin/codex", "mcp", "list", "--json"]]
+    client.get("/admin/api/codex-registrations?fresh=1")
+    assert len(calls) == 2
+
+
+def test_codex_registrations_malformed_json_is_not_false_all_clear(
+    tmp_path, monkeypatch
+):
+    calls = []
+    _fake_codex_cli(monkeypatch, calls, stdout="not json")
+    response = TestClient(_admin_app(tmp_path)).get("/admin/api/codex-registrations")
+    assert response.status_code == 200
+    assert response.json()["available"] is True
+    assert response.json()["ok"] is False
+    assert "malformed" in response.json()["error"]
+
+
 # ---------------------------------------------------------------------------
 # #96 — bad config recovers from a backup instead of crash-looping
 # ---------------------------------------------------------------------------
@@ -1341,6 +1461,27 @@ def test_suppress_list_changed_clears_capability():
     assert caps.prompts.listChanged is False
 
 
+def test_virtual_endpoint_applies_static_catalog_capabilities(tmp_path, monkeypatch):
+    """The permanent Virtual Tools mount must not keep FastMCP's true default."""
+    seen = []
+    monkeypatch.setattr(
+        server, "_suppress_list_changed", lambda fastmcp: seen.append(fastmcp.name)
+    )
+    cfg = cl.GatewayConfig()
+    path = tmp_path / "config.toml"
+    cl.save(cfg, path)
+    app = server._build_app(
+        cfg, structlog.get_logger("test"), {}, {}, {}, config_path=str(path)
+    )
+    with TestClient(app) as client:
+        assert client.get("/health").status_code == 200
+        for _ in range(100):
+            if seen:
+                break
+            time.sleep(0.01)
+    assert seen == ["mcp-gateway-virtual"]
+
+
 # ---------------------------------------------------------------------------
 # #78 — disabled backends are never mounted (endpoint 404s); unmount cleans up
 # ---------------------------------------------------------------------------
@@ -1351,10 +1492,10 @@ def test_boot_skips_disabled_backends(tmp_path, monkeypatch):
     mounted = []
 
     async def fake_mount(
-        app, stack, b, cfg, all_tools, meta, captured, reg, _hold, log, *extra
+        app, stack, b, cfg, all_tools, meta, captured, rt, log, *extra
     ):
         mounted.append(b.name)
-        reg[b.name] = object()
+        rt.mount(b.name, object(), [])
         return True
 
     monkeypatch.setattr(server, "_mount_backend", fake_mount)
@@ -1394,7 +1535,7 @@ def test_unmount_drops_route_and_registry():
     inner = Starlette()
     app = Starlette(routes=[Route("/health", lambda r: None), Mount("/b", app=inner)])
     registry, holders = {"b": object()}, {"b": [object()]}
-    server._unmount(app, "b", registry, holders)
+    server._unmount(app, "b", runtime.BackendRuntime.from_legacy(registry, holders))
     assert "b" not in registry and "b" not in holders
     paths = [getattr(r, "path", None) for r in app.router.routes]
     assert "/b" not in paths  # backend mount removed
@@ -1664,7 +1805,9 @@ def test_autorefresh_event_paths_are_ungated(tmp_path, monkeypatch):
     b = cfg.backends[0]
 
     async def go():
-        ar = server._AutoRefresh(0, cfg.baseline_max_age, str(path), {}, {}, log)
+        ar = server._AutoRefresh(
+            0, cfg.baseline_max_age, str(path), runtime.BackendRuntime(), log
+        )
         await ar.refresh(b)  # the worker/interval path
         await ar.post_mount(b)  # the gated path, for contrast
 
@@ -1899,6 +2042,20 @@ def test_admin_html_inline_script_parses():
         os.unlink(js_path)
 
 
+def test_admin_html_has_per_backend_codex_registration_controls():
+    text = (REPO_ROOT / "src" / "mcp_gateway" / "admin.html").read_text(
+        encoding="utf-8"
+    )
+    for contract in (
+        "also add to Codex",
+        "toggleCodex",
+        "/admin/api/codex-registrations",
+        "/codex/register",
+        "/codex/deregister",
+    ):
+        assert contract in text
+
+
 def test_admin_html_has_first_class_virtual_tools_surface():
     text = (REPO_ROOT / "src" / "mcp_gateway" / "admin.html").read_text(
         encoding="utf-8"
@@ -1969,7 +2126,13 @@ def test_interval_refresh_loop_sweeps_and_stops(tmp_path, monkeypatch):
     log = structlog.get_logger("test")
 
     async def go():
-        ar = server._AutoRefresh(1, 0, str(path), {"up": object()}, {}, log)
+        ar = server._AutoRefresh(
+            1,
+            0,
+            str(path),
+            runtime.BackendRuntime.from_legacy({"up": object()}, {}),
+            log,
+        )
         ar.interval = 0.05  # fast clock for the test
         async with anyio.create_task_group() as tg:
             tg.start_soon(ar.interval_loop)
@@ -2148,10 +2311,10 @@ def _recycle_app(tmp_path, monkeypatch, mounts):
     real backend. refresh is stubbed out (no real capture on the fake command)."""
 
     async def fake_mount(
-        app, stack, b, cfg, all_tools, meta, captured, reg, hold, log, *extra
+        app, stack, b, cfg, all_tools, meta, captured, rt, log, *extra
     ):
         mounts.append(b.name)
-        reg[b.name] = object()
+        rt.mount(b.name, object(), [])
         return True
 
     async def fake_refresh(*a, **k):

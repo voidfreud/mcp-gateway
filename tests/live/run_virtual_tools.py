@@ -126,6 +126,12 @@ async def _tools(url: str) -> list[Any]:
         return await client.list_tools()
 
 
+async def _tools_list_changed(url: str) -> bool | None:
+    async with Client(url, timeout=8) as client:
+        capabilities = client.initialize_result.capabilities
+        return capabilities.tools.listChanged if capabilities.tools else None
+
+
 async def _call(url: str, name: str, arguments: dict[str, Any]) -> Any:
     async with Client(url, timeout=8) as client:
         return await client.call_tool(name, arguments, raise_on_error=False)
@@ -306,6 +312,12 @@ def run(keep: bool) -> Path:  # noqa: PLR0915 - one coherent black-box receipt
         if empty_tools:
             raise ContractFailure("/virtual/mcp must list zero tools before activation")
         receipt["checks"].append("always-mounted empty virtual endpoint")
+        if asyncio.run(_tools_list_changed(virtual_url)) is not False:
+            raise ContractFailure(
+                "/virtual/mcp must not advertise tools.listChanged until it can "
+                "notify every connected downstream session"
+            )
+        receipt["checks"].append("truthful tools.listChanged capability")
 
         catalog = _request(f"{base}/admin/api/virtual-catalog")
         backend_ids = {item["name"]: item["id"] for item in catalog["backends"]}

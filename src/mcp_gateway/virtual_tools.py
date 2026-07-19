@@ -12,11 +12,13 @@ import json
 import re
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any
 
 import httpx
 from fastmcp import Client, FastMCP
+from fastmcp.server.auth import AuthProvider
+from fastmcp.server.providers.proxy import FastMCPProxy
 from fastmcp.tools import Tool, ToolResult
 from mcp.types import TextContent
 from pydantic import PrivateAttr
@@ -26,6 +28,37 @@ from mcp_gateway import config_loader as cl
 VIRTUAL_ROUTE = "virtual"
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 _OMISSION_DETAIL_LIMIT = 2
+
+# This is intentionally an envelope schema rather than a schema for every
+# upstream result.  Virtual members can proxy arbitrary MCP servers, so their
+# individual structured results and execution metadata cannot be constrained
+# safely by the gateway.  The stable top-level fields let clients rely on the
+# virtual-tool contract while ``additionalProperties`` preserves backend
+# fidelity as the envelope evolves.
+VIRTUAL_OUTPUT_SCHEMA: dict[str, Any] = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "required": [
+        "virtual_tool",
+        "dispatch",
+        "selected",
+        "selected_omitted",
+        "members",
+        "budget",
+    ],
+    "properties": {
+        "virtual_tool": {"type": "string"},
+        "dispatch": {"type": "string"},
+        "selected": {"type": "array", "items": {"type": "string"}},
+        "selected_omitted": {"type": "integer", "minimum": 0},
+        "members": {
+            "type": "array",
+            "items": {"type": "object", "additionalProperties": True},
+        },
+        "budget": {"type": "object", "additionalProperties": True},
+    },
+    "additionalProperties": True,
+}
 
 _JSON_TYPES: dict[str, str | list[str]] = {
     "string": "string",
@@ -89,7 +122,9 @@ def resolve_member(
 
 
 async def resolve_tool(
-    tool: cl.VirtualTool, cfg: cl.GatewayConfig, registry: dict
+    tool: cl.VirtualTool,
+    cfg: cl.GatewayConfig,
+    registry: Mapping[str, FastMCPProxy],
 ) -> dict:
     """Return a live resolution receipt; no member call is made."""
     members = []
@@ -267,7 +302,7 @@ async def call_member(
     member: cl.VirtualMember,
     arguments: dict,
     cfg: cl.GatewayConfig,
-    registry: dict,
+    registry: Mapping[str, FastMCPProxy],
 ) -> dict:
     label = member_label(member)
     started = time.perf_counter()
@@ -302,6 +337,7 @@ async def call_member(
                 "error": text or "tool returned an error",
                 "content": list(result.content or []),
                 "structured": result.structuredContent,
+                "meta": result.meta,
             }
         return {
             "member": label,
@@ -309,6 +345,7 @@ async def call_member(
             "ms": elapsed,
             "content": list(result.content or []),
             "structured": result.structuredContent,
+            "meta": result.meta,
         }
     except TimeoutError:
         return {
@@ -483,6 +520,21 @@ def aggregate_results(  # noqa: PLR0912, PLR0915 - one ordered budget-accounting
                     record.pop("result")
                     omit(member, "structured", structured_size)
 
+        # Upstream ``_meta`` remains inside its member's result record so two
+        # backends cannot collide.  It is subject to the same exact wire-size
+        # accounting as content and structured results.
+        if outcome.get("meta") is not None:
+            metadata_size = _json_size(outcome["meta"])
+            if record not in structured_members:
+                omit(member, "meta", metadata_size)
+            else:
+                record["meta"] = outcome["meta"]
+                if fits_with_first_omission():
+                    used += metadata_size
+                else:
+                    record.pop("meta")
+                    omit(member, "meta", metadata_size)
+
     while _json_size(result()) > tool.max_result_bytes and structured_members:
         dropped = structured_members.pop()
         omit(dropped.get("member", "unknown"), "member", _json_size(dropped))
@@ -517,7 +569,7 @@ async def run_virtual(
     tool: cl.VirtualTool,
     arguments: dict,
     cfg: cl.GatewayConfig,
-    registry: dict,
+    registry: Mapping[str, FastMCPProxy],
     log,
 ) -> ToolResult:
     values = _validate_arguments(tool, arguments)
@@ -566,7 +618,7 @@ class _VirtualRuntimeTool(Tool):
 
     _definition: cl.VirtualTool = PrivateAttr()
     _cfg_source: cl.GatewayConfig | Callable[[], cl.GatewayConfig] = PrivateAttr()
-    _registry: dict = PrivateAttr()
+    _registry: Mapping[str, FastMCPProxy] = PrivateAttr()
     _log: Any = PrivateAttr()
     _status_store: dict | None = PrivateAttr()
 
@@ -574,7 +626,7 @@ class _VirtualRuntimeTool(Tool):
         self,
         definition: cl.VirtualTool,
         cfg_source: cl.GatewayConfig | Callable[[], cl.GatewayConfig],
-        registry: dict,
+        registry: Mapping[str, FastMCPProxy],
         log,
         status_store: dict | None = None,
     ) -> None:
@@ -582,7 +634,7 @@ class _VirtualRuntimeTool(Tool):
             name=definition.name,
             description=definition.description,
             parameters=input_schema(definition),
-            output_schema=None,
+            output_schema=VIRTUAL_OUTPUT_SCHEMA,
             meta=(dict(cl.ALWAYS_LOAD_META) if definition.always_load else None),
         )
         self._definition = definition
@@ -624,7 +676,7 @@ class _VirtualRuntimeTool(Tool):
 def build_virtual_tool(
     tool: cl.VirtualTool,
     cfg_source: cl.GatewayConfig | Callable[[], cl.GatewayConfig],
-    registry: dict,
+    registry: Mapping[str, FastMCPProxy],
     log,
     status_store: dict | None = None,
 ) -> Tool:
@@ -636,12 +688,14 @@ def replace_tools(  # noqa: PLR0913 - explicit lifecycle dependencies
     server: FastMCP,
     cfg: cl.GatewayConfig,
     cfg_source: cl.GatewayConfig | Callable[[], cl.GatewayConfig],
-    registry: dict,
+    registry: Mapping[str, FastMCPProxy],
     log,
     status_store: dict | None = None,
 ) -> None:
     """Stage every component before one provider-map swap can mutate live tools."""
-    staged = FastMCP(name=f"{server.name}-staging")
+    staged = FastMCP(
+        name=f"{server.name}-staging", list_page_size=cl.DOWNSTREAM_TOOLS_PAGE_SIZE
+    )
     for item in [
         build_virtual_tool(tool, cfg_source, registry, log, status_store)
         for tool in cfg.virtual_tools
@@ -651,13 +705,18 @@ def replace_tools(  # noqa: PLR0913 - explicit lifecycle dependencies
     server.local_provider._components = staged.local_provider._components  # noqa: SLF001
 
 
-def build_virtual_server(
+def build_virtual_server(  # noqa: PLR0913 - explicit lifecycle and auth dependencies
     cfg: cl.GatewayConfig,
     cfg_source: cl.GatewayConfig | Callable[[], cl.GatewayConfig],
-    registry: dict,
+    registry: Mapping[str, FastMCPProxy],
     log,
     status_store: dict | None = None,
+    auth: AuthProvider | None = None,
 ) -> FastMCP:
-    server = FastMCP(name="mcp-gateway-virtual")
+    server = FastMCP(
+        name="mcp-gateway-virtual",
+        list_page_size=cl.DOWNSTREAM_TOOLS_PAGE_SIZE,
+        auth=auth,
+    )
     replace_tools(server, cfg, cfg_source, registry, log, status_store)
     return server

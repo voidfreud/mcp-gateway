@@ -32,6 +32,7 @@ from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse
 from starlette.routing import Route
 
+from mcp_gateway import admin_routes_codex, runtime
 from mcp_gateway import config_loader as cl
 from mcp_gateway import hooks as hooks_mod
 from mcp_gateway import virtual_tools as virtual_mod
@@ -805,6 +806,25 @@ def build_state(cfg: GatewayConfig) -> dict:
         # bearer_token is the ${ENV} REF as stored — never the resolved secret.
         "bearer_token": cfg.bearer_token,
         "introspect_interval": cfg.introspect_interval,
+        "auth_mode": (
+            "oauth_jwt"
+            if cfg.oauth is not None
+            else ("static_bearer" if cfg.bearer_token else "none")
+        ),
+        # OAuth metadata is public configuration only; never expose the Admin
+        # token or any resolved secret to the browser.
+        "oauth": (
+            {
+                "public_base_url": str(cfg.oauth.public_base_url).rstrip("/"),
+                "authorization_servers": [
+                    str(url).rstrip("/") for url in cfg.oauth.authorization_servers
+                ],
+                "issuer": str(cfg.oauth.issuer).rstrip("/"),
+                "required_scopes": list(cfg.oauth.required_scopes),
+            }
+            if cfg.oauth is not None
+            else None
+        ),
         # Each backend is its own MCP endpoint with its own instructions now (no
         # single cross-backend "gateway instructions"); the UI shows an endpoints
         # overview + per-backend server-instructions editing.
@@ -1524,15 +1544,18 @@ def set_instructions(cfg: GatewayConfig, backend: str, value) -> None:
 
 
 def hot_reload(
-    registry: dict, holders: dict, cfg: GatewayConfig, backend: str, log
+    backend_runtime: runtime.BackendRuntime,
+    cfg: GatewayConfig,
+    backend: str,
+    log,
 ) -> None:
     """Rebuild ONE backend's transforms from cfg and swap them into its live
     proxy in-process (no restart); also re-set that backend's instructions.
 
-    ``registry`` maps backend name -> live proxy, ``holders`` maps backend name
-    -> [current transform]; both are populated by the server lifespan."""
+    ``backend_runtime`` owns each live proxy plus its current gateway transforms.
+    It is populated by the server lifespan."""
     b = next((x for x in cfg.backends if x.name == backend), None)
-    proxy = registry.get(backend)
+    proxy = backend_runtime.get_proxy(backend)
     if b is None or proxy is None:
         log.warning("hot_reload_skipped", backend=backend)
         return
@@ -1547,7 +1570,7 @@ def hot_reload(
     )
     # #15: the holder carries EVERY gateway-owned transform on this proxy (the
     # tool transform + the optional resource/prompt transform) — swap them all.
-    for old in holders.get(backend) or []:
+    for old in backend_runtime.get_transforms(backend):
         if old is not None and old in proxy._transforms:
             proxy._transforms.remove(old)
     proxy.add_transform(new_transform)
@@ -1556,7 +1579,7 @@ def hot_reload(
     if rp_transform is not None:
         proxy.add_transform(rp_transform)
         new_holder.append(rp_transform)
-    holders[backend] = new_holder
+    backend_runtime.replace_transforms(backend, new_holder)
     # Re-set this backend's live server-level instructions (override else captured
     # original) — each endpoint carries only its own, keeping the full per-server
     # budget.
@@ -1570,8 +1593,7 @@ def hot_reload(
 async def refresh_and_reload(  # noqa: PLR0913 — mirrors hot_reload's plumbing args
     b: Backend,
     config_path: str,
-    registry: dict,
-    holders: dict,
+    backend_runtime: runtime.BackendRuntime,
     log,
     *,
     force: bool = False,
@@ -1589,7 +1611,7 @@ async def refresh_and_reload(  # noqa: PLR0913 — mirrors hot_reload's plumbing
     )
     if res.get("changed"):
         cfg = cl.load(config_path)
-        hot_reload(registry, holders, cfg, b.name, log)
+        hot_reload(backend_runtime, cfg, b.name, log)
     return res
 
 
@@ -1659,6 +1681,12 @@ CLAUDE_CLI_TIMEOUT = 30
 CC_REG_CACHE_TTL = 60.0
 _cc_reg_cache: dict[str, Any] = {"ts": 0.0, "output": None}
 
+# Codex uses one user-level config and exposes JSON for reliable status parsing.
+# Keep its cache independent from Claude Code so either CLI can be absent or
+# refreshed without affecting the other client integration.
+CODEX_REG_CACHE_TTL = 60.0
+_codex_reg_cache: dict[str, Any] = {"ts": 0.0, "output": None}
+
 
 def parse_cc_registrations(output: str, backends: list[str]) -> dict[str, bool]:
     """Map each configured backend to whether it is registered in Claude Code,
@@ -1721,6 +1749,80 @@ def claude_mcp_command(
     if action == "remove":
         return ["claude", "mcp", "remove", "--scope", scope, registration]
     raise cl.ConfigError(f"unknown action {action!r} (use add or remove)")
+
+
+def parse_codex_registrations(output: str, backends: list[str]) -> dict[str, bool]:
+    """Map configured backends to exact registrations from ``codex mcp list``.
+
+    Codex provides a JSON mode, so avoid depending on human-readable output.
+    Registration state is intentionally distinct from ``enabled`` and
+    ``auth_status``: a disabled or unauthenticated entry still exists in Codex.
+    """
+    try:
+        items = json.loads(output)
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise cl.ConfigError("codex mcp list returned malformed JSON") from exc
+    if not isinstance(items, list):
+        raise cl.ConfigError("codex mcp list returned JSON other than a list")
+    names = {
+        item.get("name")
+        for item in items
+        if isinstance(item, dict) and isinstance(item.get("name"), str)
+    }
+    return {name: f"gateway-{name}" in names for name in backends}
+
+
+def codex_bearer_env_var(bearer_token: str | None) -> str | None:
+    """Return the environment variable Codex should use for gateway auth.
+
+    ``codex mcp add`` deliberately accepts an environment-variable *name*, not
+    a literal token. Requiring a single ``${ENV}`` reference keeps credentials
+    out of argv, API responses, and ``~/.codex/config.toml``.
+    """
+    if bearer_token is None:
+        return None
+    match = re.fullmatch(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}", bearer_token.strip())
+    if match is None:
+        raise cl.ConfigError(
+            "Codex registration requires bearer_token to be a single ${ENV_VAR} "
+            "reference; literal tokens are never written to Codex config"
+        )
+    return match.group(1)
+
+
+def codex_mcp_command(
+    action: str,
+    name: str,
+    url: str | None = None,
+    bearer_env_var: str | None = None,
+) -> list[str]:
+    """Build the Codex CLI argv for one independent gateway backend."""
+    registration = f"gateway-{name}"
+    if action == "add":
+        if not url:
+            raise cl.ConfigError("register needs the backend's endpoint url")
+        argv = ["codex", "mcp", "add", registration, "--url", url]
+        if bearer_env_var:
+            argv += ["--bearer-token-env-var", bearer_env_var]
+        return argv
+    if action == "remove":
+        return ["codex", "mcp", "remove", registration]
+    raise cl.ConfigError(f"unknown action {action!r} (use add or remove)")
+
+
+def codex_cli_path() -> str | None:
+    """Locate Codex for both interactive shells and the macOS login daemon."""
+    found = shutil.which("codex")
+    if found:
+        return found
+    candidates = [
+        os.environ.get("CODEX_CLI_PATH"),
+        "/Applications/ChatGPT.app/Contents/Resources/codex",
+    ]
+    for candidate in candidates:
+        if candidate and Path(candidate).is_file() and os.access(candidate, os.X_OK):
+            return candidate
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -1838,8 +1940,7 @@ class _AdminCtx:
 
     config_path: str
     log: Any
-    registry: dict
-    holders: dict
+    backend_runtime: runtime.BackendRuntime
     hooks: dict
     # Guards every config read-modify-write (#52). Uvicorn runs a single worker,
     # so load->mutate->save WAS implicitly atomic as long as no handler awaited
@@ -1866,7 +1967,7 @@ class _AdminCtx:
         backup_config(self.config_path)
         cl.save(cfg, self.config_path)
         for name in backends:
-            hot_reload(self.registry, self.holders, cfg, name, self.log)
+            hot_reload(self.backend_runtime, cfg, name, self.log)
 
     def locked(self, handler):
         """Serialize a whole mutating handler under ``lock``. Fine for the
@@ -2122,18 +2223,36 @@ def _gateway_settings_routes(ctx: _AdminCtx) -> list[Route]:
 
     async def get_settings(_request: Request):
         cfg = ctx.load()
-        return JSONResponse(
-            {
-                # the ${ENV} REF exactly as stored — never the resolved secret
-                "bearer_token": cfg.bearer_token,
-                "introspect_interval": cfg.introspect_interval,
-            }
-        )
+        payload = {
+            # the ${ENV} REF exactly as stored — never the resolved secret
+            "bearer_token": cfg.bearer_token,
+            "introspect_interval": cfg.introspect_interval,
+        }
+        if cfg.oauth is not None:
+            payload.update(
+                {
+                    "auth_mode": "oauth_jwt",
+                    "oauth": {
+                        "public_base_url": str(cfg.oauth.public_base_url).rstrip("/"),
+                        "authorization_servers": [
+                            str(url).rstrip("/")
+                            for url in cfg.oauth.authorization_servers
+                        ],
+                        "required_scopes": list(cfg.oauth.required_scopes),
+                    },
+                }
+            )
+        return JSONResponse(payload)
 
     async def put_settings(request: Request):
         payload = await request.json()
         cfg = ctx.load()
         if "bearer_token" in payload:
+            if cfg.oauth is not None:
+                return _err(
+                    "bearer_token cannot be changed while oauth authentication "
+                    "is configured"
+                )
             tok = payload.get("bearer_token")
             if tok is not None and not isinstance(tok, str):
                 return _err("bearer_token must be a string or null")
@@ -2152,6 +2271,10 @@ def _gateway_settings_routes(ctx: _AdminCtx) -> list[Route]:
             if isinstance(iv, bool) or not isinstance(iv, int) or iv < 0:
                 return _err("introspect_interval must be an integer >= 0")
             cfg.introspect_interval = iv
+        try:
+            cfg = cl.GatewayConfig.model_validate(cl.to_raw(cfg))
+        except (cl.ConfigError, ValueError) as exc:
+            return _err(str(exc))
         ctx.commit(cfg)  # persist only — both settings are read at boot
         return ctx.restart_response({"changed": "gateway-settings"})
 
@@ -2187,12 +2310,13 @@ def _backend_routes(ctx: _AdminCtx) -> list[Route]:  # noqa: PLR0915 — stateme
         enable -> mount it if not already mounted; disable -> unmount it (so a
         disabled backend runs no subprocess and its endpoint 404s)."""
         if value:
-            if b.name not in ctx.registry:  # not mounted -> mount it live (#7)
+            # Not mounted -> mount it live (#7).
+            if b.name not in ctx.backend_runtime.proxies:
                 add = ctx.hooks.get("add")
                 if add is not None:
                     await add(b)
             else:  # already mounted (defensive) -> just refresh its transforms
-                hot_reload(ctx.registry, ctx.holders, ctx.load(), b.name, ctx.log)
+                hot_reload(ctx.backend_runtime, ctx.load(), b.name, ctx.log)
         else:
             remove = ctx.hooks.get("remove")
             if remove is not None:
@@ -2354,7 +2478,7 @@ def _backend_routes(ctx: _AdminCtx) -> list[Route]:  # noqa: PLR0915 — stateme
             if old_defaults_data is not None:
                 save_defaults(old_defaults_data)
             recovery_error = None
-            if name not in ctx.registry:
+            if name not in ctx.backend_runtime.proxies:
                 try:
                     if not await add(old_backend):
                         recovery_error = "; old backend re-mount also failed"
@@ -2507,7 +2631,7 @@ def _backend_routes(ctx: _AdminCtx) -> list[Route]:  # noqa: PLR0915 — stateme
 async def admin_refresh(ctx: _AdminCtx, b: Backend, *, force: bool = False) -> dict:
     """ctx-bound :func:`refresh_and_reload` (#43) for the admin routes."""
     return await refresh_and_reload(
-        b, ctx.config_path, ctx.registry, ctx.holders, ctx.log, force=force
+        b, ctx.config_path, ctx.backend_runtime, ctx.log, force=force
     )
 
 
@@ -2709,6 +2833,30 @@ def _claude_routes(ctx: _AdminCtx) -> list[Route]:  # noqa: PLR0915 — nested h
     ]
 
 
+def _codex_routes(ctx: _AdminCtx) -> list[Route]:
+    """Compatibility facade for the independently testable Codex route group."""
+
+    def deps() -> admin_routes_codex.CodexRouteDeps:
+        # Resolve these facade globals at request time. Existing callers and
+        # tests patch ``mcp_gateway.admin`` directly, including replacing the
+        # cache dictionary, so capturing any of them here would be a regression.
+        return admin_routes_codex.CodexRouteDeps(
+            cli_path=codex_cli_path,
+            command=codex_mcp_command,
+            bearer_env_var=codex_bearer_env_var,
+            parse_registrations=parse_codex_registrations,
+            error=_err,
+            needs_json=_needs_json,
+            cache=_codex_reg_cache,
+            cache_ttl=CODEX_REG_CACHE_TTL,
+            monotonic=time.monotonic,
+            subprocess_run=subprocess.run,
+            cli_timeout=CLAUDE_CLI_TIMEOUT,
+        )
+
+    return admin_routes_codex.codex_routes(ctx, deps)
+
+
 def _ops_routes(ctx: _AdminCtx) -> list[Route]:  # noqa: PLR0915 — nested handlers; the group is cohesive
     """Operational endpoints: mini-inspector, manual restart, re-introspect,
     liveness status (#23), and the dashboard-load refresh sweep (#43)."""
@@ -2727,7 +2875,7 @@ def _ops_routes(ctx: _AdminCtx) -> list[Route]:  # noqa: PLR0915 — nested hand
         tool-level error (isError comes back in the payload)."""
         payload = await request.json()
         backend = payload.get("backend")
-        proxy = ctx.registry.get(backend)
+        proxy = ctx.backend_runtime.get_proxy(backend)
         if proxy is None:
             return JSONResponse(
                 {"ok": False, "error": "backend not mounted"}, status_code=400
@@ -2788,7 +2936,7 @@ def _ops_routes(ctx: _AdminCtx) -> list[Route]:  # noqa: PLR0915 — nested hand
         async def one(b: Backend) -> tuple[str, dict]:
             if not b.enabled:
                 return b.name, {"state": "disabled"}
-            proxy = ctx.registry.get(b.name)
+            proxy = ctx.backend_runtime.get_proxy(b.name)
             if proxy is None:
                 return b.name, {"state": "unmounted"}
             started = time.perf_counter()
@@ -2823,7 +2971,7 @@ def _ops_routes(ctx: _AdminCtx) -> list[Route]:  # noqa: PLR0915 — nested hand
         down/slow backend reports itself and never stalls the others."""
 
         async def one(b: Backend) -> tuple[str, dict]:
-            if not b.enabled or b.name not in ctx.registry:
+            if not b.enabled or b.name not in ctx.backend_runtime.proxies:
                 return b.name, {"status": "skipped"}
             return b.name, await admin_refresh(ctx, b)
 
@@ -2867,7 +3015,7 @@ def _virtual_routes(ctx: _AdminCtx) -> list[Route]:  # noqa: PLR0915
         return cl.llm_egress_consent_fingerprint(tool)
 
     async def _resolution(tool: cl.VirtualTool, cfg: GatewayConfig) -> dict:
-        return await virtual_mod.resolve_tool(tool, cfg, ctx.registry)
+        return await virtual_mod.resolve_tool(tool, cfg, ctx.backend_runtime.proxies)
 
     def _hot_replace(cfg: GatewayConfig) -> None:
         server = ctx.hooks.get("virtual_server")
@@ -2877,7 +3025,7 @@ def _virtual_routes(ctx: _AdminCtx) -> list[Route]:  # noqa: PLR0915
             server,
             cfg,
             ctx.load,
-            ctx.registry,
+            ctx.backend_runtime.proxies,
             ctx.log,
             ctx.hooks.setdefault("virtual_status", {}),
         )
@@ -2984,7 +3132,9 @@ def _virtual_routes(ctx: _AdminCtx) -> list[Route]:  # noqa: PLR0915
                 update={"virtual_tools": [*cfg.virtual_tools, tool]}, deep=True
             )
             candidate = GatewayConfig.model_validate(candidate.model_dump())
-            virtual_mod.build_virtual_tool(tool, candidate, ctx.registry, ctx.log)
+            virtual_mod.build_virtual_tool(
+                tool, candidate, ctx.backend_runtime.proxies, ctx.log
+            )
         except Exception as exc:  # noqa: BLE001 - dry build
             return _err(str(exc))
         ctx.commit(candidate)
@@ -3016,7 +3166,9 @@ def _virtual_routes(ctx: _AdminCtx) -> list[Route]:  # noqa: PLR0915
             candidate = GatewayConfig.model_validate(
                 cfg.model_copy(update={"virtual_tools": tools}, deep=True).model_dump()
             )
-            virtual_mod.build_virtual_tool(tool, candidate, ctx.registry, ctx.log)
+            virtual_mod.build_virtual_tool(
+                tool, candidate, ctx.backend_runtime.proxies, ctx.log
+            )
         except Exception as exc:  # noqa: BLE001
             return _err(str(exc))
         ctx.commit(candidate)
@@ -3053,7 +3205,11 @@ def _virtual_routes(ctx: _AdminCtx) -> list[Route]:  # noqa: PLR0915
         started = time.perf_counter()
         try:
             result = await virtual_mod.run_virtual(
-                tool, payload.get("arguments") or {}, cfg, ctx.registry, ctx.log
+                tool,
+                payload.get("arguments") or {},
+                cfg,
+                ctx.backend_runtime.proxies,
+                ctx.log,
             )
             receipt = result.model_dump(mode="json", by_alias=True)
             status = {
@@ -3098,7 +3254,9 @@ def _virtual_routes(ctx: _AdminCtx) -> list[Route]:  # noqa: PLR0915
             active.router.egress_consent_fingerprint = fingerprint
         try:
             candidate = GatewayConfig.model_validate(candidate.model_dump())
-            virtual_mod.build_virtual_tool(active, candidate, ctx.registry, ctx.log)
+            virtual_mod.build_virtual_tool(
+                active, candidate, ctx.backend_runtime.proxies, ctx.log
+            )
         except Exception as exc:  # noqa: BLE001
             return _err(str(exc))
         # Full live resolution immediately above is stronger than the captured
@@ -3199,23 +3357,26 @@ def register(  # noqa: PLR0913 — public API; callers pass the lifespan plumbin
     app,
     config_path: str,
     log,
-    registry: dict,
-    holders: dict,
+    backend_runtime: runtime.BackendRuntime | dict,
+    holders: dict | None = None,
     hooks: dict | None = None,
 ) -> None:
     """Attach the admin UI + API routes to the parent Starlette *app*.
 
-    ``registry`` (backend name -> live proxy) and ``holders`` (backend name ->
-    [current transform]) are populated during the server lifespan and shared by
-    reference, so hot-reload targets the right backend's live proxy. ``hooks``
-    is likewise filled by the lifespan: ``hooks["add"]`` mounts a just-imported
-    backend live (#7) so an import needs no daemon restart.
+    ``backend_runtime`` is populated during the server lifespan and shared by
+    reference, so hot-reload targets the right backend proxy + transform holder.
+    The legacy ``registry, holders`` pair remains accepted for external callers.
+    ``hooks`` is likewise filled by the lifespan: ``hooks["add"]`` mounts a
+    just-imported backend live (#7) so an import needs no daemon restart.
     """
+    if not isinstance(backend_runtime, runtime.BackendRuntime):
+        if holders is None:
+            raise TypeError("legacy register() calls require transform holders")
+        backend_runtime = runtime.BackendRuntime.from_legacy(backend_runtime, holders)
     ctx = _AdminCtx(
         config_path=config_path,
         log=log,
-        registry=registry,
-        holders=holders,
+        backend_runtime=backend_runtime,
         hooks=hooks if hooks is not None else {},
     )
     app.router.routes.extend(
@@ -3225,6 +3386,7 @@ def register(  # noqa: PLR0913 — public API; callers pass the lifespan plumbin
             *_gateway_settings_routes(ctx),
             *_backend_routes(ctx),
             *_claude_routes(ctx),
+            *_codex_routes(ctx),
             *_virtual_routes(ctx),
             *_ops_routes(ctx),
         ]

@@ -30,7 +30,14 @@ import structlog
 import tomli_w
 from fastmcp.server.transforms import ToolTransform, Transform
 from fastmcp.tools.tool_transform import ArgTransformConfig, ToolTransformConfig
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import (
+    AnyHttpUrl,
+    BaseModel,
+    Field,
+    TypeAdapter,
+    field_validator,
+    model_validator,
+)
 
 from mcp_gateway import hooks as hooks_mod
 
@@ -41,6 +48,12 @@ DEFAULT_SECRETS_PATH = "~/.config/mcp-gateway/secrets.env"
 # #157: default post-mount refresh age gate — skip re-capturing a baseline
 # younger than 24h at mount time (see GatewayConfig.baseline_max_age).
 DEFAULT_BASELINE_MAX_AGE = 86_400
+
+# Bound each public ``tools/list`` response without changing the independent
+# per-backend topology.  FastMCP's proxy client fully consumes an upstream
+# catalog before applying gateway transforms; this value controls only the
+# gateway-to-client response pages.
+DOWNSTREAM_TOOLS_PAGE_SIZE = 50
 
 
 class ConfigError(RuntimeError):
@@ -739,6 +752,96 @@ def _is_loopback_host(host: str) -> bool:
         return False
 
 
+def _is_loopback_url(url: AnyHttpUrl) -> bool:
+    """Return whether an HTTP URL is explicitly local.
+
+    OAuth discovery may use plain HTTP for a loopback development issuer, but
+    production authorization-server and JWKS URLs must be HTTPS.  We never
+    resolve DNS here: hostnames that are not obvious loopback literals are
+    treated as remote and therefore require HTTPS.
+    """
+    host = url.host.strip("[]")
+    return _is_loopback_host(host)
+
+
+class OAuthConfig(BaseModel, extra="forbid"):
+    """JWT resource-server settings for the independent MCP endpoints.
+
+    The gateway is deliberately only a resource server.  Login, consent,
+    client registration, and token issuance remain the responsibility of the
+    configured authorization server; the gateway validates its access tokens
+    and publishes RFC 9728 protected-resource metadata.
+    """
+
+    public_base_url: AnyHttpUrl
+    authorization_servers: list[AnyHttpUrl] = Field(min_length=1)
+    issuer: str = Field(min_length=1)
+    jwks_uri: AnyHttpUrl
+    algorithm: Literal[
+        "RS256",
+        "RS384",
+        "RS512",
+        "ES256",
+        "ES384",
+        "ES512",
+        "PS256",
+        "PS384",
+        "PS512",
+    ] = "RS256"
+    required_scopes: list[str] = Field(
+        default_factory=lambda: ["mcp:access"], min_length=1
+    )
+    # OAuth protects MCP resources; the Admin API has a separate static token
+    # so an mcp:access token can never mutate gateway configuration.
+    admin_bearer_token: str | None = None
+
+    @model_validator(mode="after")
+    def _check_oauth_urls(self) -> OAuthConfig:
+        base = self.public_base_url
+        if base.path not in ("", "/") or base.query or base.fragment:
+            raise ConfigError(
+                "oauth.public_base_url must be an origin without a path, query, "
+                "or fragment"
+            )
+        try:
+            issuer_url = TypeAdapter(AnyHttpUrl).validate_python(self.issuer)
+        except ValueError as exc:
+            raise ConfigError("oauth.issuer must be a valid HTTP URL") from exc
+        urls = [*self.authorization_servers, self.jwks_uri, issuer_url]
+        for url in urls:
+            if url.scheme != "https" and not _is_loopback_url(url):
+                raise ConfigError(
+                    f"OAuth URL {url} must use https outside loopback development"
+                )
+        if base.scheme != "https" and not _is_loopback_url(base):
+            raise ConfigError(
+                "oauth.public_base_url must use https outside loopback development"
+            )
+        if issuer_url.scheme != "https" and not _is_loopback_url(issuer_url):
+            raise ConfigError(
+                "oauth.issuer must use https outside loopback development"
+            )
+        if len(set(self.required_scopes)) != len(self.required_scopes):
+            raise ConfigError("oauth.required_scopes must not contain duplicates")
+        if any(
+            not scope or any(char.isspace() for char in scope)
+            for scope in self.required_scopes
+        ):
+            raise ConfigError(
+                "oauth.required_scopes entries must be non-empty and contain no "
+                "whitespace"
+            )
+        if self.admin_bearer_token == "":
+            raise ConfigError("oauth.admin_bearer_token must not be empty")
+        if self.admin_bearer_token is not None and not _ENV_PATTERN.fullmatch(
+            self.admin_bearer_token.strip()
+        ):
+            raise ConfigError(
+                "oauth.admin_bearer_token must be a single ${ENV_VAR} reference"
+            )
+        return self
+
+
 class GatewayConfig(BaseModel, extra="forbid"):
     """Top-level gateway configuration."""
 
@@ -764,6 +867,10 @@ class GatewayConfig(BaseModel, extra="forbid"):
     # var fails loudly), not per request. /admin, /health and /ready stay open
     # (see server.BearerAuthMiddleware).
     bearer_token: str | None = None
+    # Optional OAuth 2.1 resource-server profile. Each independent backend
+    # endpoint and /virtual/mcp gets its own audience and RFC 9728 metadata.
+    # The legacy bearer_token and OAuth profile are mutually exclusive.
+    oauth: OAuthConfig | None = None
     backends: list[Backend] = Field(default_factory=list)
     virtual_tools: list[VirtualTool] = Field(default_factory=list)
 
@@ -783,6 +890,11 @@ class GatewayConfig(BaseModel, extra="forbid"):
         duplicate_ids = {value for value in backend_ids if backend_ids.count(value) > 1}
         if duplicate_ids:
             raise ConfigError(f"duplicate backend id(s): {sorted(duplicate_ids)}")
+        if self.bearer_token is not None and self.oauth is not None:
+            raise ConfigError(
+                "bearer_token and oauth are mutually exclusive; choose one "
+                "gateway authentication profile"
+            )
         virtual_names = [tool.name for tool in self.virtual_tools]
         duplicate_virtual = {
             name for name in virtual_names if virtual_names.count(name) > 1
@@ -800,11 +912,24 @@ class GatewayConfig(BaseModel, extra="forbid"):
                         f"backend id {member.backend_id!r}"
                     )
         # #18: a non-loopback bind exposes config writes and tool execution to
-        # the network, so it is refused outright without the bearer token.
-        if self.bearer_token is None and not _is_loopback_host(self.host):
+        # the network, so it is refused without static bearer or OAuth auth.
+        if (
+            self.bearer_token is None
+            and self.oauth is None
+            and not _is_loopback_host(self.host)
+        ):
             raise ConfigError(
                 f"host {self.host!r} is not loopback: binding beyond this "
-                f"machine requires bearer_token (see docs/security.md)"
+                f"machine requires bearer_token or oauth (see docs/security.md)"
+            )
+        if (
+            self.oauth is not None
+            and not _is_loopback_host(self.host)
+            and not self.oauth.admin_bearer_token
+        ):
+            raise ConfigError(
+                "a non-loopback OAuth deployment requires "
+                "oauth.admin_bearer_token to protect the Admin API"
             )
         return self
 
@@ -1446,6 +1571,21 @@ def to_raw(cfg: GatewayConfig) -> dict:  # noqa: PLR0915 — field-by-field TOML
         out["baseline_max_age"] = cfg.baseline_max_age
     if cfg.bearer_token is not None:  # default None — only persist when set (#26)
         out["bearer_token"] = cfg.bearer_token
+    if cfg.oauth is not None:
+        oauth = cfg.oauth
+        oauth_raw: dict[str, object] = {
+            "public_base_url": str(oauth.public_base_url).rstrip("/"),
+            "authorization_servers": [
+                str(url).rstrip("/") for url in oauth.authorization_servers
+            ],
+            "issuer": oauth.issuer,
+            "jwks_uri": str(oauth.jwks_uri),
+            "algorithm": oauth.algorithm,
+            "required_scopes": list(oauth.required_scopes),
+        }
+        if oauth.admin_bearer_token is not None:
+            oauth_raw["admin_bearer_token"] = oauth.admin_bearer_token
+        out["oauth"] = oauth_raw
     out["backends"] = [_backend(b) for b in cfg.backends]
     if cfg.virtual_tools:
         out["virtual_tools"] = [_virtual(tool) for tool in cfg.virtual_tools]

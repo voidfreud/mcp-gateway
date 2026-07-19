@@ -64,8 +64,8 @@ The **Import MCP** button adds a new backend. You give it a name and its
 connection details — a URL for a remote (HTTP) server, or a command for a local
 (stdio) one, plus any auth. The gateway connects to it, captures its original
 tool list and instructions as a baseline, and mounts it live at
-`/<name>/mcp`. Importing offers a checkbox to **register it in Claude Code** at
-the same time.
+`/<name>/mcp`. Importing offers separate checkboxes to register that independent
+endpoint in **Claude Code**, **Codex**, or both at the same time.
 
 Adding a backend rebuilds connections, so it writes config and restarts the
 daemon (Claude Code reconnects automatically).
@@ -92,6 +92,9 @@ backend-wide controls:
   A small chip next to the button shows whether the backend is currently
   **registered in Claude Code** (checked via the `claude` command and cached for
   a minute; the chip disappears if the command isn't installed).
+- **Add / Remove (in the Codex cluster).** Adds or removes this backend as its
+  own Codex MCP server, named `gateway-<name>`. The status comes from
+  `codex mcp list --json`; no aggregate gateway server is created.
 - **Warm session toggle.** Keeps one persistent connection to the backend open
   instead of reconnecting on every call — noticeably faster for remote
   backends (measured 2–4× on live probes). If the held connection ever dies,
@@ -144,6 +147,26 @@ hand, registering the endpoint as `gateway-<name>`.
 The `claude` command must be available to the daemon for this to work; if it is
 not, the button reports that clearly. You can always register by hand instead —
 see [operations.md](operations.md) and the README.
+
+### Registering in Codex
+
+The **Codex** control registers exactly the selected backend endpoint—never the
+whole gateway—by running:
+
+```bash
+codex mcp add gateway-<name> --url http://127.0.0.1:9100/<name>/mcp
+```
+
+When registered, the same control becomes **Remove** and runs `codex mcp
+remove gateway-<name>`. Codex stores these registrations globally for the local
+Codex host; it has no Claude-style local/user/project scope selector. Restart
+Codex or open a new task after changing registrations.
+
+For a bearer-protected gateway, `bearer_token` must be a single `${ENV_VAR}`
+reference. The gateway passes only that variable's name through Codex's
+`--bearer-token-env-var` option; it never writes the resolved token into Codex
+configuration. The environment variable must also be available to the Codex
+process itself, not only to the gateway daemon.
 
 ## Tool cards
 

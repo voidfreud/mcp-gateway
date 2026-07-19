@@ -1,0 +1,54 @@
+name: fastmcp compatibility canary
+
+# Production stays exact-pinned. This non-release lane discovers whether a
+# newer FastMCP still satisfies our explicit public and private API contracts.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  newest-fastmcp:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Resolve newest FastMCP in an isolated environment
+        id: candidate
+        run: |
+          candidate_dir="$(mktemp -d)"
+          cp pyproject.toml uv.lock README.md "$candidate_dir/"
+          python3 - "$candidate_dir/pyproject.toml" <<'PY'
+          from pathlib import Path
+          import sys
+
+          path = Path(sys.argv[1])
+          text = path.read_text()
+          text = text.replace('"fastmcp==3.4.4"', '"fastmcp>=3.4.4"', 1)
+          path.write_text(text)
+          PY
+          uv lock --project "$candidate_dir" --upgrade-package fastmcp
+          uv sync --project "$candidate_dir" --all-groups --no-install-project
+          version="$($candidate_dir/.venv/bin/python -c 'from importlib.metadata import version; print(version("fastmcp"))')"
+          echo "dir=$candidate_dir" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Resolved FastMCP $version"
+      - name: Skip when the pin is still newest
+        if: steps.candidate.outputs.version == '3.4.4'
+        run: echo "No newer FastMCP release; canary skipped."
+      - name: Run full compatibility gate against candidate
+        if: steps.candidate.outputs.version != '3.4.4'
+        env:
+          CANDIDATE_DIR: ${{ steps.candidate.outputs.dir }}
+          PYTHONPATH: ${{ github.workspace }}/src:${{ github.workspace }}
+        run: |
+          "$CANDIDATE_DIR/.venv/bin/python" -m pytest -q tests
+          "$CANDIDATE_DIR/.venv/bin/python" -c \
+            "import mcp_gateway.server, mcp_gateway.admin, mcp_gateway.config_loader; print('candidate imports OK')"

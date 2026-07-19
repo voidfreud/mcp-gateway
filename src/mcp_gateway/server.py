@@ -40,7 +40,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse
 from starlette.routing import Mount, Route
 
-from mcp_gateway import admin, config_loader, virtual_tools
+from mcp_gateway import admin, config_loader, oauth, runtime, virtual_tools
 
 
 def default_config_path() -> str:
@@ -339,15 +339,13 @@ class _AutoRefresh:
         interval: int,
         baseline_max_age: int,
         config_path: str,
-        registry: dict,
-        holders: dict,
+        backend_runtime: runtime.BackendRuntime,
         log,
     ) -> None:
         self.interval = interval
         self.baseline_max_age = baseline_max_age
         self._config_path = config_path
-        self._registry = registry
-        self._holders = holders
+        self._runtime = backend_runtime
         self._log = log
         self.shutdown = anyio.Event()
         self.send, self._recv = anyio.create_memory_object_stream(16)
@@ -359,8 +357,7 @@ class _AutoRefresh:
             await admin.refresh_and_reload(
                 b,
                 self._config_path,
-                self._registry,
-                self._holders,
+                self._runtime,
                 self._log,
                 throttle=admin.REFRESH_THROTTLE if throttle is None else throttle,
                 max_age=max_age,
@@ -390,7 +387,7 @@ class _AutoRefresh:
                 return
             live = config_loader.load(self._config_path)
             for b in live.backends:
-                if b.enabled and b.name in self._registry:
+                if b.enabled and b.name in self._runtime.proxies:
                     await self.refresh(b)
 
     def close(self) -> None:
@@ -453,9 +450,16 @@ class BearerAuthMiddleware:
 
     EXEMPT_PREFIXES = ("/health", "/ready")
 
-    def __init__(self, app, *, token: str | None):
+    def __init__(
+        self,
+        app,
+        *,
+        token: str | None,
+        protected_prefixes: tuple[str, ...] | None = None,
+    ):
         self.app = app
         self._expected = f"Bearer {token}".encode() if token else None
+        self._protected_prefixes = protected_prefixes
 
     async def __call__(self, scope, receive, send):
         path = scope.get("path", "")
@@ -465,6 +469,10 @@ class BearerAuthMiddleware:
             or path.startswith(self.EXEMPT_PREFIXES)
             # the UI shell only — it carries no data and prompts for the token
             or (path == "/admin" and scope.get("method") == "GET")
+            or (
+                self._protected_prefixes is not None
+                and not path.startswith(self._protected_prefixes)
+            )
         ):
             await self.app(scope, receive, send)
             return
@@ -510,10 +518,18 @@ class OriginGuardMiddleware:
     API, even /health (a rebinding page has no business probing liveness).
     """
 
-    def __init__(self, app, *, host: str, port: int):
+    def __init__(
+        self,
+        app,
+        *,
+        host: str,
+        port: int,
+        extra_origins: tuple[str, ...] = (),
+    ):
         self.app = app
         hosts = {host, "127.0.0.1", "localhost", "[::1]"}
         self._allowed = {f"http://{h}:{port}".encode() for h in hosts}
+        self._allowed.update(origin.rstrip("/").encode() for origin in extra_origins)
 
     async def __call__(self, scope, receive, send):
         if scope["type"] == "http":
@@ -570,15 +586,21 @@ def _reconcile(index: dict[str, str], known_tools, log) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _unmount(app: Starlette, name: str, registry: dict, holders: dict) -> None:
+def _unmount(
+    app: Starlette,
+    name: str,
+    backend_runtime: runtime.BackendRuntime,
+    oauth_runtime: oauth.OAuthRuntime | None = None,
+) -> None:
     """Remove a backend's live mount — its Mount route plus registry + holder
     entries (#78). Runs from the backend's OWN runner as it unwinds (so a later
     re-enable / hot-add can cleanly re-append the route)."""
-    registry.pop(name, None)
-    holders.pop(name, None)
+    backend_runtime.unmount(name)
     app.router.routes[:] = [
         r for r in app.router.routes if getattr(r, "path", None) != f"/{name}"
     ]
+    if oauth_runtime is not None:
+        oauth_runtime.detach_metadata(app, name)
 
 
 def _suppress_list_changed(proxy) -> None:
@@ -614,14 +636,14 @@ async def _mount_backend(  # noqa: PLR0913 — the mount needs the full lifespan
     stack: AsyncExitStack,
     b: config_loader.Backend,
     cfg: config_loader.GatewayConfig,
-    all_tools: dict[str, list[str]],
-    captured_meta: dict[str, dict[str, dict]],
-    captured_instr: dict[str, str | None],
-    registry: dict,
-    holders: dict,
+    all_tools: runtime.CapturedTools,
+    captured_meta: runtime.CapturedMeta,
+    captured_instr: runtime.CapturedInstructions,
+    backend_runtime: runtime.BackendRuntime,
     log,
     message_handler: MessageHandler | None = None,
     on_session_death=None,
+    oauth_runtime: oauth.OAuthRuntime | None = None,
 ) -> bool:
     """Build ONE backend's proxy, apply its transforms + instructions, run its
     http lifespan, and mount it at ``/<backend>/mcp``. Returns True on success.
@@ -642,6 +664,13 @@ async def _mount_backend(  # noqa: PLR0913 — the mount needs the full lifespan
     """
     name = f"mcp-gateway-{b.name}"
     try:
+        auth_provider = oauth_runtime.provider(b.name) if oauth_runtime else None
+        proxy_settings = {
+            "name": name,
+            "list_page_size": config_loader.DOWNSTREAM_TOOLS_PAGE_SIZE,
+        }
+        if auth_provider is not None:
+            proxy_settings["auth"] = auth_provider
         if not b.stateless:
             # Warm: one connected client reused for every call (issues #8/#9).
             client = await stack.enter_async_context(
@@ -650,9 +679,9 @@ async def _mount_backend(  # noqa: PLR0913 — the mount needs the full lifespan
                     message_handler=message_handler,
                 )
             )
-            proxy = create_proxy(client, name=name)
+            proxy = create_proxy(client, **proxy_settings)
         else:
-            proxy = create_proxy(config_loader.to_proxy_config_one(b), name=name)
+            proxy = create_proxy(config_loader.to_proxy_config_one(b), **proxy_settings)
 
         _suppress_list_changed(proxy)  # #90
         proxy.add_middleware(CallLogMiddleware(log, b.name, on_session_death))
@@ -678,9 +707,10 @@ async def _mount_backend(  # noqa: PLR0913 — the mount needs the full lifespan
         # session-manager lifespan ourselves; it stays open for the daemon.
         await stack.enter_async_context(sub.lifespan(sub))
         app.router.routes.append(Mount(f"/{b.name}", app=sub))
+        if oauth_runtime is not None and auth_provider is not None:
+            oauth_runtime.attach_metadata(app, b.name, auth_provider)
 
-        registry[b.name] = proxy
-        holders[b.name] = holder
+        backend_runtime.mount(b.name, proxy, holder)
         log.info(
             "backend_mounted",
             backend=b.name,
@@ -703,9 +733,9 @@ async def _mount_backend(  # noqa: PLR0913 — the mount needs the full lifespan
 def _build_app(  # noqa: PLR0913, PLR0915 — composition root; takes what it wires, and its lifespan owns the per-runner anyio scope rules (splitting would scatter them)
     cfg: config_loader.GatewayConfig,
     log,
-    all_tools: dict,
-    captured_meta: dict,
-    captured_instr: dict,
+    all_tools: runtime.CapturedTools,
+    captured_meta: runtime.CapturedMeta,
+    captured_instr: runtime.CapturedInstructions,
     config_path: str = CONFIG_PATH,
 ) -> Starlette:
     """Assemble the parent Starlette app: /health, admin, and a lifespan that
@@ -725,14 +755,24 @@ def _build_app(  # noqa: PLR0913, PLR0915 — composition root; takes what it wi
     """
     # #26: resolve the optional gateway bearer token ONCE at build time — a
     # missing ${ENV} ref must fail loudly at startup (expand_env raises
-    # ConfigError), never surface per request.
-    bearer_token = (
-        config_loader.expand_env(cfg.bearer_token) if cfg.bearer_token else None
-    )
+    # ConfigError), never surface per request. In OAuth mode this token is only
+    # for the Admin API; FastMCP owns authentication for every MCP endpoint.
+    oauth_runtime = oauth.OAuthRuntime(cfg.oauth) if cfg.oauth is not None else None
+    if cfg.oauth is not None:
+        bearer_token = (
+            config_loader.expand_env(cfg.oauth.admin_bearer_token)
+            if cfg.oauth.admin_bearer_token
+            else None
+        )
+        bearer_prefixes = ("/admin/api",)
+    else:
+        bearer_token = (
+            config_loader.expand_env(cfg.bearer_token) if cfg.bearer_token else None
+        )
+        bearer_prefixes = None
     # Populated in the lifespan; the admin closes over both (by reference) so its
     # hot-reload can target the right backend's live proxy + transform holder.
-    registry: dict = {}
-    holders: dict = {}
+    backend_runtime = runtime.BackendRuntime()
     hooks: dict = {}  # lifespan installs hooks["add"] (hot-add) for the admin
 
     @asynccontextmanager
@@ -748,8 +788,7 @@ def _build_app(  # noqa: PLR0913, PLR0915 — composition root; takes what it wi
             cfg.introspect_interval,
             cfg.baseline_max_age,
             config_path,
-            registry,
-            holders,
+            backend_runtime,
             log,
         )
         # #161: recycle requests (backend name) enqueued from arbitrary tasks —
@@ -800,11 +839,11 @@ def _build_app(  # noqa: PLR0913, PLR0915 — composition root; takes what it wi
                         all_tools_,
                         meta_,
                         captured_,
-                        registry,
-                        holders,
+                        backend_runtime,
                         log,
                         handler,
                         on_death,
+                        oauth_runtime,
                     )
                     task_status.started(ok)
                     if ok:
@@ -818,7 +857,7 @@ def _build_app(  # noqa: PLR0913, PLR0915 — composition root; takes what it wi
                         await ev.wait()
             finally:
                 stops.pop(b.name, None)
-                _unmount(app, b.name, registry, holders)
+                _unmount(app, b.name, backend_runtime, oauth_runtime)
 
         async def virtual_runner():
             """Own the permanent gateway-authored ``/virtual/mcp`` endpoint.
@@ -833,18 +872,35 @@ def _build_app(  # noqa: PLR0913, PLR0915 — composition root; takes what it wi
             try:
                 async with AsyncExitStack() as stack:
                     try:
+                        virtual_auth = (
+                            oauth_runtime.provider(virtual_tools.VIRTUAL_ROUTE)
+                            if oauth_runtime is not None
+                            else None
+                        )
                         server = virtual_tools.build_virtual_server(
                             cfg,
                             lambda: config_loader.load(config_path),
-                            registry,
+                            backend_runtime.proxies,
                             log,
                             hooks.setdefault("virtual_status", {}),
+                            auth=virtual_auth,
                         )
+                        # Virtual Tools hot-swap their provider map from Admin
+                        # routes but cannot yet broadcast to every connected
+                        # downstream session. Keep the negotiated capability
+                        # truthful until a server-wide session registry exists.
+                        _suppress_list_changed(server)
                         sub = server.http_app(path="/mcp")
                         await stack.enter_async_context(sub.lifespan(sub))
                         app.router.routes.append(
                             Mount(f"/{virtual_tools.VIRTUAL_ROUTE}", app=sub)
                         )
+                        if oauth_runtime is not None:
+                            oauth_runtime.attach_metadata(
+                                app,
+                                virtual_tools.VIRTUAL_ROUTE,
+                                virtual_auth,
+                            )
                         hooks["virtual_server"] = server
                         log.info(
                             "virtual_tools_mounted",
@@ -866,6 +922,8 @@ def _build_app(  # noqa: PLR0913, PLR0915 — composition root; takes what it wi
                     for route in app.router.routes
                     if getattr(route, "path", None) != f"/{virtual_tools.VIRTUAL_ROUTE}"
                 ]
+                if oauth_runtime is not None:
+                    oauth_runtime.detach_metadata(app, virtual_tools.VIRTUAL_ROUTE)
 
         async def hot_recycle(name: str) -> None:
             """Tear a warm backend's runner down like hot_remove AND immediately
@@ -986,13 +1044,13 @@ def _build_app(  # noqa: PLR0913, PLR0915 — composition root; takes what it wi
         # `registry` is populated by the runners as each backend connects.
         live = config_loader.load(config_path)
         want = [b.name for b in live.backends if b.enabled]
-        missing = [n for n in want if n not in registry]
+        missing = [n for n in want if n not in backend_runtime.proxies]
         virtual_ready = "virtual_server" in hooks
         ready = not missing and virtual_ready
         return JSONResponse(
             {
                 "ready": ready,
-                "mounted": sorted(registry),
+                "mounted": sorted(backend_runtime.proxies),
                 "enabled": want,
                 "missing": missing,
                 "virtual": {
@@ -1014,12 +1072,23 @@ def _build_app(  # noqa: PLR0913, PLR0915 — composition root; takes what it wi
         middleware=[
             # Origin guard FIRST — a rebinding page's request dies before any
             # body buffering or auth work (MCP spec MUST).
-            StarletteMiddleware(OriginGuardMiddleware, host=cfg.host, port=cfg.port),
+            StarletteMiddleware(
+                OriginGuardMiddleware,
+                host=cfg.host,
+                port=cfg.port,
+                extra_origins=(
+                    oauth_runtime.allowed_origins if oauth_runtime is not None else ()
+                ),
+            ),
             StarletteMiddleware(BodyLimitMiddleware, max_bytes=ADMIN_BODY_LIMIT),
-            StarletteMiddleware(BearerAuthMiddleware, token=bearer_token),
+            StarletteMiddleware(
+                BearerAuthMiddleware,
+                token=bearer_token,
+                protected_prefixes=bearer_prefixes,
+            ),
         ],
     )
-    admin.register(parent, config_path, log, registry, holders, hooks)
+    admin.register(parent, config_path, log, backend_runtime, hooks=hooks)
     return parent
 
 

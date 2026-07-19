@@ -8,6 +8,32 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Typed live-runtime ownership and a smaller Admin facade** — backend proxies
+  and their transform holders now move together through `BackendRuntime`, while
+  snapshot inputs and Virtual Tool proxy lookup have explicit narrow types. The
+  per-backend Codex registration routes moved into a typed route module; the
+  existing `admin.py` API remains a compatibility facade with the same cache,
+  monkeypatch, response, and hot-reload behavior.
+
+- **Bounded MCP catalogs and structured Virtual Tool results** — every backend
+  and `/virtual/mcp` now serves its transformed `tools/list` catalog in
+  50-tool pages with gateway-owned opaque cursors, after fully consuming any
+  upstream pagination. Virtual Tools advertise a stable JSON Schema 2020-12
+  output envelope and preserve each member's upstream `_meta` inside that
+  member record under the existing strict serialized-result budget.
+
+- Exact-pin FastMCP 3.4.4 and add explicit compatibility tripwires for every
+  private runtime seam used by proxy hot reload, capability suppression, and
+  virtual-tool catalog replacement. CI and releases now install strictly from
+  the lock; a separate daily canary runs the full gate against the newest
+  FastMCP without weakening the production pin.
+
+- **Truthful Virtual Tools capabilities** — `/virtual/mcp` now advertises
+  `tools.listChanged=false` (along with resources/prompts) because its Admin
+  hot swaps do not yet have a server-wide downstream-session broadcast API.
+  Explicit `tools/list` immediately observes every committed swap; clients are
+  no longer promised a notification the gateway cannot deliver.
+
 - **Admin UI visual revamp** (#170) — the single-file admin page got a
   deliberate design pass: a light theme (follows `prefers-color-scheme`, dark
   stays the base), inline-SVG iconography replacing the mixed emoji/text
@@ -25,6 +51,28 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `docs/img/` and the README.
 
 ### Added
+
+- **MCP OAuth resource-server mode** — each independent backend endpoint and
+  `/virtual/mcp` can validate JWT access tokens from an external authorization
+  server, publish RFC 9728 protected-resource metadata, bind tokens to the
+  endpoint audience, and return MCP-compliant 401/403 scope challenges. Remote
+  deployments require a separate Admin bearer token; legacy `bearer_token`
+  mode remains unchanged.
+
+- **MCP protocol contract CI** — every PR now drives raw Streamable HTTP and
+  JSON-RPC messages through isolated stateful/stateless backends, Virtual Tools,
+  and the real independent gateway mounts, then runs a pinned official MCP
+  conformance smoke subset for stable protocol `2025-11-25`. Receipts are
+  retained as CI artifacts; no installed daemon, user backend, secret, or
+  aggregate `/mcp` endpoint is involved.
+
+- **One-click Codex registration** — every backend remains an independent MCP
+  and now has its own Codex status plus **Add/Remove** control in the Admin UI.
+  Import and hard-rename can update Codex explicitly; backend removal performs
+  best-effort cleanup. The integration uses `codex mcp add/remove/list --json`,
+  detects ChatGPT desktop's bundled CLI, and passes bearer authentication only
+  as an environment-variable name—never a resolved secret. Codex must be
+  restarted or a new task opened after registration changes.
 
 - **First-class Virtual Tools** — the Admin UI now has a separate Virtual
   Tools catalog for composing and routing live backend tools behind one
