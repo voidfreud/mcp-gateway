@@ -38,6 +38,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **MCP protocol contract CI** — every PR now drives raw Streamable HTTP and
+  JSON-RPC messages through isolated stateful/stateless backends, Virtual Tools,
+  and the real independent gateway mounts, then runs a pinned official MCP
+  conformance smoke subset for stable protocol `2025-11-25`. Receipts are
+  retained as CI artifacts; no installed daemon, user backend, secret, or
+  aggregate `/mcp` endpoint is involved.
+
 - **One-click Codex registration** — every backend remains an independent MCP
   and now has its own Codex status plus **Add/Remove** control in the Admin UI.
   Import and hard-rename can update Codex explicitly; backend removal performs

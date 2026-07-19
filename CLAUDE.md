@@ -67,8 +67,11 @@ layout, console script `mcp-gateway`). MIT; distributed via
   (auto-seeded).
 - Login service: `just install` (idempotent; re-run after moving the repo).
 - Gate: `just check` = ruff lint+format, pytest, import smoke. CI runs it on
-  every PR/push (cached, ~30s) + wheel-integrity check; pushing a `v*` tag
-  releases with the wheel attached.
+  every PR/push (cached, ~30s) + wheel-integrity check. A separate hermetic
+  `mcp-contract` job runs `tests/live/run_mcp_wire.py` and the pinned official
+  MCP 2025-11-25 smoke subset; it uses disposable fixtures, never personal
+  backends or the installed daemon. Pushing a `v*` tag releases with the wheel
+  attached.
 - Live receipts: `uv run verify_rename.py http://127.0.0.1:9100` (46 checks:
   bare names, budgets, passthrough, status, injection, bearer).
   `/health` names the daemon's resolved code path — if it isn't this repo,
