@@ -46,6 +46,11 @@ jobs:
               assert any(n.endswith(want) for n in names), f"{want} missing from {whl}"
           print("wheel carries its data files")
           EOF
+      - name: Install wheel in a clean environment
+        run: |
+          python3 -m venv "$RUNNER_TEMP/mcp-gateway-wheel-venv"
+          "$RUNNER_TEMP/mcp-gateway-wheel-venv/bin/python" -m pip install --no-deps dist/*.whl
+          "$RUNNER_TEMP/mcp-gateway-wheel-venv/bin/python" -m mcp_gateway --version
 
   mcp-contract:
     runs-on: ubuntu-latest

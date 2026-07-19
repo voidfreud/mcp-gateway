@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "mcp-gateway"
 version = "1.0.0"
-description = "Local MCP proxy that rewrites every broadcast text a backend MCP shows Claude Code"
+description = "Independent MCP gateway with per-backend proxy and virtual-tool endpoints"
 readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"

@@ -14,8 +14,6 @@ so those write config and restart the daemon.
 from __future__ import annotations
 
 import asyncio
-import functools
-import importlib.metadata
 import json
 import os
 import re
@@ -45,6 +43,7 @@ from mcp_gateway.config_loader import (
     ResourceOverride,
     ToolOverride,
 )
+from mcp_gateway.metadata import gateway_version
 
 STATE_DIR = Path("~/.local/state/mcp-gateway").expanduser()
 DEFAULTS_DIR = STATE_DIR / "defaults"
@@ -71,29 +70,6 @@ STATUS_TIMEOUT = 5.0
 # only — resets on restart, which is exactly right: a fresh daemon means fresh
 # backend connections, whose baselines should re-capture once.
 _last_refresh: dict[str, float] = {}
-
-
-@functools.cache
-def gateway_version() -> str:
-    """The gateway's own version, from a single source (package metadata, else
-    the ``version = "..."`` line in pyproject.toml). Surfaced in the admin UI and
-    ``/health`` so the running build is visible after a restart/upgrade (#57).
-
-    Cached: the version is constant for a process, so we don't re-read pyproject
-    on every /health and /admin/api/state request (#79)."""
-    try:
-        return importlib.metadata.version("mcp-gateway")
-    except importlib.metadata.PackageNotFoundError:
-        pass
-    try:
-        # repo checkout fallback: pyproject sits at the repo root (src layout)
-        text = (HERE.parents[1] / "pyproject.toml").read_text(encoding="utf-8")
-        m = re.search(r'(?m)^version\s*=\s*"([^"]+)"', text)
-        if m:
-            return m.group(1)
-    except OSError:
-        pass
-    return "unknown"
 
 
 # ---------------------------------------------------------------------------
