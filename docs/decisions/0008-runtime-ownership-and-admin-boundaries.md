@@ -1,6 +1,12 @@
-# 8. Typed runtime ownership and incremental Admin module boundaries
+# ADR-0008: Typed runtime ownership and incremental Admin module boundaries
 
-**Status:** accepted
+**Status:** Accepted
+
+**Decision date:** 2026-07-19
+
+**Deciding issue / PR:** [#221](https://github.com/voidfreud/mcp-gateway/issues/221)
+(retroactive ratification); implemented in
+[`b3d61517`](https://github.com/voidfreud/mcp-gateway/commit/b3d615171dd33709999ad698e129389e48589761)
 
 ## Context
 
@@ -42,5 +48,5 @@ a useful boundary.
 - Virtual Tools can look up proxies but cannot mutate lifecycle ownership.
 - Route modules can be extracted incrementally without circular imports or a
   flag-day rewrite of the Admin API.
-- The heterogeneous lifecycle/Virtual Tools hooks dictionary remains a later
-  typed-boundary slice; it is deliberately outside this change.
+- The heterogeneous lifecycle/Virtual Tools hooks dictionary is deliberately
+  outside this decision.

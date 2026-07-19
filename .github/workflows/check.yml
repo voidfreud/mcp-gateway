@@ -1,8 +1,8 @@
 name: check
 
-# ADR-0003: check-only CI. Runs the pure-logic gate (`just check`) on PRs and
-# main — zero backends, zero launchd, no secrets. The live gate (`just verify`)
-# stays local by design (ADR-0001, as amended).
+# ADR-0003 defines the hermetic CI/local-live split; ADR-0006 adds raw-wire and
+# official-conformance checks using disposable fixtures. `just verify` remains
+# local because it exercises the installed daemon and configured backends.
 on:
   pull_request:
   push:

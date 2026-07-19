@@ -1,0 +1,48 @@
+name: Decision proposal
+description: Discuss a proposed product, architecture, or operational decision.
+title: "Decision: "
+labels:
+  - decision
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this issue to discuss a decision before it is accepted. Do not include credentials, tokens, personal paths, or live-service data.
+  - type: textarea
+    id: problem_context
+    attributes:
+      label: Problem and context
+      description: What decision is needed, and why now?
+    validations:
+      required: true
+  - type: textarea
+    id: proposed_decision
+    attributes:
+      label: Proposed decision
+      description: State the proposed direction and its boundaries.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Include the status quo and why it is not preferred.
+    validations:
+      required: true
+  - type: textarea
+    id: impact_risks
+    attributes:
+      label: Impact and risks
+      description: Describe user, compatibility, operational, security, and maintenance effects.
+    validations:
+      required: true
+  - type: textarea
+    id: validation_migration
+    attributes:
+      label: Validation and migration
+      description: How will the decision be tested, rolled out, or reversed?
+  - type: textarea
+    id: deferral_non_goals
+    attributes:
+      label: Deferral and non-goals
+      description: Record intentionally deferred work and out-of-scope concerns. Create or link follow-up Issues where needed.

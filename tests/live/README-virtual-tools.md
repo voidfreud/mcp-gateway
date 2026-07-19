@@ -1,6 +1,6 @@
 # Virtual Tools black-box acceptance harness
 
-Run the ADR-0005 contract harness explicitly:
+Run the [ADR-0005](../../docs/decisions/0005-virtual-tools.md) contract harness explicitly:
 
 ```sh
 uv run python tests/live/run_virtual_tools.py --keep

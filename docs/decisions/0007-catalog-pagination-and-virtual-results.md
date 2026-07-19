@@ -1,6 +1,14 @@
-# 7. Gateway-owned catalog pagination and Virtual Tool result schemas
+# ADR-0007: Gateway-owned catalog pagination and Virtual Tool result schemas
 
-**Status:** accepted
+**Status:** Accepted
+
+**Decision date:** 2026-07-19
+
+**Deciding issue / PR:** [#220](https://github.com/voidfreud/mcp-gateway/issues/220)
+(retroactive ratification); implemented in
+[`5f23be0d`](https://github.com/voidfreud/mcp-gateway/commit/5f23be0d47a4aee86b0c06d1601500cb37b1bd99)
+
+**Refines:** [ADR-0005](0005-virtual-tools.md)
 
 ## Context
 
@@ -23,7 +31,6 @@ for schema- and metadata-aware clients.
   public catalog at 50 tools per response. `nextCursor` values are opaque and
   owned by the gateway/FastMCP boundary; source cursors are never exposed.
 - The page size is one internal compatibility constant, not a user setting.
-  It can become configurable if real client or payload measurements justify it.
 - Virtual Tools advertise a JSON Schema 2020-12 envelope covering their stable
   top-level result fields. Arbitrary member structured results and metadata
   remain permissive because the gateway cannot safely constrain third-party

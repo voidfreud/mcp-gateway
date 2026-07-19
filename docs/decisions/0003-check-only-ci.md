@@ -1,8 +1,13 @@
-# 3. Check-only CI
+# ADR-0003: Check-only CI and a local live gate
 
-Status: Accepted (2026-07-03) — issue
-[#98](https://github.com/voidfreud/mcp-gateway/issues/98). Amends
-[ADR-0001](0001-no-github-ci.md).
+**Status:** Accepted
+
+**Decision date:** 2026-07-03
+
+**Deciding issue / PR:** [#98](https://github.com/voidfreud/mcp-gateway/issues/98)
+and [#144](https://github.com/voidfreud/mcp-gateway/pull/144)
+
+**Supersedes:** [ADR-0001](0001-no-github-ci.md)
 
 ## Context
 
@@ -29,8 +34,14 @@ daemon and real backends.
 - Cheap: seconds of runtime, no secrets, no backends, no self-hosted anything.
 - Coverage is partial by design: live per-endpoint behavior is still verified
   only locally via `just verify`. Accepted.
-- ADR-0001's "no CI" scope is narrowed to the live gate; see its amendment
-  note.
+- ADR-0001 is superseded for hermetic checks. Its local-infrastructure boundary
+  remains: the live gate is not run in hosted CI.
+
+## Relationship to later CI decisions
+
+[ADR-0006](0006-hermetic-mcp-contract-ci.md) extends the hermetic CI surface
+with disposable MCP protocol receipts. It does not move the configured-daemon
+and live-backend `just verify` gate into CI.
 
 ## Alternatives considered
 

@@ -1,6 +1,14 @@
-# 6. Hermetic MCP protocol contract CI
+# ADR-0006: Hermetic MCP protocol contract CI
 
-**Status:** accepted
+**Status:** Accepted
+
+**Decision date:** 2026-07-19
+
+**Deciding issue / PR:** [#219](https://github.com/voidfreud/mcp-gateway/issues/219)
+(retroactive ratification); implemented in
+[`08c9e123`](https://github.com/voidfreud/mcp-gateway/commit/08c9e123ee3ff5b68e1eea3e189d07d2e801e68f)
+
+**Refines:** [ADR-0003](0003-check-only-ci.md)
 
 ## Context
 

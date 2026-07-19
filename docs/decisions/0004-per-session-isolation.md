@@ -1,7 +1,11 @@
-# 4. Per-session isolation is a per-backend lever, not a gateway mode
+# ADR-0004: Per-session isolation is a per-backend lever, not a gateway mode
 
-Status: Accepted (2026-07-14) — issue
-[#25](https://github.com/voidfreud/mcp-gateway/issues/25)
+**Status:** Accepted
+
+**Decision date:** 2026-07-14
+
+**Deciding issue / PR:** [#25](https://github.com/voidfreud/mcp-gateway/issues/25)
+and [#172](https://github.com/voidfreud/mcp-gateway/pull/172)
 
 ## Context
 
@@ -35,8 +39,9 @@ mixes no user state, and the INFO line is noise.
 
 - If a backend is ever added that forwards caller-supplied auth, the rule is:
   set `stateless = true` for that backend. No code change is needed — the
-  lever already exists (#161 gave warm backends recycle-on-death; stateless
-  backends never needed it).
+  lever already exists. [#161](https://github.com/voidfreud/mcp-gateway/issues/161)
+  was supporting implementation work for warm-backend recycle-on-death;
+  stateless backends never needed it.
 - The gateway itself never forwards incoming `Authorization` headers to
   backends; its optional bearer token gates access to the gateway and is
   consumed there, which keeps the warm default safe.
