@@ -924,6 +924,57 @@ def test_introspect_interval_rejects_negative():
         )
 
 
+# --- structured logging knobs ------------------------------------------------
+
+
+def test_logging_defaults_are_bounded_and_omitted_from_minimal_toml():
+    cfg = cl.GatewayConfig.model_validate(
+        {"backends": [{"name": "b", "transport": "stdio", "command": "/bin/x"}]}
+    )
+    assert cfg.log_level == "INFO"
+    assert cfg.log_max_bytes == 5 * 1024 * 1024
+    assert cfg.log_backup_count == 5
+    raw = cl.to_raw(cfg)
+    assert "log_level" not in raw
+    assert "log_max_bytes" not in raw
+    assert "log_backup_count" not in raw
+
+
+def test_logging_settings_roundtrip():
+    cfg = cl.GatewayConfig.model_validate(
+        {
+            "log_level": "DEBUG",
+            "log_max_bytes": 131072,
+            "log_backup_count": 2,
+            "backends": [{"name": "b", "transport": "stdio", "command": "/bin/x"}],
+        }
+    )
+    reparsed = cl.GatewayConfig.model_validate(tomllib.loads(cl.dump_toml(cfg)))
+    assert reparsed.log_level == "DEBUG"
+    assert reparsed.log_max_bytes == 131072
+    assert reparsed.log_backup_count == 2
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("log_level", "verbose"),
+        ("log_max_bytes", 1024),
+        ("log_backup_count", 0),
+    ],
+)
+def test_logging_settings_reject_invalid_values(key, value):
+    import pydantic
+
+    with pytest.raises((cl.ConfigError, pydantic.ValidationError)):
+        cl.GatewayConfig.model_validate(
+            {
+                key: value,
+                "backends": [{"name": "b", "transport": "stdio", "command": "/bin/x"}],
+            }
+        )
+
+
 # --- #157: baseline_max_age knob ----------------------------------------------
 
 

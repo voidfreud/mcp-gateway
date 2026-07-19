@@ -40,6 +40,7 @@ from pydantic import (
 )
 
 from mcp_gateway import hooks as hooks_mod
+from mcp_gateway import logging_setup
 
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
@@ -848,6 +849,18 @@ class GatewayConfig(BaseModel, extra="forbid"):
     host: str = "127.0.0.1"
     port: int = 9100
     log_file: str = "~/.local/state/mcp-gateway/gateway.log"
+    # Structured event verbosity. INFO preserves the gateway's lifecycle and
+    # tool-call events; DEBUG also enables routine framework/library chatter.
+    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = (
+        logging_setup.DEFAULT_LOG_LEVEL
+    )
+    # Disk retention cap: one active file plus this many rotated backups.
+    log_max_bytes: int = Field(
+        default=logging_setup.DEFAULT_LOG_MAX_BYTES, ge=64 * 1024, le=1024 * 1024 * 1024
+    )
+    log_backup_count: int = Field(
+        default=logging_setup.DEFAULT_LOG_BACKUP_COUNT, ge=1, le=100
+    )
     # #43: scheduled re-introspection interval in seconds. OFF by default (0) —
     # the event-driven triggers (post-mount refresh, tools/list_changed, admin
     # page load) cover everything but a long-lived remote backend that hot-swaps
@@ -1565,6 +1578,12 @@ def to_raw(cfg: GatewayConfig) -> dict:  # noqa: PLR0915 — field-by-field TOML
         "port": cfg.port,
         "log_file": cfg.log_file,
     }
+    if cfg.log_level != logging_setup.DEFAULT_LOG_LEVEL:
+        out["log_level"] = cfg.log_level
+    if cfg.log_max_bytes != logging_setup.DEFAULT_LOG_MAX_BYTES:
+        out["log_max_bytes"] = cfg.log_max_bytes
+    if cfg.log_backup_count != logging_setup.DEFAULT_LOG_BACKUP_COUNT:
+        out["log_backup_count"] = cfg.log_backup_count
     if cfg.introspect_interval:  # default 0 (off) — only persist when set (#43)
         out["introspect_interval"] = cfg.introspect_interval
     if cfg.baseline_max_age != DEFAULT_BASELINE_MAX_AGE:  # persist non-default (#157)

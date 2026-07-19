@@ -8,6 +8,11 @@ host = "127.0.0.1"          # loopback by default. A non-loopback bind (e.g. a
                             # the config refuses to load (docs/security.md).
 port = 9100
 log_file = "~/.local/state/mcp-gateway/gateway.log"
+# Structured event verbosity: DEBUG, INFO, WARNING, ERROR, or CRITICAL.
+# log_level = "INFO"
+# Retention cap: one active file plus this many rotated backups.
+# log_max_bytes = 5242880 # 5 MiB
+# log_backup_count = 5
 # introspect_interval = 900 # seconds between scheduled re-captures of every
 #                           # backend's tool list. 0 / absent = OFF (default):
 #                           # the event-driven refreshes — post-(re)connect,

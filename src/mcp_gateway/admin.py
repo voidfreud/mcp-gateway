@@ -34,11 +34,13 @@ from mcp_gateway import (
     admin_routes_backend,
     admin_routes_claude,
     admin_routes_codex,
+    admin_routes_logs,
     admin_routes_ops,
     admin_routes_settings,
     admin_routes_virtual,
     claude_client,
     codex_client,
+    logging_setup,
     runtime,
 )
 from mcp_gateway import config_loader as cl
@@ -805,6 +807,9 @@ def build_state(cfg: GatewayConfig) -> dict:
         # bearer_token is the ${ENV} REF as stored — never the resolved secret.
         "bearer_token": cfg.bearer_token,
         "introspect_interval": cfg.introspect_interval,
+        "log_level": cfg.log_level,
+        "log_max_bytes": cfg.log_max_bytes,
+        "log_backup_count": cfg.log_backup_count,
         "auth_mode": (
             "oauth_jwt"
             if cfg.oauth is not None
@@ -1822,11 +1827,30 @@ class _AdminCtx:
         """The shared tail of every mutating handler: backup, atomic save, then
         hot-reload each named backend that is currently mounted (hot_reload
         itself skips unmounted ones with a warning)."""
+        before: dict | None = None
+        try:
+            before = cl.to_raw(cl.load(self.config_path))
+        except Exception:  # noqa: BLE001 - the save path remains authoritative
+            pass
         GatewayConfig.model_validate(cfg.model_dump())
         if validate_virtual_refs:
             _validate_active_virtual_references(cfg)
         backup_config(self.config_path)
         cl.save(cfg, self.config_path)
+        after = cl.to_raw(cfg)
+        changed = sorted(
+            key
+            for key in set((before or {}).keys()) | set(after.keys())
+            if (before or {}).get(key) != after.get(key)
+        )
+        self.log.info(
+            "config_saved",
+            path=str(Path(self.config_path).expanduser()),
+            changed=changed,
+            hot_reloaded_backends=list(backends),
+            backend_count=len(cfg.backends),
+            virtual_tool_count=len(cfg.virtual_tools),
+        )
         for name in backends:
             hot_reload(self.backend_runtime, cfg, name, self.log)
 
@@ -1880,6 +1904,7 @@ def _general_routes(ctx: _AdminCtx) -> list[Route]:
         Route("/admin", admin_page, methods=["GET"]),
         Route("/admin/api/state", get_state, methods=["GET"]),
         Route("/admin/api/export", get_export, methods=["GET"]),
+        *admin_routes_logs.log_routes(ctx, _err),
     ]
 
 
@@ -1921,6 +1946,9 @@ def _gateway_settings_routes(ctx: _AdminCtx) -> list[Route]:
             # the ${ENV} REF exactly as stored — never the resolved secret
             "bearer_token": cfg.bearer_token,
             "introspect_interval": cfg.introspect_interval,
+            "log_level": cfg.log_level,
+            "log_max_bytes": cfg.log_max_bytes,
+            "log_backup_count": cfg.log_backup_count,
         }
         if cfg.oauth is not None:
             payload.update(
@@ -1938,7 +1966,7 @@ def _gateway_settings_routes(ctx: _AdminCtx) -> list[Route]:
             )
         return JSONResponse(payload)
 
-    async def put_settings(request: Request):
+    async def put_settings(request: Request):  # noqa: PLR0911, PLR0912 - validation branches map to precise 400s
         payload = await request.json()
         cfg = ctx.load()
         if "bearer_token" in payload:
@@ -1965,6 +1993,28 @@ def _gateway_settings_routes(ctx: _AdminCtx) -> list[Route]:
             if isinstance(iv, bool) or not isinstance(iv, int) or iv < 0:
                 return _err("introspect_interval must be an integer >= 0")
             cfg.introspect_interval = iv
+        if "log_level" in payload:
+            value = payload.get("log_level")
+            if (
+                not isinstance(value, str)
+                or value.upper() not in logging_setup.LOG_LEVELS
+            ):
+                return _err(
+                    "log_level must be one of " + ", ".join(logging_setup.LOG_LEVELS)
+                )
+            cfg.log_level = value.upper()
+        if "log_max_bytes" in payload:
+            value = payload.get("log_max_bytes")
+            if isinstance(value, bool) or not isinstance(value, int):
+                return _err(
+                    "log_max_bytes must be an integer between 65536 and 1073741824"
+                )
+            cfg.log_max_bytes = value
+        if "log_backup_count" in payload:
+            value = payload.get("log_backup_count")
+            if isinstance(value, bool) or not isinstance(value, int):
+                return _err("log_backup_count must be an integer between 1 and 100")
+            cfg.log_backup_count = value
         try:
             cfg = cl.GatewayConfig.model_validate(cl.to_raw(cfg))
         except (cl.ConfigError, ValueError) as exc:

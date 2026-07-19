@@ -13,7 +13,6 @@ import shutil
 import subprocess
 import tempfile
 import time
-from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 import anyio
@@ -242,14 +241,16 @@ def test_configure_logging_rotates_and_keeps_json(tmp_path):
     log_path = tmp_path / "gateway.log"
     log = server._configure_logging(str(log_path))
 
-    # The single rotating handler lives on the ROOT logger (issue #50), so every
-    # logger — ours + uvicorn/fastmcp — flows into the one rotating file instead
-    # of launchd's err.log. mcp-gateway has no own handler; it propagates.
+    # The single queue handler lives on ROOT; its listener owns the rotating
+    # file handler, so every logger — ours + uvicorn/fastmcp — flows into the one
+    # rotating file without blocking the event loop.
     root = logging.getLogger()
     assert len(root.handlers) == 1
     handler = root.handlers[0]
-    assert isinstance(handler, RotatingFileHandler)
-    assert handler.maxBytes > 0 and handler.backupCount > 0
+    assert type(handler).__name__ == "_AsyncQueueHandler"
+    runtime = server.logging_setup.status()
+    assert runtime["max_bytes"] > 0 and runtime["backup_count"] > 0
+    assert runtime["listener_alive"] is True
     app_logger = logging.getLogger("mcp-gateway")
     assert app_logger.handlers == []
     assert app_logger.propagate is True
@@ -285,7 +286,7 @@ def test_configure_logging_closes_prior_handler(tmp_path):
     root = logging.getLogger()
     assert len(root.handlers) == 1  # replaced, not accumulated
     assert root.handlers[0] is not prior
-    assert prior.stream is None or prior.stream.closed  # prior FD released
+    assert prior._listener is None or not prior._listener.alive  # type: ignore[attr-defined]
 
 
 # ---------------------------------------------------------------------------
@@ -2457,7 +2458,13 @@ def test_settings_get_returns_current(tmp_path, monkeypatch):
     monkeypatch.setattr(admin, "under_launchd", lambda: False)
     client = TestClient(_admin_app(tmp_path))
     j = client.get("/admin/api/settings").json()
-    assert j == {"bearer_token": None, "introspect_interval": 0}
+    assert j == {
+        "bearer_token": None,
+        "introspect_interval": 0,
+        "log_level": "INFO",
+        "log_max_bytes": 5 * 1024 * 1024,
+        "log_backup_count": 5,
+    }
 
 
 def test_settings_put_roundtrips(tmp_path, monkeypatch):
@@ -2476,6 +2483,33 @@ def test_settings_put_roundtrips(tmp_path, monkeypatch):
     j = client.get("/admin/api/settings").json()
     assert j["bearer_token"] == "${MCP_GATEWAY_TOKEN}"
     assert j["introspect_interval"] == 45
+
+
+def test_settings_put_roundtrips_logging_controls(tmp_path, monkeypatch):
+    monkeypatch.setattr(admin, "under_launchd", lambda: False)
+    client = TestClient(_admin_app(tmp_path))
+    r = client.put(
+        "/admin/api/settings",
+        json={"log_level": "DEBUG", "log_max_bytes": 131072, "log_backup_count": 2},
+    )
+    assert r.status_code == 200
+    cfg = cl.load(_cfg_path(tmp_path))
+    assert cfg.log_level == "DEBUG"
+    assert cfg.log_max_bytes == 131072
+    assert cfg.log_backup_count == 2
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"log_level": "verbose"},
+        {"log_max_bytes": 1024},
+        {"log_backup_count": 0},
+    ],
+)
+def test_settings_put_rejects_invalid_logging_controls(tmp_path, payload):
+    response = TestClient(_admin_app(tmp_path)).put("/admin/api/settings", json=payload)
+    assert response.status_code == 400
 
 
 def test_settings_put_rejects_raw_secret(tmp_path):

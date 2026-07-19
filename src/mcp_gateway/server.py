@@ -17,12 +17,10 @@ strategy (a down backend only fails its own endpoint — issue #9). See README.m
 from __future__ import annotations
 
 import hmac
-import logging
 import os
 import sys
 import time
 from contextlib import AsyncExitStack, asynccontextmanager
-from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 import anyio
@@ -40,7 +38,14 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse
 from starlette.routing import Mount, Route
 
-from mcp_gateway import admin, config_loader, oauth, runtime, virtual_tools
+from mcp_gateway import (
+    admin,
+    config_loader,
+    logging_setup,
+    oauth,
+    runtime,
+    virtual_tools,
+)
 
 
 def default_config_path() -> str:
@@ -129,51 +134,20 @@ def is_session_death(exc: BaseException) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _configure_logging(log_file: str) -> structlog.BoundLogger:
-    """JSON structlog to a rotating *log_file* (created if missing).
-
-    Issue #50: the app's log must not grow unbounded, and neither must launchd's
-    ``err.log``/``out.log``. launchd owns those two file descriptors, so nothing
-    in-process can rotate them — instead we route ALL stdlib logging (uvicorn,
-    fastmcp, everything) into the single rotating ``gateway.log`` handler, so the
-    launchd files only ever catch rare pre-init / hard-crash text (and #48 already
-    removed the bad-JSON traceback flood that used to fill err.log). A single
-    shared handler on the root logger avoids two handlers racing on one file.
-    """
-    path = Path(log_file).expanduser()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    # One rotating handler for the whole process: 5 MB × 5 files.
-    handler = RotatingFileHandler(
-        path, maxBytes=5 * 1024 * 1024, backupCount=5, encoding="utf-8"
+def _configure_logging(
+    log_file: str,
+    *,
+    level: str = logging_setup.DEFAULT_LOG_LEVEL,
+    max_bytes: int = logging_setup.DEFAULT_LOG_MAX_BYTES,
+    backup_count: int = logging_setup.DEFAULT_LOG_BACKUP_COUNT,
+) -> structlog.BoundLogger:
+    """Compatibility facade for the asynchronous structured logger."""
+    return logging_setup.configure(
+        log_file,
+        level=level,
+        max_bytes=max_bytes,
+        backup_count=backup_count,
     )
-    handler.setFormatter(logging.Formatter("%(message)s"))
-
-    # Root owns the single file handler; every logger propagates into it.
-    root = logging.getLogger()
-    # Close any handler from a prior call before replacing it, or repeated setup
-    # (tests, a future in-process reload) leaks the open file descriptor (#87).
-    for h in root.handlers:
-        h.close()
-    root.handlers = [handler]
-    root.setLevel(logging.WARNING)
-    # Quiet FastMCP's benign INFO chatter (e.g. "reusing existing session").
-    logging.getLogger("fastmcp").setLevel(logging.WARNING)
-    # Our own events emit at INFO and propagate up to the root handler (no own
-    # handler, so there's no second writer on the file).
-    app_logger = logging.getLogger("mcp-gateway")
-    app_logger.setLevel(logging.INFO)
-    app_logger.handlers = []
-    app_logger.propagate = True
-
-    structlog.configure(
-        processors=[
-            structlog.processors.add_log_level,
-            structlog.processors.TimeStamper(fmt="iso"),
-            structlog.processors.JSONRenderer(),
-        ],
-        logger_factory=structlog.stdlib.LoggerFactory(),
-    )
-    return structlog.get_logger("mcp-gateway")
 
 
 # ---------------------------------------------------------------------------
@@ -1086,6 +1060,7 @@ def _build_app(  # noqa: PLR0913, PLR0915 — composition root; takes what it wi
                 token=bearer_token,
                 protected_prefixes=bearer_prefixes,
             ),
+            StarletteMiddleware(logging_setup.RequestLogMiddleware, log=log),
         ],
     )
     admin.register(parent, config_path, log, backend_runtime, hooks=hooks)
@@ -1174,8 +1149,17 @@ def main() -> None:
     # structured line in gateway.log rather than a raw traceback in launchd's
     # err.log (#96). Start on the default log path; re-point if the loaded cfg
     # names a different one (the prior handler is closed — #87).
-    default_log = config_loader.GatewayConfig.model_fields["log_file"].default
-    log = _configure_logging(default_log)
+    defaults = config_loader.GatewayConfig.model_fields
+    default_log = defaults["log_file"].default
+    default_level = defaults["log_level"].default
+    default_max_bytes = defaults["log_max_bytes"].default
+    default_backup_count = defaults["log_backup_count"].default
+    log = _configure_logging(
+        default_log,
+        level=default_level,
+        max_bytes=default_max_bytes,
+        backup_count=default_backup_count,
+    )
     try:
         cfg = _load_config_or_recover(log)
     except Exception as exc:  # noqa: BLE001
@@ -1184,10 +1168,24 @@ def main() -> None:
             error=str(exc),
             hint="no valid backup found — fix config.toml, then restart",
         )
+        logging_setup.shutdown()
         raise SystemExit(1) from None
-    if cfg.log_file != default_log:
-        log = _configure_logging(cfg.log_file)
-    anyio.run(_run, cfg, log)
+    if (
+        cfg.log_file != default_log
+        or cfg.log_level != default_level
+        or cfg.log_max_bytes != default_max_bytes
+        or cfg.log_backup_count != default_backup_count
+    ):
+        log = _configure_logging(
+            cfg.log_file,
+            level=cfg.log_level,
+            max_bytes=cfg.log_max_bytes,
+            backup_count=cfg.log_backup_count,
+        )
+    try:
+        anyio.run(_run, cfg, log)
+    finally:
+        logging_setup.shutdown()
 
 
 if __name__ == "__main__":

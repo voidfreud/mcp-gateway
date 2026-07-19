@@ -594,6 +594,8 @@ let STATUS = null;  // #23: backend name -> {state, ms, tools, error}, async
 let CC_REG = null;  // #46: {available, registered:{backend:bool}}, async
 let CODEX_REG = null;  // independent backend + Virtual Tools Codex registrations, async
 const timers = {};
+let LOG_TIMER = null;
+const LOG_REFRESH_MS = 3000;
 
 // A captured tool carries a stored override iff any editable field differs from
 // its default — the same test used for the "overridden" badge (#153 reuses it
@@ -763,6 +765,24 @@ async function refreshBackends() {  // #43: on-dashboard-load re-introspect
   } catch {}
 }
 
+async function refreshGatewayLogs() {
+  const out = $('#gw_log'), stats = $('#gw_log_stats'), note = $('#gw_log_refresh_note');
+  if (!out) return;
+  const filter = $('#log_filter_level')?.value || '';
+  try {
+    const suffix = filter ? '?limit=120&level=' + encodeURIComponent(filter) : '?limit=120';
+    const j = await api('GET', '/admin/api/logs' + suffix);
+    out.textContent = (j.entries || []).map(x => JSON.stringify(x)).join('\n') || '(no events yet)';
+    const s = j.stats || {};
+    if (stats) stats.textContent = `${s.level || '?'} · ${s.max_bytes ? Math.round(s.max_bytes / 1048576 * 10) / 10 : '?'} MiB × ${s.backup_count ?? '?'} · queue ${s.queue_depth ?? 0}/${s.queue_size ?? '?'} · dropped ${s.dropped_events ?? 0}`;
+    if (note) note.textContent = `Event-based · refreshed ${new Date().toLocaleTimeString()} · dashboard polls every ${LOG_REFRESH_MS / 1000}s`;
+  } catch (e) {
+    out.textContent = 'log unavailable: ' + e.message;
+    if (stats) stats.textContent = '';
+    if (note) note.textContent = 'Event-based · refresh failed: ' + e.message;
+  }
+}
+
 // how many of a backend's tools carry any override
 function overriddenCount(b) {
   return b.tools.filter(t => t.name || t.title || t.description || !t.enabled
@@ -824,6 +844,7 @@ function renderList() {
 }
 
 function renderDetail(name) {
+  if (LOG_TIMER) { clearInterval(LOG_TIMER); LOG_TIMER = null; }
   if (name === GATEWAY) return renderGateway();
   if (name === VIRTUAL) return renderVirtualTools();
   const b = STATE.backends.find(x => x.name === name);
@@ -1218,10 +1239,36 @@ function renderGateway() {
             (event-driven refresh still runs).</div>
         </div>
       </div>
+      <div class="row2" style="margin-bottom:4px">
+        <div>
+          <span class="flabel">Log verbosity</span>
+          <select id="set_log_level" style="width:100%">
+            ${['DEBUG','INFO','WARNING','ERROR','CRITICAL'].map(x => `<option value="${x}"${STATE.log_level === x ? ' selected' : ''}>${x}</option>`).join('')}
+          </select>
+          <div class="hint">INFO keeps lifecycle, request, tool-call, and error events. DEBUG adds framework chatter.</div>
+        </div>
+        <div>
+          <span class="flabel">Retention cap</span>
+          <div class="mono" style="padding:7px 0">${Math.round((STATE.log_max_bytes || 0) / 1048576 * 10) / 10} MiB × ${STATE.log_backup_count || '?'} rotated</div>
+          <div class="hint">Set <code>log_max_bytes</code> / <code>log_backup_count</code> in config.toml for a different cap.</div>
+        </div>
+      </div>
       <div style="margin-top:10px;display:flex;align-items:center;gap:10px">
         <button class="btn-pri" style="font-size:11px" onclick="saveSettings()">Save settings</button>
         <span class="si">not auto-saved — a restart is deliberate</span>
       </div>
+    </div>
+    <div class="card" id="gwLogs">
+      <div class="c-head"><span class="c-title">Structured event log</span>
+        <span class="si" id="gw_log_stats">loading…</span><span class="spacer"></span>
+        <select id="log_filter_level" onchange="refreshGatewayLogs()" style="width:auto;padding:3px 7px;font-size:11px">
+          <option value="">all levels</option><option>DEBUG</option><option>INFO</option>
+          <option>WARNING</option><option>ERROR</option><option>CRITICAL</option>
+        </select>
+        <button class="btn" style="font-size:11px" onclick="refreshGatewayLogs()">Refresh</button>
+      </div>
+      <pre id="gw_log" class="preview" style="max-height:360px;overflow:auto;white-space:pre-wrap;margin:0">loading…</pre>
+      <div class="hint" id="gw_log_refresh_note" style="margin-top:8px">Event-based: a line is written when an event occurs, not on a fixed heartbeat. Dashboard refreshes every 3s; filesystem reads run off the event loop. For a shell tail use <code>just logs</code> or <code>just logs-follow</code>.</div>
     </div>`;
   const mt = $('#masterTgl');
   if (mt) {
@@ -1233,6 +1280,10 @@ function renderGateway() {
   const au = $('#autoUniq');
   au.checked = autoUniquify();
   au.addEventListener('change', () => localStorage.setItem('autoUniquify', au.checked ? '1' : '0'));
+  const logLevel = $('#set_log_level');
+  if (logLevel) logLevel.value = STATE.log_level || 'INFO';
+  refreshGatewayLogs();
+  LOG_TIMER = setInterval(refreshGatewayLogs, LOG_REFRESH_MS);
   paintStatus();  // #23
 }
 
@@ -1899,9 +1950,10 @@ async function saveSettings() {
   const ivRaw = $('#set_interval').value.trim();
   const iv = ivRaw === '' ? 0 : parseInt(ivRaw, 10);
   if (isNaN(iv) || iv < 0) { toast('introspect interval must be an integer ≥ 0'); return; }
+  const logLevel = $('#set_log_level') ? $('#set_log_level').value : (STATE.log_level || 'INFO');
   const prevBearer = STATE.bearer_token || '';
   try {
-    const payload = { introspect_interval: iv };
+    const payload = { introspect_interval: iv, log_level: logLevel };
     if (STATE.auth_mode !== 'oauth_jwt') payload.bearer_token = bearer;
     const r = await api('PUT', '/admin/api/settings', payload);
     const tokenChanged = bearer !== prevBearer;

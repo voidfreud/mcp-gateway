@@ -1,5 +1,7 @@
 # mcp-gateway tasks. Run `just` to list, `just check` for the full gate.
 
+log_path := env_var_or_default("MCP_GATEWAY_LOG_FILE", env_var("HOME") + "/.local/state/mcp-gateway/gateway.log")
+
 # Default: show available recipes
 default:
     @just --list
@@ -27,6 +29,15 @@ verify url="http://127.0.0.1:9100":
 # Restart the launchd daemon
 restart:
     launchctl kickstart -k gui/$(id -u)/com.void.mcp-gateway
+
+# Show recent structured JSON events without needing the dashboard.
+# Override the path with MCP_GATEWAY_LOG_FILE when using a non-default config.
+logs lines="100":
+    @if test -f "{{log_path}}"; then tail -n {{lines}} "{{log_path}}"; else echo "log file not found: {{log_path}}" >&2; exit 1; fi
+
+# Follow the active structured log until Ctrl-C.
+logs-follow:
+    tail -F "{{log_path}}"
 
 # Pull the merged main branch, sync the locked environment, reload launchd,
 # and verify the new daemon. This is deliberately explicit and fail-closed:
