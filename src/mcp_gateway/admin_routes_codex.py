@@ -20,6 +20,8 @@ class AdminContext(Protocol):
 
     def load(self) -> GatewayConfig: ...
 
+    log: Any
+
 
 @dataclass(frozen=True)
 class CodexRouteDeps:
@@ -76,6 +78,7 @@ def codex_routes(  # noqa: PLR0915 - grouped registration endpoints share one po
         except cl.ConfigError as exc:
             return deps.error(str(exc))
         argv[0] = binary
+        ctx.log.info("codex_registration_changed", backend=name, action="add")
         rc, stdout, stderr = await _cli_raw(argv)
         return JSONResponse(
             {
@@ -111,6 +114,7 @@ def codex_routes(  # noqa: PLR0915 - grouped registration endpoints share one po
         deps = deps_factory()
         argv = deps.command("remove", name)
         argv[0] = binary
+        ctx.log.info("codex_registration_changed", backend=name, action="remove")
         rc, stdout, stderr = await _cli_raw(argv)
         return JSONResponse(
             {

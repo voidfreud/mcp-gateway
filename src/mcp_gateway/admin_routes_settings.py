@@ -19,6 +19,8 @@ class AdminContext(Protocol):
 
     def load(self) -> GatewayConfig: ...
 
+    log: Any
+
     def commit(
         self,
         cfg: GatewayConfig,
@@ -59,6 +61,11 @@ def settings_routes(  # noqa: PLR0915
         except (cl.ConfigError, KeyError) as exc:
             return deps().error(str(exc))
         ctx.commit(cfg, payload["backend"])
+        ctx.log.info(
+            "tool_override_saved",
+            backend=payload["backend"],
+            tool=payload.get("tool_original"),
+        )
         out: dict = {"ok": True, "reloaded": "in-process"}
         if uniquified is not None:
             # #22: the opt-in uniquify stored a suffixed name — hand the final
@@ -75,6 +82,11 @@ def settings_routes(  # noqa: PLR0915
             return deps().error("unknown backend")
         b.tools = [t for t in b.tools if t.original != payload["tool_original"]]
         ctx.commit(cfg, payload["backend"])
+        ctx.log.info(
+            "tool_override_reset",
+            backend=payload["backend"],
+            tool=payload.get("tool_original"),
+        )
         return JSONResponse({"ok": True})
 
     async def put_resource_override(request: Request):
@@ -133,6 +145,7 @@ def settings_routes(  # noqa: PLR0915
         except (cl.ConfigError, KeyError) as exc:
             return deps().error(str(exc))
         ctx.commit(cfg, backend)  # set_instructions validated the name
+        ctx.log.info("backend_instructions_changed", backend=backend)
         return JSONResponse({"ok": True})
 
     async def migrate_override_route(request: Request):

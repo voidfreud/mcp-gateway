@@ -21,6 +21,7 @@ class AdminContext(Protocol):
 
     backend_runtime: Any
     hooks: dict[str, Any]
+    log: Any
 
     def load(self) -> GatewayConfig: ...
 
@@ -50,6 +51,7 @@ def ops_routes(  # noqa: PLR0915
         """Manual on-demand restart of the daemon (#56). Same launchd-gated
         semantics as a topology change: restarts when managed, honest no-op in
         dev/foreground."""
+        ctx.log.info("gateway_restart_requested", source="admin")
         return ctx.restart_response({})
 
     async def run_tool(request: Request):  # noqa: PLR0911 — one early return per input-validation failure
@@ -111,6 +113,9 @@ def ops_routes(  # noqa: PLR0915
         res = await deps().refresh(ctx, b, force=True)
         if res["status"] == "error":
             return deps().error(f"introspection failed: {res['error']}", status=502)
+        ctx.log.info(
+            "backend_reintrospected", backend=name, changed=res.get("changed", False)
+        )
         return JSONResponse({"ok": True, **res})
 
     async def get_status(_request: Request):

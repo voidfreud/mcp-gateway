@@ -437,3 +437,12 @@ class RequestLogMiddleware:
             self.log.warning("http_request", **fields)
         else:
             self.log.info("http_request", **fields)
+        if path.startswith("/admin/api/") and method not in {"GET", "HEAD"}:
+            self.log.info(
+                "admin_action",
+                action=path.removeprefix("/admin/api/"),
+                method=method,
+                path=path,
+                status_code=status_code,
+                ms=ms,
+            )

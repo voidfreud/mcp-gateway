@@ -1185,6 +1185,7 @@ def main() -> None:
     try:
         anyio.run(_run, cfg, log)
     finally:
+        log.info("gateway_stopping")
         logging_setup.shutdown()
 
 
