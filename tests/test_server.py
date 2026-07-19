@@ -2073,13 +2073,19 @@ def test_admin_html_inline_script_parses():
         os.unlink(js_path)
 
 
-def test_admin_html_has_per_backend_codex_registration_controls():
+def test_admin_html_has_client_registration_statuses():
     text = (REPO_ROOT / "src" / "mcp_gateway" / "admin.html").read_text(
         encoding="utf-8"
     )
     for contract in (
-        "also add to Codex",
-        "toggleCodex",
+        "registered",
+        "added",
+        "cc-action-add",
+        "cc-action-remove",
+        "codex-action-add",
+        "codex-action-remove",
+        "registerCC(r.backend, 'local')",
+        "registerCodex(r.backend)",
         "/admin/api/codex-registrations",
         "/codex/register",
         "/codex/deregister",
@@ -2087,6 +2093,17 @@ def test_admin_html_has_per_backend_codex_registration_controls():
         "CODEX_VIRTUAL",
     ):
         assert contract in text
+    assert "onclick=\"deregisterCC" in text
+    assert "onclick=\"deregisterCodex" in text
+
+
+def test_admin_html_import_registers_by_backend_name():
+    text = (REPO_ROOT / "src" / "mcp_gateway" / "admin.html").read_text(
+        encoding="utf-8"
+    )
+    assert "if (r.reloaded === 'restarting') await waitReload();" in text
+    assert "await registerCC(r.backend, 'local');" in text
+    assert "await registerCodex(r.backend);" in text
 
 
 def test_admin_html_has_first_class_virtual_tools_surface():

@@ -123,7 +123,8 @@
   .cc-chip, .codex-chip { font: 500 10px system-ui; text-transform: none; letter-spacing: 0; }
   .cc-chip.cc-yes, .codex-chip.cc-yes { color: var(--gn); border-color: color-mix(in srgb, var(--gn) 30%, transparent);
                     background: color-mix(in srgb, var(--gn) 9%, transparent); }
-  .cc-chip.cc-no, .codex-chip.cc-no { color: var(--td); }
+  .cc-chip.cc-no, .codex-chip.cc-no { color: var(--rd); border-color: color-mix(in srgb, var(--rd) 30%, transparent);
+                    background: color-mix(in srgb, var(--rd) 9%, transparent); }
 
   /* Connection-status dots (#23) — painted async from /admin/api/status.
      st-unk = probe in flight: a soft skeleton pulse, not a verdict. */
@@ -469,10 +470,6 @@
       <label>Args (space-separated)</label>
       <input type="text" id="im_args" class="mono" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="serena-mcp" />
     </div>
-    <label class="chk" style="margin-top:14px"><input type="checkbox" class="tgl" id="im_register">
-      also register in Claude Code <span style="color:var(--td)">· claude mcp add, scope local</span></label>
-    <label class="chk" style="margin-top:8px"><input type="checkbox" class="tgl" id="im_codex">
-      also add to Codex <span style="color:var(--td)">· independent MCP via codex mcp add</span></label>
     <div class="err" id="im_err"></div>
     <div class="foot">
       <button onclick="closeImport()">Cancel</button>
@@ -502,10 +499,6 @@
     <label>New name</label>
     <input type="text" id="rn_name" class="mono" placeholder="new-name"
            autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" />
-    <label class="chk" style="margin-top:14px"><input type="checkbox" class="tgl" id="rn_rereg">
-      re-register in Claude Code afterwards <span style="color:var(--td)">· claude mcp remove old + add new (scope local)</span></label>
-    <label class="chk" style="margin-top:8px"><input type="checkbox" class="tgl" id="rn_codex">
-      re-register in Codex afterwards <span style="color:var(--td)">· codex mcp remove old + add new</span></label>
     <div class="err" id="rn_err"></div>
     <div class="foot">
       <button onclick="closeRename()">Cancel</button>
@@ -594,8 +587,7 @@ let STATUS = null;  // #23: backend name -> {state, ms, tools, error}, async
 let CC_REG = null;  // #46: {available, registered:{backend:bool}}, async
 let CODEX_REG = null;  // independent backend + Virtual Tools Codex registrations, async
 const timers = {};
-let LOG_TIMER = null;
-const LOG_REFRESH_MS = 3000;
+let LOG_STREAM_ABORT = null;
 
 // A captured tool carries a stored override iff any editable field differs from
 // its default — the same test used for the "overridden" badge (#153 reuses it
@@ -712,11 +704,14 @@ async function refreshCCReg(fresh) {
 function paintCCReg() {
   const avail = CC_REG && CC_REG.available;
   document.querySelectorAll('.cc-chip[data-b]').forEach(el => {
-    if (!avail) { el.style.display = 'none'; return; }
-    const reg = !!(CC_REG.registered && CC_REG.registered[el.dataset.b]);
+    const reg = !!(avail && CC_REG.registered && CC_REG.registered[el.dataset.b]);
     el.style.display = '';
-    el.textContent = reg ? 'registered in CC' : 'not registered';
+    el.textContent = !CC_REG ? 'checking…' : (avail ? (reg ? 'registered' : 'not registered') : 'unavailable');
     el.className = 'chip cc-chip ' + (reg ? 'cc-yes' : 'cc-no');
+    const add = document.querySelector(`.cc-action-add[data-b="${CSS.escape(el.dataset.b)}"]`);
+    const remove = document.querySelector(`.cc-action-remove[data-b="${CSS.escape(el.dataset.b)}"]`);
+    if (add) add.disabled = !avail || reg;
+    if (remove) remove.disabled = !avail || !reg;
   });
 }
 async function refreshCodexReg(fresh) {
@@ -727,26 +722,14 @@ async function refreshCodexReg(fresh) {
 function paintCodexReg() {
   const avail = CODEX_REG && CODEX_REG.available && CODEX_REG.ok !== false;
   document.querySelectorAll('.codex-chip[data-b]').forEach(el => {
-    if (!avail) { el.style.display = 'none'; return; }
-    const reg = !!(CODEX_REG.registered && CODEX_REG.registered[el.dataset.b]);
+    const reg = !!(avail && CODEX_REG.registered && CODEX_REG.registered[el.dataset.b]);
     el.style.display = '';
-    el.textContent = reg ? 'added to Codex' : 'not added';
+    el.textContent = !CODEX_REG ? 'checking…' : (avail ? (reg ? 'added' : 'not added') : 'unavailable');
     el.className = 'chip codex-chip ' + (reg ? 'cc-yes' : 'cc-no');
-  });
-  document.querySelectorAll('.codex-action[data-b]').forEach(el => {
-    const available = CODEX_REG && CODEX_REG.available && CODEX_REG.ok !== false;
-    const reg = !!(CODEX_REG && CODEX_REG.registered && CODEX_REG.registered[el.dataset.b]);
-    const virtualReady = el.dataset.b !== CODEX_VIRTUAL
-      || !!(VIRTUAL_STATE && VIRTUAL_STATE.mounted);
-    // Keep Remove available for a stale virtual registration even if the
-    // endpoint is currently unavailable; otherwise the UI could strand it.
-    el.disabled = !available || (!virtualReady && !reg);
-    el.textContent = reg ? 'Remove' : 'Add';
-    el.title = available
-      ? (!virtualReady && !reg
-        ? 'Virtual Tools endpoint is unavailable'
-        : `${reg ? 'remove' : 'add'} gateway-${el.dataset.b} ${reg ? 'from' : 'to'} Codex`)
-      : ((CODEX_REG && CODEX_REG.error) || 'Codex CLI is not available to the gateway daemon');
+    const add = document.querySelector(`.codex-action-add[data-b="${CSS.escape(el.dataset.b)}"]`);
+    const remove = document.querySelector(`.codex-action-remove[data-b="${CSS.escape(el.dataset.b)}"]`);
+    if (add) add.disabled = !avail || reg;
+    if (remove) remove.disabled = !avail || !reg;
   });
 }
 let REFRESHED_ONCE = false;
@@ -772,14 +755,64 @@ async function refreshGatewayLogs() {
   try {
     const suffix = filter ? '?limit=120&level=' + encodeURIComponent(filter) : '?limit=120';
     const j = await api('GET', '/admin/api/logs' + suffix);
-    out.textContent = (j.entries || []).map(x => JSON.stringify(x)).join('\n') || '(no events yet)';
+    out.textContent = (j.entries || []).map(formatLogEntry).join('\n') || '(no events yet)';
     const s = j.stats || {};
     if (stats) stats.textContent = `${s.level || '?'} · ${s.max_bytes ? Math.round(s.max_bytes / 1048576 * 10) / 10 : '?'} MiB × ${s.backup_count ?? '?'} · queue ${s.queue_depth ?? 0}/${s.queue_size ?? '?'} · dropped ${s.dropped_events ?? 0}`;
-    if (note) note.textContent = `Event-based · refreshed ${new Date().toLocaleTimeString()} · dashboard polls every ${LOG_REFRESH_MS / 1000}s`;
+    if (note) note.textContent = `Event-driven · listening since ${new Date().toLocaleTimeString()}`;
   } catch (e) {
     out.textContent = 'log unavailable: ' + e.message;
     if (stats) stats.textContent = '';
     if (note) note.textContent = 'Event-based · refresh failed: ' + e.message;
+  }
+}
+function formatLogEntry(entry) {
+  const timestamp = entry.timestamp ? new Date(entry.timestamp).toLocaleString() : 'unknown time';
+  const head = [timestamp, (entry.level || 'info').toUpperCase(), entry.logger || 'gateway', entry.event || 'event'];
+  const ignored = new Set(['timestamp', 'level', 'logger', 'event']);
+  const values = Object.entries(entry)
+    .filter(([key]) => !ignored.has(key))
+    .map(([, value]) => typeof value === 'string' ? value : JSON.stringify(value))
+    .filter(Boolean);
+  return head.concat(values).join(' · ');
+}
+async function startLogStream() {
+  if (LOG_STREAM_ABORT) LOG_STREAM_ABORT.abort();
+  const out = $('#gw_log'), note = $('#gw_log_refresh_note');
+  if (!out) return;
+  const controller = new AbortController();
+  LOG_STREAM_ABORT = controller;
+  const filter = $('#log_filter_level')?.value || '';
+  try {
+    const suffix = filter ? '?level=' + encodeURIComponent(filter) : '';
+    const response = await fetch('/admin/api/logs/stream' + suffix, {
+      headers: authHeaders({}), signal: controller.signal,
+    });
+    if (response.status === 401 && promptToken()) return startLogStream();
+    if (!response.ok || !response.body) throw new Error('HTTP ' + response.status);
+    const reader = response.body.getReader(), decoder = new TextDecoder();
+    let buffer = '';
+    while (!controller.signal.aborted) {
+      const {value, done} = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, {stream: true});
+      const frames = buffer.split('\n\n'); buffer = frames.pop() || '';
+      for (const frame of frames) {
+        const line = frame.split('\n').find(x => x.startsWith('data: '));
+        if (!line) continue;
+        try {
+          const entry = JSON.parse(line.slice(6));
+          const lines = out.textContent === '(no events yet)' ? [] : out.textContent.split('\n');
+          lines.push(formatLogEntry(entry));
+          out.textContent = lines.slice(-120).join('\n');
+          out.scrollTop = out.scrollHeight;
+        } catch {}
+      }
+    }
+  } catch (e) {
+    if (!controller.signal.aborted) {
+      if (note) note.textContent = 'Event stream unavailable: ' + e.message;
+      setTimeout(startLogStream, 3000);
+    }
   }
 }
 
@@ -844,7 +877,7 @@ function renderList() {
 }
 
 function renderDetail(name) {
-  if (LOG_TIMER) { clearInterval(LOG_TIMER); LOG_TIMER = null; }
+  if (LOG_STREAM_ABORT) { LOG_STREAM_ABORT.abort(); LOG_STREAM_ABORT = null; }
   if (name === GATEWAY) return renderGateway();
   if (name === VIRTUAL) return renderVirtualTools();
   const b = STATE.backends.find(x => x.name === name);
@@ -899,17 +932,21 @@ function renderDetail(name) {
           <option value="user">user</option>
           <option value="project">project</option>
         </select>
-        <button class="btn" style="font-size:11px" onclick="registerCC('${escJS(b.name)}')"
-          title="run claude mcp add for this backend's endpoint (gateway-${esc(b.name)})">Register</button>
         <span class="chip cc-chip" data-b="${esc(b.name)}" style="display:none"
           title="whether gateway-${esc(b.name)} is registered in Claude Code (claude mcp list)"></span>
+        <button class="btn cc-action-add" data-b="${esc(b.name)}" style="font-size:11px"
+          onclick="registerCC('${escJS(b.name)}')">Add</button>
+        <button class="btn btn-danger cc-action-remove" data-b="${esc(b.name)}" style="font-size:11px"
+          onclick="deregisterCC('${escJS(b.name)}')">Remove</button>
       </span>
       <span class="cgroup">
         <span class="cg-cap">Codex</span>
-        <button class="btn codex-action" data-b="${esc(b.name)}" style="font-size:11px"
-          onclick="toggleCodex('${escJS(b.name)}')" disabled>Add</button>
         <span class="chip codex-chip" data-b="${esc(b.name)}" style="display:none"
           title="whether gateway-${esc(b.name)} is configured as an independent Codex MCP"></span>
+        <button class="btn codex-action-add" data-b="${esc(b.name)}" style="font-size:11px"
+          onclick="registerCodex('${escJS(b.name)}')">Add</button>
+        <button class="btn btn-danger codex-action-remove" data-b="${esc(b.name)}" style="font-size:11px"
+          onclick="deregisterCodex('${escJS(b.name)}')">Remove</button>
       </span>
     </div>
     ${danglingBanner(b)}
@@ -931,7 +968,7 @@ function renderDetail(name) {
   wireGrow(m);
   paintStatus();   // #23: live state for the header dot + status line
   paintCCReg();    // #46: live CC-registration chip (async; no-op until fetched)
-  paintCodexReg(); // live independent Codex registration + add/remove action
+  paintCodexReg(); // read-only independent Codex registration status
   const tw = $('#tools', m);
   if (!b.introspected) { tw.innerHTML = '<div class="empty">Backend not introspected yet — click Re-inspect.</div>'; return; }
   // Order: pinned first, switched-off last; among equals, overridden above.
@@ -1265,10 +1302,9 @@ function renderGateway() {
           <option value="">all levels</option><option>DEBUG</option><option>INFO</option>
           <option>WARNING</option><option>ERROR</option><option>CRITICAL</option>
         </select>
-        <button class="btn" style="font-size:11px" onclick="refreshGatewayLogs()">Refresh</button>
       </div>
       <pre id="gw_log" class="preview" style="max-height:360px;overflow:auto;white-space:pre-wrap;margin:0">loading…</pre>
-      <div class="hint" id="gw_log_refresh_note" style="margin-top:8px">Event-based: a line is written when an event occurs, not on a fixed heartbeat. Dashboard refreshes every 3s; filesystem reads run off the event loop. For a shell tail use <code>just logs</code> or <code>just logs-follow</code>.</div>
+      <div class="hint" id="gw_log_refresh_note" style="margin-top:8px">Event-driven: new entries appear as the gateway emits them. For a shell tail use <code>just logs</code> or <code>just logs-follow</code>.</div>
     </div>`;
   const mt = $('#masterTgl');
   if (mt) {
@@ -1282,8 +1318,7 @@ function renderGateway() {
   au.addEventListener('change', () => localStorage.setItem('autoUniquify', au.checked ? '1' : '0'));
   const logLevel = $('#set_log_level');
   if (logLevel) logLevel.value = STATE.log_level || 'INFO';
-  refreshGatewayLogs();
-  LOG_TIMER = setInterval(refreshGatewayLogs, LOG_REFRESH_MS);
+  refreshGatewayLogs().then(startLogStream);
   paintStatus();  // #23
 }
 
@@ -1340,10 +1375,12 @@ function renderVirtualTools() {
   }).join('');
   m.innerHTML = `<div class="b-head"><h2>Virtual Tools</h2><span class="chip">first-class</span>${endpoint}<span class="spacer"></span>
       <span class="btn-group"><span class="cg-cap">Codex</span>
-        <button class="btn codex-action" data-b="${CODEX_VIRTUAL}" style="font-size:11px"
-          onclick="toggleCodex('${CODEX_VIRTUAL}')" disabled>Add</button>
         <span class="chip codex-chip" data-b="${CODEX_VIRTUAL}" style="display:none"
           title="whether /virtual/mcp is configured as an independent Codex MCP"></span>
+        <button class="btn codex-action-add" data-b="${CODEX_VIRTUAL}" style="font-size:11px"
+          onclick="registerCodex('${CODEX_VIRTUAL}')">Add</button>
+        <button class="btn btn-danger codex-action-remove" data-b="${CODEX_VIRTUAL}" style="font-size:11px"
+          onclick="deregisterCodex('${CODEX_VIRTUAL}')">Remove</button>
       </span>
       <button class="btn-pri" onclick="openVirtualEditor()">+ Create Virtual Tool</button></div>
     <div class="b-sub-line">Stable source bindings, live effective-name resolution, optional live testing, and fidelity-preserving aggregation at <code>/virtual/mcp</code>.</div>
@@ -2283,8 +2320,6 @@ function openRename(name) {
   $('#rn_cur').textContent = name;
   $('#rn_name').value = '';
   $('#rn_name').classList.remove('bad');
-  $('#rn_rereg').checked = false;
-  $('#rn_codex').checked = false;
   $('#rn_err').textContent = '';
   $('#renameBg').classList.add('show');
   $('#rn_name').focus();
@@ -2298,8 +2333,6 @@ async function doRename() {
     return;
   }
   $('#rn_name').classList.remove('bad');
-  const rereg = $('#rn_rereg').checked;
-  const reregCodex = $('#rn_codex').checked;
   $('#rn_go').disabled = true; $('#rn_err').textContent = 'renaming…';
   try {
     const r = await api('POST', '/admin/api/backend/' + encodeURIComponent(oldName) + '/rename', { value: newName });
@@ -2313,8 +2346,8 @@ async function doRename() {
         ? 'renamed and hot-mounted · update the Claude Code registration'
         : 'renamed in config · endpoint moves on the next manual restart');
     }
-    if (rereg) await reRegisterCC(oldName, newName);
-    if (reregCodex) await reRegisterCodex(oldName, newName);
+    await reRegisterCC(oldName, newName);
+    await reRegisterCodex(oldName, newName);
   } catch (e) { $('#rn_err').textContent = e.message; }
   finally { $('#rn_go').disabled = false; }
 }
@@ -2326,31 +2359,48 @@ async function reRegisterCC(oldName, newName) {
     const rr = await api('POST', '/admin/api/backend/' + encodeURIComponent(newName) + '/register', { scope: 'local' });
     if (rr.ok) toast(`registered gateway-${newName} in Claude Code (old gateway-${oldName} ${dr.ok ? 'removed' : 'NOT removed — remove it manually'}) — reload Claude Code if it doesn't appear`, 7000);
     else toast('claude mcp add failed: ' + (rr.stderr || rr.stdout || 'exit ' + rr.exit), 8000);
-    refreshCCReg(true);  // #46
   } catch (e) { toast('Claude Code re-register failed: ' + e.message, 6000); }
 }
 // #45 — one-click `claude mcp add` for this backend's gateway endpoint.
 async function registerCC(name, scope) {
-  scope = scope || ($('#b-ccscope') ? $('#b-ccscope').value : 'local');
+  scope = scope || 'local';
   try {
     const r = await api('POST', '/admin/api/backend/' + encodeURIComponent(name) + '/register', { scope });
     if (r.ok) toast(`registered gateway-${name} (scope ${scope}) — reload Claude Code if it doesn't appear`, 5000);
     else toast('claude mcp add failed: ' + (r.stderr || r.stdout || 'exit ' + r.exit), 8000);
-    refreshCCReg(true);  // #46: reflect the new registration state immediately
+    await refreshCCReg(true);
   } catch (e) { toast('register failed: ' + e.message, 5000); }
 }
-async function toggleCodex(name) {
-  const registered = !!(CODEX_REG && CODEX_REG.registered && CODEX_REG.registered[name]);
-  const action = registered ? 'deregister' : 'register';
+async function deregisterCC(name, scope) {
+  scope = scope || ($('#b-ccscope') ? $('#b-ccscope').value : 'local');
+  try {
+    const r = await api('POST', '/admin/api/backend/' + encodeURIComponent(name) + '/deregister', { scope });
+    if (r.ok) toast(`removed gateway-${name} from Claude Code`, 5000);
+    else toast('claude mcp remove failed: ' + (r.stderr || r.stdout || 'exit ' + r.exit), 8000);
+    await refreshCCReg(true);
+  } catch (e) { toast('deregister failed: ' + e.message, 5000); }
+}
+async function registerCodex(name) {
   const target = name === CODEX_VIRTUAL
-    ? '/admin/api/virtual/codex/' + action
-    : '/admin/api/backend/' + encodeURIComponent(name) + '/codex/' + action;
+    ? '/admin/api/virtual/codex/register'
+    : '/admin/api/backend/' + encodeURIComponent(name) + '/codex/register';
   try {
     const r = await api('POST', target, {});
-    if (r.ok) toast(`${registered ? 'removed' : 'added'} gateway-${name} ${registered ? 'from' : 'to'} Codex — restart Codex or open a new task`, 6000);
-    else toast(`codex mcp ${registered ? 'remove' : 'add'} failed: ` + (r.stderr || r.stdout || 'exit ' + r.exit), 8000);
+    if (r.ok) toast(`registered gateway-${name} in Codex — restart Codex or open a new task`, 6000);
+    else toast('codex mcp add failed: ' + (r.stderr || r.stdout || 'exit ' + r.exit), 8000);
     await refreshCodexReg(true);
   } catch (e) { toast('Codex registration failed: ' + e.message, 6000); }
+}
+async function deregisterCodex(name) {
+  const target = name === CODEX_VIRTUAL
+    ? '/admin/api/virtual/codex/deregister'
+    : '/admin/api/backend/' + encodeURIComponent(name) + '/codex/deregister';
+  try {
+    const r = await api('POST', target, {});
+    if (r.ok) toast(`removed gateway-${name} from Codex`, 6000);
+    else toast('codex mcp remove failed: ' + (r.stderr || r.stdout || 'exit ' + r.exit), 8000);
+    await refreshCodexReg(true);
+  } catch (e) { toast('Codex deregister failed: ' + e.message, 6000); }
 }
 async function reRegisterCodex(oldName, newName) {
   try {
@@ -2358,7 +2408,6 @@ async function reRegisterCodex(oldName, newName) {
     const added = await api('POST', '/admin/api/backend/' + encodeURIComponent(newName) + '/codex/register', {});
     if (added.ok) toast(`updated Codex registration to gateway-${newName}${removed.ok ? '' : ' (old registration could not be removed)'}`, 6500);
     else toast('codex mcp add failed: ' + (added.stderr || added.stdout || 'exit ' + added.exit), 8000);
-    await refreshCodexReg(true);
   } catch (e) { toast('Codex re-registration failed: ' + e.message, 6000); }
 }
 async function delBackend(name) {
@@ -2414,8 +2463,6 @@ function openImport() {
   for (const id of ['im_name','im_url','im_ah','im_av','im_headers','im_hh','im_cmd','im_args'])
     $('#'+id).value = '';
   $('#im_oauth').checked = false;
-  $('#im_register').checked = false;
-  $('#im_codex').checked = false;
   $('#im_transport').value = 'http';
   importTransportChange();
   $('#im_err').textContent = '';
@@ -2446,23 +2493,15 @@ async function doImport() {
     if ($('#im_oauth').checked) body.auth = 'oauth';
   }
   else { body.command = $('#im_cmd').value.trim(); body.args = $('#im_args').value.trim() ? $('#im_args').value.trim().split(/\s+/) : []; }
-  const alsoRegister = $('#im_register').checked;  // #45: register after import
-  const alsoCodex = $('#im_codex').checked;
   $('#im_go').disabled = true; $('#im_err').textContent = 'connecting…';
   try {
     const r = await api('POST', '/admin/api/backend', body);
-    closeImport(); SELECTED = r.backend; afterRestart(r, 'imported');
-    if (alsoRegister && r.backend) {
-      // hot-add path: the endpoint is live now, so the registration is real.
-      if (r.reloaded === 'restarting') toast('register skipped — gateway restarting; use "Register in CC" afterwards', 5000);
-      else await registerCC(r.backend, 'local');
-    }
-    if (alsoCodex && r.backend) {
-      if (r.reloaded === 'restarting') toast('Codex add skipped — gateway restarting; use "Add" in the Codex section afterwards', 5000);
-      else {
-        await refreshCodexReg();
-        if (!(CODEX_REG && CODEX_REG.registered && CODEX_REG.registered[r.backend])) await toggleCodex(r.backend);
-      }
+    closeImport(); SELECTED = r.backend;
+    if (r.reloaded === 'restarting') await waitReload();
+    else afterRestart(r, 'imported');
+    if (r.backend) {
+      await registerCC(r.backend, 'local');
+      await registerCodex(r.backend);
     }
   }
   catch (e) { $('#im_err').textContent = e.message; }

@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import queue
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Protocol
 
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, StreamingResponse
 from starlette.routing import Route
 
 from mcp_gateway import logging_setup
@@ -69,4 +71,41 @@ def log_routes(ctx: AdminContext, error: Callable[..., JSONResponse]) -> list[Ro
             }
         )
 
-    return [Route("/admin/api/logs", logs, methods=["GET"])]
+    async def log_stream(request: Request):
+        level = request.query_params.get("level")
+        if level:
+            level = level.upper()
+            if level not in logging_setup.LOG_LEVELS:
+                return error(
+                    "level must be one of " + ", ".join(logging_setup.LOG_LEVELS)
+                )
+        subscriber = logging_setup.subscribe()
+
+        async def events():
+            try:
+                while True:
+                    try:
+                        line = await asyncio.to_thread(subscriber.get, True, 1)
+                    except queue.Empty:
+                        yield b": keepalive\n\n"
+                        continue
+                    try:
+                        entry = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if level and entry.get("level", "").upper() != level:
+                        continue
+                    yield f"data: {json.dumps(entry, ensure_ascii=False)}\n\n".encode()
+            finally:
+                logging_setup.unsubscribe(subscriber)
+
+        return StreamingResponse(
+            events(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    return [
+        Route("/admin/api/logs", logs, methods=["GET"]),
+        Route("/admin/api/logs/stream", log_stream, methods=["GET"]),
+    ]

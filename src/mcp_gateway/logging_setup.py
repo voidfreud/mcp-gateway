@@ -144,6 +144,8 @@ class _AsyncQueueListener(QueueListener):
             record.done.set()
             return
         super().handle(record)
+        if self.handlers:
+            _publish(self.handlers[0].format(record))
 
     def enqueue_sentinel(self) -> None:
         # QueueListener's default uses put_nowait; a full queue could then lose
@@ -169,6 +171,33 @@ class _LoggingRuntime:
 
 _runtime: _LoggingRuntime | None = None
 _runtime_lock = threading.RLock()
+_subscribers: set[queue.Queue[str]] = set()
+_subscribers_lock = threading.Lock()
+
+
+def subscribe() -> queue.Queue[str]:
+    """Subscribe to formatted events emitted after this call."""
+    subscriber: queue.Queue[str] = queue.Queue(maxsize=256)
+    with _subscribers_lock:
+        _subscribers.add(subscriber)
+    return subscriber
+
+
+def unsubscribe(subscriber: queue.Queue[str]) -> None:
+    """Stop delivering events to a log-stream subscriber."""
+    with _subscribers_lock:
+        _subscribers.discard(subscriber)
+
+
+def _publish(line: str) -> None:
+    with _subscribers_lock:
+        subscribers = tuple(_subscribers)
+    for subscriber in subscribers:
+        try:
+            subscriber.put_nowait(line)
+        except queue.Full:
+            # A slow dashboard must never apply backpressure to logging.
+            continue
 
 
 def _level_number(level: str) -> int:
