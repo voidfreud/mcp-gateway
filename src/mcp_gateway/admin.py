@@ -806,6 +806,25 @@ def build_state(cfg: GatewayConfig) -> dict:
         # bearer_token is the ${ENV} REF as stored — never the resolved secret.
         "bearer_token": cfg.bearer_token,
         "introspect_interval": cfg.introspect_interval,
+        "auth_mode": (
+            "oauth_jwt"
+            if cfg.oauth is not None
+            else ("static_bearer" if cfg.bearer_token else "none")
+        ),
+        # OAuth metadata is public configuration only; never expose the Admin
+        # token or any resolved secret to the browser.
+        "oauth": (
+            {
+                "public_base_url": str(cfg.oauth.public_base_url).rstrip("/"),
+                "authorization_servers": [
+                    str(url).rstrip("/") for url in cfg.oauth.authorization_servers
+                ],
+                "issuer": str(cfg.oauth.issuer).rstrip("/"),
+                "required_scopes": list(cfg.oauth.required_scopes),
+            }
+            if cfg.oauth is not None
+            else None
+        ),
         # Each backend is its own MCP endpoint with its own instructions now (no
         # single cross-backend "gateway instructions"); the UI shows an endpoints
         # overview + per-backend server-instructions editing.
@@ -2204,18 +2223,36 @@ def _gateway_settings_routes(ctx: _AdminCtx) -> list[Route]:
 
     async def get_settings(_request: Request):
         cfg = ctx.load()
-        return JSONResponse(
-            {
-                # the ${ENV} REF exactly as stored — never the resolved secret
-                "bearer_token": cfg.bearer_token,
-                "introspect_interval": cfg.introspect_interval,
-            }
-        )
+        payload = {
+            # the ${ENV} REF exactly as stored — never the resolved secret
+            "bearer_token": cfg.bearer_token,
+            "introspect_interval": cfg.introspect_interval,
+        }
+        if cfg.oauth is not None:
+            payload.update(
+                {
+                    "auth_mode": "oauth_jwt",
+                    "oauth": {
+                        "public_base_url": str(cfg.oauth.public_base_url).rstrip("/"),
+                        "authorization_servers": [
+                            str(url).rstrip("/")
+                            for url in cfg.oauth.authorization_servers
+                        ],
+                        "required_scopes": list(cfg.oauth.required_scopes),
+                    },
+                }
+            )
+        return JSONResponse(payload)
 
     async def put_settings(request: Request):
         payload = await request.json()
         cfg = ctx.load()
         if "bearer_token" in payload:
+            if cfg.oauth is not None:
+                return _err(
+                    "bearer_token cannot be changed while oauth authentication "
+                    "is configured"
+                )
             tok = payload.get("bearer_token")
             if tok is not None and not isinstance(tok, str):
                 return _err("bearer_token must be a string or null")
@@ -2234,6 +2271,10 @@ def _gateway_settings_routes(ctx: _AdminCtx) -> list[Route]:
             if isinstance(iv, bool) or not isinstance(iv, int) or iv < 0:
                 return _err("introspect_interval must be an integer >= 0")
             cfg.introspect_interval = iv
+        try:
+            cfg = cl.GatewayConfig.model_validate(cl.to_raw(cfg))
+        except (cl.ConfigError, ValueError) as exc:
+            return _err(str(exc))
         ctx.commit(cfg)  # persist only — both settings are read at boot
         return ctx.restart_response({"changed": "gateway-settings"})
 

@@ -52,6 +52,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **MCP OAuth resource-server mode** — each independent backend endpoint and
+  `/virtual/mcp` can validate JWT access tokens from an external authorization
+  server, publish RFC 9728 protected-resource metadata, bind tokens to the
+  endpoint audience, and return MCP-compliant 401/403 scope challenges. Remote
+  deployments require a separate Admin bearer token; legacy `bearer_token`
+  mode remains unchanged.
+
 - **MCP protocol contract CI** — every PR now drives raw Streamable HTTP and
   JSON-RPC messages through isolated stateful/stateless backends, Virtual Tools,
   and the real independent gateway mounts, then runs a pinned official MCP

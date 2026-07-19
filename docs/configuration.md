@@ -28,6 +28,15 @@ log_file = "~/.local/state/mcp-gateway/gateway.log"
 # baseline_max_age = 86400
 # bearer_token = "${MCP_GATEWAY_TOKEN}"
 
+# Remote OAuth resource-server mode (mutually exclusive with bearer_token):
+# [oauth]
+# public_base_url = "https://gateway.example.com"
+# authorization_servers = ["https://login.example.com/tenant"]
+# issuer = "https://login.example.com/tenant"
+# jwks_uri = "https://login.example.com/tenant/jwks"
+# required_scopes = ["mcp:access"]
+# admin_bearer_token = "${MCP_GATEWAY_ADMIN_TOKEN}"
+
 [[backends]]
 name = "exa"
 transport = "http"
@@ -62,14 +71,37 @@ diff-vs-default model (see below).
 
 | Key | Type | Default | Meaning |
 |-----|------|---------|---------|
-| `host` | string | `"127.0.0.1"` | The address to bind. Loopback by default; a non-loopback address (e.g. a Tailscale IP) is refused at load time unless `bearer_token` is also set. See [security.md](security.md#binding-beyond-loopback). |
+| `host` | string | `"127.0.0.1"` | The address to bind. Loopback by default; a non-loopback address requires `bearer_token` or a complete `[oauth]` profile with `admin_bearer_token`. See [security.md](security.md#binding-beyond-loopback). |
 | `port` | integer | `9100` | The port the gateway listens on. |
 | `log_file` | string | `"~/.local/state/mcp-gateway/gateway.log"` | Where the structured log is written. Rotates automatically (5 MB × 5 files). |
 | `introspect_interval` | integer (seconds) | `0` (off) | How often to re-scan every backend's tool list on a timer. `0` means off, which is the recommended default — the gateway already refreshes on reconnect, on a backend's own change notification, and on admin page load. Set an interval only for a long-lived remote backend that silently swaps its tools. |
 | `baseline_max_age` | integer (seconds) | `86400` (24 h) | How long a captured baseline counts as fresh for the **post-mount** refresh: at boot (or remount) a backend whose stored baseline is younger than this is not re-introspected, sparing slow stdio backends a second cold start per boot. `0` disables the gate (re-capture on every mount). Only the mount-time trigger is gated — a backend's own change notification, an admin page load, and the manual Re-inspect button always refresh. |
 | `bearer_token` | string or unset | unset | Optional access token. When set (as a `${ENV}` reference), every backend endpoint **and** the admin API require `Authorization: Bearer <token>`. See [security.md](security.md#the-optional-bearer-token). |
+| `oauth` | table or unset | unset | JWT resource-server profile for standard remote OAuth. Mutually exclusive with `bearer_token`; protects each backend and `/virtual/mcp` independently. See [OAuth resource-server mode](#oauth-resource-server-mode). |
 | `backends` | list | required | One `[[backends]]` block per backend. At least one is required. |
 | `virtual_tools` | list | empty | Gateway-owned tools served together at the permanent `/virtual/mcp` endpoint. Normally managed through the Admin UI. |
+
+## OAuth resource-server mode
+
+Set `[oauth]` when clients must authenticate through an external OAuth/OIDC
+authorization server. The gateway is a resource server: it validates signed
+JWT access tokens using `jwks_uri`, exact `issuer`, exact endpoint `audience`,
+expiry, and the configured `required_scopes`. It does not implement login,
+consent, PKCE, token issuance, or client registration.
+
+Each independent MCP resource has its own audience and discovery document:
+
+- `https://gateway.example.com/<backend>/mcp`
+- `https://gateway.example.com/virtual/mcp`
+- `/.well-known/oauth-protected-resource/<backend>/mcp`
+- `/.well-known/oauth-protected-resource/virtual/mcp`
+
+Use HTTPS for remote authorization-server, issuer, JWKS, and public gateway
+URLs. Plain HTTP is accepted only for explicit loopback development URLs. A
+remote bind must set `oauth.admin_bearer_token`; that separate `${ENV}` token
+protects `/admin/api/*` and is never accepted as an MCP access token. The legacy
+`bearer_token` profile remains available for loopback deployments but cannot be
+combined with `[oauth]`.
 
 ## Backend settings (`[[backends]]`)
 

@@ -18,6 +18,9 @@ of this — but it is here when you want it.
   `Authorization: Bearer <token>`; a missing or wrong token gets `401`. Only
   `/health`, `/ready`, and the bare `GET /admin` page are exempt. See
   [security.md](security.md#the-optional-bearer-token).
+  In `[oauth]` mode, `/admin/api/*` uses the separate
+  `oauth.admin_bearer_token`; MCP endpoint authentication is handled by
+  FastMCP's per-resource OAuth provider.
 - **Error shape:** validation and not-found errors return
   `{"ok": false, "error": "<message>"}` with a `4xx` status.
 - **`reloaded` field:** mutating responses report how the change applied —
@@ -68,7 +71,7 @@ of this — but it is here when you want it.
 | POST | `/admin/api/enabled` | `{value: bool}` | Master switch: enable/disable every backend, mounting or unmounting each. `{ok, reloaded: "in-process"}`. |
 | POST | `/admin/api/backend/{name}/pin` | `{value: bool}` | Toggle per-backend eager loading (pin all its tools). `{ok, reloaded: "in-process"}`. |
 | POST | `/admin/api/backend/{name}/stateless` | `{value: bool}` | Session strategy: `false` = warm (one persistent connection, auto-repaired if it dies), `true` = fresh session per call. Saves and recycles the backend live — no restart. `{ok, reloaded: "recycled", stateless}`. |
-| GET | `/admin/api/settings` | — | The gateway-wide settings: `{bearer_token, introspect_interval}` (the token is the `${ENV}` reference, never a resolved secret). |
+| GET | `/admin/api/settings` | — | The gateway-wide settings: `{bearer_token, introspect_interval}` (the token is the `${ENV}` reference, never a resolved secret). OAuth deployments additionally return read-only `auth_mode` and public `oauth` metadata. |
 | PUT | `/admin/api/settings` | `{bearer_token?, introspect_interval?}` | Validates (`bearer_token` empty or containing `${...}`; interval ≥ 0) and saves. Both are read at daemon start, so the response carries restart semantics. |
 
 ## Claude Code registration

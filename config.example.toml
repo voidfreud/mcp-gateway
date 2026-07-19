@@ -3,9 +3,9 @@
 # and the loader resolves it from the environment (injected by the LaunchAgent).
 
 host = "127.0.0.1"          # loopback by default. A non-loopback bind (e.g. a
-                            # Tailscale IP) REQUIRES bearer_token or the config
-                            # refuses to load — docs/security.md ("Binding
-                            # beyond loopback").
+                            # Tailscale IP) REQUIRES bearer_token or a complete
+                            # [oauth] profile with admin_bearer_token; otherwise
+                            # the config refuses to load (docs/security.md).
 port = 9100
 log_file = "~/.local/state/mcp-gateway/gateway.log"
 # introspect_interval = 900 # seconds between scheduled re-captures of every
@@ -29,6 +29,22 @@ log_file = "~/.local/state/mcp-gateway/gateway.log"
 # resolved once at startup. Claude Code passes it at registration:
 #   claude mcp add --transport http --header "Authorization: Bearer ${MCP_GATEWAY_TOKEN}" gateway-<name> http://127.0.0.1:9100/<name>/mcp
 # bearer_token = "${MCP_GATEWAY_TOKEN}"
+
+# Standard OAuth resource-server mode for remote deployments. The gateway does
+# not issue tokens: your external OAuth/OIDC provider handles login, consent,
+# PKCE, and token issuance. Each independent endpoint gets a distinct JWT
+# audience and RFC 9728 protected-resource metadata route. `issuer` is kept
+# byte-for-byte because JWT issuer matching is exact. Use HTTPS outside local
+# development. A non-loopback bind requires a separate Admin token; it is never
+# accepted as an MCP access token.
+# [oauth]
+# public_base_url = "https://gateway.example.com"
+# authorization_servers = ["https://login.example.com/tenant"]
+# issuer = "https://login.example.com/tenant"
+# jwks_uri = "https://login.example.com/tenant/jwks"
+# algorithm = "RS256"
+# required_scopes = ["mcp:access"]
+# admin_bearer_token = "${MCP_GATEWAY_ADMIN_TOKEN}"
 
 # ===========================================================================
 # A backend MCP server. Repeat the [[backends]] block per backend.

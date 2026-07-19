@@ -147,12 +147,23 @@ layout, console script `mcp-gateway`). MIT; distributed via
 - **Auth:** optional `bearer_token` (${ENV} ref, resolved once at boot) gates
   backend endpoints AND `/admin/api/*` (open admin = config writes + tool
   execution for any local process); only `/health`, `/ready`, bare `GET
-  /admin` stay open. Origin guard 403s foreign browser origins on every route
-  (MCP-spec MUST, DNS rebinding). `claude mcp add --header` is VARIADIC — it
-  must come after `<name> <url>` or it swallows them. Codex accepts only
-  `--bearer-token-env-var`; its one-click registration therefore requires the
-  gateway token to be a single `${ENV_VAR}` reference, and that variable must
-  also exist in the Codex process environment.
+  /admin` stay open. Standard `[oauth]` mode is mutually exclusive with the
+  legacy token: every independent backend and `/virtual/mcp` validates JWTs
+  against its own audience, publishes RFC 9728 metadata, and returns 401 for
+  authentication failures or 403 for missing scopes. Remote OAuth deployments
+  use a separate `oauth.admin_bearer_token` for `/admin/api/*`. Origin guard
+  403s foreign browser origins on every route (MCP-spec MUST, DNS rebinding).
+  `claude mcp add --header` is VARIADIC — it must come after `<name> <url>` or
+  it swallows them. Codex accepts only `--bearer-token-env-var`; its one-click
+  registration therefore requires the gateway token to be a single
+  `${ENV_VAR}` reference, and that variable must also exist in the Codex
+  process environment.
+- **Process isolation:** no worker process is added by default. Stdio backends
+  already run in child processes; per-backend lifecycle runners/recycle paths
+  and the `stateless` per-session lever contain current failures. Add a
+  supervised worker protocol only when untrusted in-process code, resource
+  limits, caller credentials, or daemon-level crash blast radius justify it;
+  see ADR-0009.
 - **Admin editing model:** every broadcast text is editable; original names
   read-only. Fields prefill with effective values; only diffs vs captured
   defaults are stored (`_override_vs_default`). Hiding a REQUIRED param needs

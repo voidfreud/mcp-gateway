@@ -17,6 +17,7 @@ from typing import Any
 
 import httpx
 from fastmcp import Client, FastMCP
+from fastmcp.server.auth import AuthProvider
 from fastmcp.server.providers.proxy import FastMCPProxy
 from fastmcp.tools import Tool, ToolResult
 from mcp.types import TextContent
@@ -704,15 +705,18 @@ def replace_tools(  # noqa: PLR0913 - explicit lifecycle dependencies
     server.local_provider._components = staged.local_provider._components  # noqa: SLF001
 
 
-def build_virtual_server(
+def build_virtual_server(  # noqa: PLR0913 - explicit lifecycle and auth dependencies
     cfg: cl.GatewayConfig,
     cfg_source: cl.GatewayConfig | Callable[[], cl.GatewayConfig],
     registry: Mapping[str, FastMCPProxy],
     log,
     status_store: dict | None = None,
+    auth: AuthProvider | None = None,
 ) -> FastMCP:
     server = FastMCP(
-        name="mcp-gateway-virtual", list_page_size=cl.DOWNSTREAM_TOOLS_PAGE_SIZE
+        name="mcp-gateway-virtual",
+        list_page_size=cl.DOWNSTREAM_TOOLS_PAGE_SIZE,
+        auth=auth,
     )
     replace_tools(server, cfg, cfg_source, registry, log, status_store)
     return server

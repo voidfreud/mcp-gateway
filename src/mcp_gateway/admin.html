@@ -1071,6 +1071,10 @@ function kb(n) { return (n / 1024).toFixed(1); }
 function renderGateway() {
   const m = $('#detail');
   const base = `http://${esc(STATE.host)}:${STATE.port}`;
+  const oauthMode = STATE.auth_mode === 'oauth_jwt';
+  const oauthLabel = oauthMode
+    ? 'OAuth JWT resource server — MCP endpoints use per-resource audiences'
+    : 'Legacy static bearer mode';
   const total = STATE.backends.length;
   const on = STATE.backends.filter(b => b.enabled).length;
   let namesTot = 0, pinnedTot = 0, instrTot = 0, deferTot = 0,
@@ -1189,14 +1193,16 @@ function renderGateway() {
     <div class="card" id="gwSettings">
       <div class="c-head"><span class="c-title">Gateway settings</span>
         <span class="si">applied at boot — saving restarts the daemon</span></div>
+      <div class="hint" style="margin-bottom:10px">Authentication: <code>${esc(oauthLabel)}</code>
+        ${oauthMode ? ' Configure OAuth and the separate Admin token in config.toml.' : ''}</div>
       <div class="row2" style="margin-bottom:4px">
         <div>
           <span class="flabel">Bearer token</span>
-          <input type="text" class="mono" id="set_bearer" value="${esc(STATE.bearer_token || '')}"
+          <input type="text" class="mono" id="set_bearer" value="${esc(STATE.bearer_token || '')}"${oauthMode ? ' disabled' : ''}
             placeholder="\${MCP_GATEWAY_TOKEN}" autocomplete="off" autocorrect="off"
             autocapitalize="off" spellcheck="false">
           <div class="hint">Reference an environment variable like <code>\${MCP_GATEWAY_TOKEN}</code>;
-            never paste the secret itself. Empty = open on loopback (no token).</div>
+            never paste the secret itself. ${oauthMode ? 'Disabled while OAuth is configured.' : 'Empty = open on loopback (no token).'}</div>
         </div>
         <div>
           <span class="flabel">Introspect interval (s)</span>
@@ -1881,7 +1887,9 @@ async function saveSettings() {
   if (isNaN(iv) || iv < 0) { toast('introspect interval must be an integer ≥ 0'); return; }
   const prevBearer = STATE.bearer_token || '';
   try {
-    const r = await api('PUT', '/admin/api/settings', { bearer_token: bearer, introspect_interval: iv });
+    const payload = { introspect_interval: iv };
+    if (STATE.auth_mode !== 'oauth_jwt') payload.bearer_token = bearer;
+    const r = await api('PUT', '/admin/api/settings', payload);
     const tokenChanged = bearer !== prevBearer;
     afterRestart(r, 'settings saved');
     if (tokenChanged && confirm('The bearer token changed — existing Claude Code registrations must carry the new token. Re-register all enabled backends now?'))

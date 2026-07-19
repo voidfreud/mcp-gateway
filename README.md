@@ -94,6 +94,10 @@ That's it. See [docs/admin-guide.md](docs/admin-guide.md) for the full tour.
 - **Optional bearer token** — require an `Authorization` header on every endpoint
   and the admin API, for defense against other local processes. With it set, the
   gateway may also bind beyond loopback (e.g. a Tailscale IP) — refused otherwise.
+- **Standard OAuth resource-server mode** — protect each independent backend and
+  `/virtual/mcp` with endpoint-specific JWT audiences, RFC 9728 metadata, and
+  proper 401/403 scope challenges. Login and token issuance stay in your
+  external OAuth/OIDC provider; the Admin API uses a separate static token.
 - **Export / import** — round-trip all your overrides as one JSON bundle.
 
 ## Alternative install (any platform)
