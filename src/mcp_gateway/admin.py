@@ -30,7 +30,7 @@ from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse
 from starlette.routing import Route
 
-from mcp_gateway import admin_routes_codex, runtime
+from mcp_gateway import admin_routes_claude, admin_routes_codex, runtime
 from mcp_gateway import config_loader as cl
 from mcp_gateway import hooks as hooks_mod
 from mcp_gateway import virtual_tools as virtual_mod
@@ -2611,202 +2611,26 @@ async def admin_refresh(ctx: _AdminCtx, b: Backend, *, force: bool = False) -> d
     )
 
 
-def _claude_routes(ctx: _AdminCtx) -> list[Route]:  # noqa: PLR0915 — nested handlers; the group is cohesive
-    """One-click Claude Code registration (#45): shell out to `claude mcp
-    add/remove` for a backend's gateway endpoint (never edit Claude's config
-    files by hand). The CLI runs in a thread so the event loop stays free.
-    A CLI failure comes back as ``ok: false`` with its output at HTTP 200 (the
-    HTTP call itself succeeded); missing binary / bad scope are 400."""
+def _claude_routes(ctx: _AdminCtx) -> list[Route]:
+    """Compatibility facade for the independently testable Claude route group."""
 
-    async def _cli_raw(argv: list[str]) -> tuple[int, str, str]:
-        """Run one `claude` CLI invocation off the event loop; never raises —
-        a spawn failure comes back as ``(-1, "", "<error>")``."""
-        try:
-            r = await asyncio.to_thread(
-                subprocess.run,
-                argv,
-                capture_output=True,
-                text=True,
-                timeout=CLAUDE_CLI_TIMEOUT,
-                check=False,  # a CLI failure is surfaced as ok:false, not raised
-            )
-            return r.returncode, r.stdout, r.stderr
-        except (subprocess.SubprocessError, OSError) as exc:
-            return -1, "", f"{type(exc).__name__}: {exc}"
-
-    async def _run_cli(argv: list[str], redact: str | None = None) -> JSONResponse:
-        rc, stdout, stderr = await _cli_raw(argv)
-
-        def _hide(s: str) -> str:
-            # never echo the bearer token (#26) back to the browser
-            return s.replace(redact, "***") if redact else s
-
-        return JSONResponse(
-            {
-                "ok": rc == 0,
-                "exit": rc,
-                "stdout": _hide(stdout),
-                "stderr": _hide(stderr),
-                "command": _hide(" ".join(argv)),
-                "note": "Claude Code may need a reload/restart to pick up the change",
-            }
+    def deps() -> admin_routes_claude.ClaudeRouteDeps:
+        # Resolve facade globals at request time so existing callers and tests
+        # can continue to monkeypatch mcp_gateway.admin collaborators.
+        return admin_routes_claude.ClaudeRouteDeps(
+            cli_path=lambda: shutil.which("claude"),
+            command=claude_mcp_command,
+            parse_registrations=parse_cc_registrations,
+            error=_err,
+            needs_json=_needs_json,
+            cache=_cc_reg_cache,
+            cache_ttl=CC_REG_CACHE_TTL,
+            monotonic=time.monotonic,
+            subprocess_run=subprocess.run,
+            cli_timeout=CLAUDE_CLI_TIMEOUT,
         )
 
-    def _missing_cli() -> JSONResponse | None:
-        if shutil.which("claude") is None:
-            return _err(
-                "claude CLI not found on the daemon's PATH — install Claude "
-                "Code (or expose `claude` to the daemon's environment), then "
-                "retry"
-            )
-        return None
-
-    async def register_backend(request: Request):
-        """``claude mcp add`` for one backend as ``gateway-<name>``. Requires
-        the backend to exist in config so the registered URL is real."""
-        name = request.path_params["name"]
-        payload = await request.json()
-        scope = payload.get("scope") or "local"
-        cfg = ctx.load()
-        if not any(x.name == name for x in cfg.backends):
-            return _err("unknown backend")
-        missing = _missing_cli()
-        if missing is not None:
-            return missing
-        url = f"http://{cfg.host}:{cfg.port}/{name}/mcp"
-        try:
-            # #26 × #45: a bearer-protected gateway needs the header in the
-            # registration or every call would 401. Resolved once, redacted
-            # from the response.
-            token = cl.expand_env(cfg.bearer_token) if cfg.bearer_token else None
-            argv = claude_mcp_command(
-                "add", name, url=url, scope=scope, bearer_token=token
-            )
-        except cl.ConfigError as exc:
-            return _err(str(exc))
-        return await _run_cli(argv, redact=token)
-
-    async def deregister_backend(request: Request):
-        """``claude mcp remove`` for ``gateway-<name>``. Deliberately does NOT
-        require the backend to exist in config — this is the cleanup path after
-        a remove/rename, when the backend is already gone."""
-        name = request.path_params["name"]
-        payload = await request.json()
-        scope = payload.get("scope") or "local"
-        missing = _missing_cli()
-        if missing is not None:
-            return missing
-        try:
-            argv = claude_mcp_command("remove", name, scope=scope)
-        except cl.ConfigError as exc:
-            return _err(str(exc))
-        return await _run_cli(argv)
-
-    async def cc_registrations(request: Request):
-        """#46: which backends are registered in Claude Code. Runs
-        ``claude mcp list`` ONCE (in a thread), caches the output in-process for
-        ``CC_REG_CACHE_TTL`` so page reloads don't re-shell the CLI; ``?fresh=1``
-        busts the cache (used right after a register/deregister). Returns
-        ``{"available": false}`` when the CLI isn't on PATH, else
-        ``{"available": true, "registered": {backend: bool}}``."""
-        if shutil.which("claude") is None:
-            return JSONResponse({"available": False})
-        fresh = request.query_params.get("fresh") in ("1", "true")
-        now = time.monotonic()
-        output = _cc_reg_cache.get("output")
-        if fresh or output is None or now - _cc_reg_cache["ts"] > CC_REG_CACHE_TTL:
-            try:
-                r = await asyncio.to_thread(
-                    subprocess.run,
-                    ["claude", "mcp", "list"],
-                    capture_output=True,
-                    text=True,
-                    timeout=CLAUDE_CLI_TIMEOUT,
-                    check=False,
-                )
-                output = (r.stdout or "") + (r.stderr or "")
-            except (subprocess.SubprocessError, OSError):
-                output = ""
-            _cc_reg_cache["output"] = output
-            _cc_reg_cache["ts"] = now
-        names = [b.name for b in ctx.load().backends]
-        return JSONResponse(
-            {"available": True, "registered": parse_cc_registrations(output, names)}
-        )
-
-    async def reregister_all(request: Request):
-        """#154: deregister + register EVERY enabled backend in Claude Code, so
-        one click re-points them all at this gateway (e.g. after the bearer token
-        changed — every registration must carry the new header). Sequential;
-        each backend gets a fresh `remove` then `add`. A per-backend failure is
-        recorded and does NOT abort the rest — the summary reports ok/fail each."""
-        payload = await request.json()
-        scope = payload.get("scope") or "local"
-        cfg = ctx.load()
-        missing = _missing_cli()
-        if missing is not None:
-            return missing
-        try:
-            # Resolved once for every registration; redacted from all output.
-            token = cl.expand_env(cfg.bearer_token) if cfg.bearer_token else None
-        except cl.ConfigError as exc:
-            return _err(str(exc))
-
-        def _hide(s: str) -> str:
-            return s.replace(token, "***") if token else s
-
-        results: list[dict] = []
-        for b in cfg.backends:
-            if not b.enabled:
-                continue  # only enabled backends are broadcast, so only they register
-            url = f"http://{cfg.host}:{cfg.port}/{b.name}/mcp"
-            try:
-                rm_argv = claude_mcp_command("remove", b.name, scope=scope)
-                add_argv = claude_mcp_command(
-                    "add", b.name, url=url, scope=scope, bearer_token=token
-                )
-            except cl.ConfigError as exc:
-                results.append({"backend": b.name, "ok": False, "error": str(exc)})
-                continue
-            await _cli_raw(rm_argv)  # best-effort cleanup; a missing reg is fine
-            rc, _out, err = await _cli_raw(add_argv)
-            results.append(
-                {
-                    "backend": b.name,
-                    "ok": rc == 0,
-                    "exit": rc,
-                    "stderr": _hide(err),
-                }
-            )
-        ok_count = sum(1 for r in results if r["ok"])
-        return JSONResponse(
-            {
-                "ok": all(r["ok"] for r in results),
-                "count": len(results),
-                "ok_count": ok_count,
-                "backends": results,
-                "note": "Claude Code may need a reload/restart to pick up the change",
-            }
-        )
-
-    return [
-        Route(
-            "/admin/api/cc-reregister-all",
-            _needs_json(reregister_all),
-            methods=["POST"],
-        ),
-        Route(
-            "/admin/api/backend/{name}/register",
-            _needs_json(register_backend),
-            methods=["POST"],
-        ),
-        Route(
-            "/admin/api/backend/{name}/deregister",
-            _needs_json(deregister_backend),
-            methods=["POST"],
-        ),
-        Route("/admin/api/cc-registrations", cc_registrations, methods=["GET"]),
-    ]
+    return admin_routes_claude.claude_routes(ctx, deps)
 
 
 def _codex_routes(ctx: _AdminCtx) -> list[Route]:
