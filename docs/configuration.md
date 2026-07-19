@@ -51,12 +51,12 @@ stateless = true
   [[backends.tools]]
   original = "web_search_exa"
   name = "web_search"
-  description = "What Claude should read for this tool."
+  description = "What an MCP client should read for this tool."
   enabled = true
 
     [[backends.tools.params]]
     original = "query"
-    description = "What Claude should read for this parameter."
+    description = "What an MCP client should read for this parameter."
 
     [[backends.tools.params]]
     original = "internal_flag"
@@ -84,7 +84,7 @@ diff-vs-default model (see below).
 | `baseline_max_age` | integer (seconds) | `86400` (24 h) | How long a captured baseline counts as fresh for the **post-mount** refresh: at boot (or remount) a backend whose stored baseline is younger than this is not re-introspected, sparing slow stdio backends a second cold start per boot. `0` disables the gate (re-capture on every mount). Only the mount-time trigger is gated — a backend's own change notification, an admin page load, and the manual Re-inspect button always refresh. |
 | `bearer_token` | string or unset | unset | Optional access token. When set (as a `${ENV}` reference), every backend endpoint **and** the admin API require `Authorization: Bearer <token>`. See [security.md](security.md#the-optional-bearer-token). |
 | `oauth` | table or unset | unset | JWT resource-server profile for standard remote OAuth. Mutually exclusive with `bearer_token`; protects each backend and `/virtual/mcp` independently. See [OAuth resource-server mode](#oauth-resource-server-mode). |
-| `backends` | list | required | One `[[backends]]` block per backend. At least one is required. |
+| `backends` | list | empty | One `[[backends]]` block per backend. An empty configuration is valid: the Admin UI remains available to add or import backends, and `/virtual/mcp` remains mounted with an empty catalog. No backend MCP endpoint is available until a backend is configured and mounted. |
 | `virtual_tools` | list | empty | Gateway-owned tools served together at the permanent `/virtual/mcp` endpoint. Normally managed through the Admin UI. |
 
 ## OAuth resource-server mode
@@ -113,7 +113,7 @@ combined with `[oauth]`.
 
 | Key | Type | Default | Meaning |
 |-----|------|---------|---------|
-| `name` | string | required | The backend's route identity. Drives the `/<name>/mcp` endpoint, the config key, the captured-defaults file, and the `gateway-<name>` Claude Code registration. Letters, digits, `_`, `-`, up to 64 characters. A live rename hot-mounts the new route; Claude Code still needs re-registration. Stable Virtual Tool identity is the separate auto-managed `id`. |
+| `name` | string | required | The backend's route identity. Drives the `/<name>/mcp` endpoint, the config key, the captured-defaults file, and the `gateway-<name>` client registration. Letters, digits, `_`, `-`, up to 64 characters. A live rename hot-mounts the new route; registered clients still need re-registration. Stable Virtual Tool identity is the separate auto-managed `id`. |
 | `display_name` | string or unset | unset | Cosmetic label shown in the admin UI only. Does not affect routing, the endpoint, or registration. Empty falls back to `name`. |
 | `transport` | `"http"` \| `"streamable-http"` \| `"sse"` \| `"stdio"` | required | How to reach the backend. `http` and `streamable-http` are the same modern remote transport; `sse` is the legacy remote transport; `stdio` runs a local command. |
 | `url` | string or unset | unset | The backend's URL. **Required for `http`/`streamable-http`/`sse`.** May contain `${ENV}` references. |
@@ -126,9 +126,9 @@ combined with `[oauth]`.
 | `args` | list of strings | empty | Arguments for the `stdio` `command`. |
 | `env` | table of string→string | empty | Environment variables for the `stdio` process. Values may use `${ENV}`. |
 | `stateless` | boolean | `false` | Session strategy. `false` (**warm**, the default and what the UI's import uses) keeps one persistent connection — much faster, and the gateway automatically reconnects it if it dies (at most one repair per 30s). `true` opens a fresh session per request — a fallback for backends whose sessions misbehave when held. Toggleable live per backend in the admin UI. |
-| `always_load` | boolean | `false` | Pin **all** of this backend's tools to load upfront (eager), instead of Claude Code's default deferred loading. |
+| `always_load` | boolean | `false` | Pin **all** of this backend's tools to load upfront (eager), where the connected client supports deferred loading. |
 | `enabled` | boolean | `true` | Whether the backend is broadcast at all. `false` disables every tool, drops its server instructions, and unmounts the endpoint. Toggles live in the admin UI without a restart. |
-| `instructions` | string or unset | unset | Overrides the backend's server-level instructions (the always-loaded blurb Claude reads at connect). Unset inherits the backend's captured original. Set it even when the backend sends none, to add your own. Capped at Claude Code's ~2KB budget. |
+| `instructions` | string or unset | unset | Overrides the backend's server-level instructions (the connection-time guidance a client receives). Unset inherits the backend's captured original. Set it even when the backend sends none, to add your own. The Admin UI, its API, and settings import reject overrides longer than 2,048 UTF-8 bytes; direct TOML values are not schema-capped. |
 | `tools` | list | empty | One `[[backends.tools]]` block per tool you override. |
 | `resources` | list | empty | One `[[backends.resources]]` block per resource or resource template you override. |
 | `prompts` | list | empty | One `[[backends.prompts]]` block per prompt you override. |
@@ -141,9 +141,9 @@ backend's original.
 | Key | Type | Default | Meaning |
 |-----|------|---------|---------|
 | `original` | string | required | The backend's own (real) name for the tool. This is the key that ties the override to the tool; it is never changed. |
-| `name` | string or unset | unset | The broadcast name Claude sees. Must be a valid identifier and unique within the backend. Omit to keep the original. |
+| `name` | string or unset | unset | The broadcast name a client sees. Must be a valid identifier and unique within the backend. Omit to keep the original. |
 | `title` | string or unset | unset | A human-readable display title. |
-| `description` | string or unset | unset | The description Claude reads to decide when and how to call the tool. |
+| `description` | string or unset | unset | The description a client receives to decide when and how to call the tool. |
 | `enabled` | boolean | `true` | `false` drops the tool from the listing entirely. |
 | `always_load` | boolean | `false` | Pin this one tool to load upfront (eager). |
 | `max_result_chars` | positive integer or unset | unset | Per-tool output budget: broadcast as `_meta["anthropic/maxResultSizeChars"]`, which Claude Code honors over its global 25k-token output cap (`MAX_MCP_OUTPUT_TOKENS`) for text content. Raise it for bulk readers, lower it for chatty tools. Unset = the client default. |
@@ -220,36 +220,36 @@ Each block rewrites (or hides) one parameter of a tool.
 | Key | Type | Default | Meaning |
 |-----|------|---------|---------|
 | `original` | string | required | The backend's own (real) name for the parameter. The key that ties the override to the param; never changed. |
-| `name` | string or unset | unset | The parameter name Claude sees. Omit to keep the original. |
-| `description` | string or unset | unset | What Claude reads about the parameter. |
-| `hide` | boolean | `false` | Remove the parameter from the schema Claude sees. A **required** parameter can only be hidden if you also set `default` (below); otherwise the save is rejected. |
-| `default` | string, number, or boolean, or unset | unset | A fixed value the gateway injects into every call to the backend. Scalars only. Setting it makes hiding a required parameter safe: Claude never sees the parameter, and the backend always receives this value. An optional parameter may take a `default` without being hidden. |
+| `name` | string or unset | unset | The parameter name a client sees. Omit to keep the original. |
+| `description` | string or unset | unset | What a client receives about the parameter. |
+| `hide` | boolean | `false` | Remove the parameter from the schema a client sees. A **required** parameter can only be hidden if you also set `default` (below); otherwise the save is rejected. |
+| `default` | string, number, or boolean, or unset | unset | A fixed value the gateway injects into every call to the backend. Scalars only. Setting it makes hiding a required parameter safe: the client never sees the parameter, and the backend always receives this value. An optional parameter may take a `default` without being hidden. |
 
 ## Resource overrides (`[[backends.resources]]`)
 
 Each block rewrites the display text of one resource **or resource template**.
-The `uri` is the identity Claude reads by — it is never rewritten.
+The `uri` is the identity an MCP client reads by — it is never rewritten.
 
 | Key | Type | Default | Meaning |
 |-----|------|---------|---------|
 | `uri` | string | required | The resource's URI (or a template's `uriTemplate`). The key that ties the override to the resource; never changed. |
-| `name` | string or unset | unset | The display name Claude sees. Free-form text (resources have no identifier charset). |
+| `name` | string or unset | unset | The display name a client sees. Free-form text (resources have no identifier charset). |
 | `title` | string or unset | unset | A human-readable display title. |
-| `description` | string or unset | unset | The description Claude reads. |
+| `description` | string or unset | unset | The description a client receives. |
 | `enabled` | boolean | `true` | `false` drops the resource from the listing **and** blocks reads through the gateway. |
 
 ## Prompt overrides (`[[backends.prompts]]`)
 
-Each block rewrites one of the backend's prompts. Renames are real: Claude sees
+Each block rewrites one of the backend's prompts. Renames are real: a client sees
 the new name and a `prompts/get` for it is forwarded to the backend under its
 original name.
 
 | Key | Type | Default | Meaning |
 |-----|------|---------|---------|
 | `original` | string | required | The backend's own (real) name for the prompt. Never changed. |
-| `name` | string or unset | unset | The broadcast name Claude sees. Must be a valid identifier and unique within the backend's prompts. |
+| `name` | string or unset | unset | The broadcast name a client sees. Must be a valid identifier and unique within the backend's prompts. |
 | `title` | string or unset | unset | A human-readable display title. |
-| `description` | string or unset | unset | The description Claude reads. |
+| `description` | string or unset | unset | The description a client receives. |
 | `enabled` | boolean | `true` | `false` drops the prompt from the listing and blocks `prompts/get`. |
 | `args` | list | empty | One `[[backends.prompts.args]]` block per argument whose **description** you override. Argument *names* are not renameable — the call forwards the arguments to the backend verbatim. Each block: `original` (the argument name) + `description`. |
 

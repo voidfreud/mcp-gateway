@@ -1,0 +1,29 @@
+# Contributing to mcp-gateway
+
+Start with the repository’s canonical [contributor manual](AGENTS.md). It
+defines scope, issue tracking, verification, documentation, release, and PR
+policy for every contributor and coding client.
+
+## Prerequisites
+
+Install [`uv`](https://docs.astral.sh/uv/) and
+[`just`](https://just.systems/). From a checkout, prepare the locked
+development environment and run the standard gate:
+
+```sh
+uv sync --locked
+just check
+```
+
+For product setup, configuration, and local service operations, use the
+[installation guide](docs/installation.md),
+[configuration reference](docs/configuration.md), and
+[operations guide](docs/operations.md). Do not run stateful install, update,
+restart, uninstall, or purge commands without explicit authorization.
+
+## Pull requests
+
+Use a focused branch and a GitHub Issue for bugs, deferred work, features,
+follow-ups, or decisions. Include the relevant tests and documentation, explain
+which verification layers ran, and open a pull request for CI and review.
+Approved changes are squash-merged; do not push directly to `main`.
