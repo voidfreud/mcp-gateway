@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
-import subprocess
 from collections.abc import Callable, MutableMapping
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -12,6 +10,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
+from mcp_gateway import admin_cli
 from mcp_gateway import config_loader as cl
 from mcp_gateway.config_loader import GatewayConfig
 
@@ -50,18 +49,7 @@ def claude_routes(  # noqa: PLR0915 - nested route handlers stay cohesive
 
     async def _cli_raw(argv: list[str]) -> tuple[int, str, str]:
         deps = deps_factory()
-        try:
-            result = await asyncio.to_thread(
-                deps.subprocess_run,
-                argv,
-                capture_output=True,
-                text=True,
-                timeout=deps.cli_timeout,
-                check=False,
-            )
-            return result.returncode, result.stdout, result.stderr
-        except (subprocess.SubprocessError, OSError) as exc:
-            return -1, "", f"{type(exc).__name__}: {exc}"
+        return await admin_cli.run_cli(deps.subprocess_run, argv, deps.cli_timeout)
 
     async def _run_cli(argv: list[str], redact: str | None = None) -> JSONResponse:
         rc, stdout, stderr = await _cli_raw(argv)
@@ -134,18 +122,10 @@ def claude_routes(  # noqa: PLR0915 - nested route handlers stay cohesive
         now = deps.monotonic()
         output = deps.cache.get("output")
         if fresh or output is None or now - deps.cache["ts"] > deps.cache_ttl:
-            try:
-                result = await asyncio.to_thread(
-                    deps.subprocess_run,
-                    ["claude", "mcp", "list"],
-                    capture_output=True,
-                    text=True,
-                    timeout=deps.cli_timeout,
-                    check=False,
-                )
-                output = (result.stdout or "") + (result.stderr or "")
-            except (subprocess.SubprocessError, OSError):
-                output = ""
+            rc, stdout, stderr = await admin_cli.run_cli(
+                deps.subprocess_run, ["claude", "mcp", "list"], deps.cli_timeout
+            )
+            output = (stdout or "") + (stderr or "") if rc >= 0 else ""
             deps.cache["output"] = output
             deps.cache["ts"] = now
         names = [backend.name for backend in ctx.load().backends]
