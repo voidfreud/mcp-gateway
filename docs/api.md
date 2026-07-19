@@ -1,13 +1,17 @@
 # Admin HTTP API
 
-The admin UI is a thin front end over an HTTP API served by the same daemon at
-`http://127.0.0.1:9100`. This page documents that API for scripting and
+The admin UI is a thin front end over an HTTP API served by the same daemon.
+The default address is `http://127.0.0.1:9100`; configured deployments use
+their configured host and port. This page documents that API for scripting and
 automation. Most people never need it — the [admin UI](admin-guide.md) does all
 of this — but it is here when you want it.
 
 ## Conventions
 
-- **Base URL:** `http://127.0.0.1:9100` (loopback only).
+- **Base URL:** the default is `http://127.0.0.1:9100`. The configured
+  `host` and `port` determine the actual URL. A non-loopback bind is supported
+  only with bearer or OAuth authentication; see
+  [security.md](security.md#binding-beyond-loopback).
 - **Content type:** every mutating route (POST/PUT/DELETE with a body) expects a
   JSON request body and `Content-Type: application/json`; a non-JSON body is
   rejected with `400`.
@@ -23,11 +27,16 @@ of this — but it is here when you want it.
   FastMCP's per-resource OAuth provider.
 - **Error shape:** validation and not-found errors return
   `{"ok": false, "error": "<message>"}` with a `4xx` status.
-- **`reloaded` field:** mutating responses report how the change applied —
-  `"in-process"` (hot-reloaded, no restart), `"restarting"` (a topology change
-  restarting the daemon), or `"dev-no-restart"` (topology change while running in
-  the foreground, where there is no service to restart; config is written and
-  takes effect on the next real restart).
+- **`reloaded` field:** routes that change live or boot-time state report how
+  the change applied. `"in-process"` is an immediate backend-proxy update,
+  `"hot"` is an immediate Virtual Tools endpoint update, and `"recycled"`
+  rebuilds one backend session. `"hot-add"` and `"hot-rename"` mounted the new
+  backend route live. `"mount-failed"` means an imported backend was saved but
+  could not be mounted; repair it and restart or re-enable it. A failed rename
+  returns HTTP 500 with `"mount-failed-rolled-back"` after restoring its prior
+  configuration. `"restarting"` means a launchd-managed daemon has been asked
+  to restart; `"dev-no-restart"` means the configuration was saved in a
+  foreground/development process and applies on its next real restart.
 
 ## Liveness (top-level, always open)
 
@@ -48,13 +57,13 @@ of this — but it is here when you want it.
 
 | Method | Path | Body | Response |
 |--------|------|------|----------|
-| PUT | `/admin/api/override` | `{backend, original, name?, title?, description?, enabled?, always_load?, max_result_chars?, params?, on_collision?}` | `{ok, reloaded: "in-process"}`. `max_result_chars` (a positive integer, or `null` to clear) sets the tool's `_meta["anthropic/maxResultSizeChars"]` output budget; anything else is a 400. If `on_collision: "uniquify"` was set and a name collided, also `{name: "<final>", uniquified: true}`. A collision without uniquify, or an invalid field, returns `{ok:false, error}`. Merge semantics: a key absent from the body preserves the stored value rather than clearing it. |
+| PUT | `/admin/api/override` | `{backend, tool_original, override: {name?, title?, description?, enabled?, always_load?, max_result_chars?, params?}, on_collision?}` | `{ok, reloaded: "in-process"}`. `max_result_chars` (a positive integer, or `null` to clear) sets the tool's `_meta["anthropic/maxResultSizeChars"]` output budget; anything else is a 400. If `on_collision: "uniquify"` was set and a name collided, also `{name: "<final>", uniquified: true}`. A collision without uniquify, or an invalid field, returns `{ok:false, error}`. Merge semantics apply inside `override`: an omitted key preserves its stored value rather than clearing it. |
 | POST | `/admin/api/reset` | `{backend, tool_original}` | `{ok}`. Clears every override for that one tool (reverts to the backend default). |
 | PUT | `/admin/api/resource-override` | `{backend, uri, override: {name?, title?, description?, enabled?}}` | `{ok, reloaded: "in-process"}`. Rewrites a resource's (or resource template's) display text; `uri` is the identity and is never rewritten. Same merge semantics as tool overrides. |
 | POST | `/admin/api/resource-reset` | `{backend, uri}` | `{ok}`. Clears every override for that one resource. |
 | PUT | `/admin/api/prompt-override` | `{backend, prompt_original, override: {name?, title?, description?, enabled?, args?}}` | `{ok, reloaded: "in-process"}`. Rewrites a prompt (renames reverse-map on `prompts/get`); `args` is a list of `{original, description}` — argument names are not renameable. Invalid name or a name collision returns `{ok:false, error}`. |
 | POST | `/admin/api/prompt-reset` | `{backend, prompt_original}` | `{ok}`. Clears every override for that one prompt. |
-| PUT | `/admin/api/instructions` | `{backend, value}` | `{ok}`. Sets the backend's server-instructions override (`value` empty inherits the original). Rejected if it exceeds the ~2KB budget. |
+| PUT | `/admin/api/instructions` | `{backend, value}` | `{ok}`. Sets the backend's server-instructions override (`value` empty inherits the original). Admin/API writes are rejected above 2,048 UTF-8 bytes; a directly authored TOML `Backend.instructions` value is not schema-capped. |
 | POST | `/admin/api/import` | `{mode: "merge"\|"replace", settings: {...}}` | `{ok, backends, mode}` on success; `400 {ok:false, errors, applied:false}` if any item is invalid (all-or-nothing). Backend topology is never imported. |
 | POST | `/admin/api/backend/{name}/migrate-override` | `{from, to}` | Carries a stale override (its `from` tool no longer exists upstream) onto the tool's new name `to`; params that no longer exist are dropped and reported. `{ok, dropped_params}`. `400` if `to` is unknown or already overridden. |
 | POST | `/admin/api/backend/{name}/discard-override` | `{original}` | Drops a stale override entry. `{ok}`; `400` when no such entry. |
@@ -63,16 +72,34 @@ of this — but it is here when you want it.
 
 | Method | Path | Body | Response |
 |--------|------|------|----------|
-| POST | `/admin/api/backend` | `{name, transport, url?/command?/args?, auth_header?, auth_value?, headers?, auth?, headers_helper?, stateless?}` | Imports a new backend: validates, connects and captures its baseline, then restarts. `400` on a name clash, invalid fields, or a failed connection. |
-| DELETE | `/admin/api/backend/{name}` | — | Removes the backend and prunes its captured defaults; restarts. `{ok, reloaded}`. |
-| POST | `/admin/api/backend/{name}/rename` | `{value: "<new name>"}` | Hard rename (endpoint, config key, defaults, registration all move). A live daemon hot-mounts the new route; external Claude Code registration still needs updating. Response includes `old_endpoint`, `new_endpoint`, `old_registration`, `new_registration`. |
+| POST | `/admin/api/backend` | `{name, transport, url?/command?/args?, auth_header?, auth_value?, headers?, auth?, headers_helper?, stateless?}` | Validates, connects, captures a baseline, and saves a new backend. When lifecycle mount hooks are available, it mounts live with `reloaded: "hot-add"`; a mount failure leaves the saved backend and returns `"mount-failed"` for repair/restart. Without those hooks it returns normal restart semantics (`"restarting"` when launchd-managed, otherwise `"dev-no-restart"`). `400` on a name clash, invalid fields, or a failed initial connection. |
+| DELETE | `/admin/api/backend/{name}` | — | Removes the backend and prunes its captured defaults. Returns normal restart semantics: `"restarting"` when launchd-managed, otherwise `"dev-no-restart"`. |
+| POST | `/admin/api/backend/{name}/rename` | `{value: "<new name>"}` | Hard rename (endpoint, config key, defaults, registration all move). With live mount hooks, it mounts the new route as `"hot-rename"`; a failed mount returns HTTP 500 as `"mount-failed-rolled-back"` after restoring the old configuration. Without those hooks it returns normal restart semantics. External MCP-client registrations still need updating. Response includes `old_endpoint`, `new_endpoint`, `old_registration`, `new_registration`. |
 | POST | `/admin/api/backend/{name}/display-name` | `{value: "<label>"}` | Sets the cosmetic display label (empty clears it). `{ok}`. No restart. |
 | POST | `/admin/api/backend/{name}/enabled` | `{value: bool}` | Enable (mount live) or disable (unmount) the backend. `{ok, reloaded: "in-process"}`. |
 | POST | `/admin/api/enabled` | `{value: bool}` | Master switch: enable/disable every backend, mounting or unmounting each. `{ok, reloaded: "in-process"}`. |
 | POST | `/admin/api/backend/{name}/pin` | `{value: bool}` | Toggle per-backend eager loading (pin all its tools). `{ok, reloaded: "in-process"}`. |
 | POST | `/admin/api/backend/{name}/stateless` | `{value: bool}` | Session strategy: `false` = warm (one persistent connection, auto-repaired if it dies), `true` = fresh session per call. Saves and recycles the backend live — no restart. `{ok, reloaded: "recycled", stateless}`. |
-| GET | `/admin/api/settings` | — | The gateway-wide settings: `{bearer_token, introspect_interval}` (the token is the `${ENV}` reference, never a resolved secret). OAuth deployments additionally return read-only `auth_mode` and public `oauth` metadata. |
-| PUT | `/admin/api/settings` | `{bearer_token?, introspect_interval?}` | Validates (`bearer_token` empty or containing `${...}`; interval ≥ 0) and saves. Both are read at daemon start, so the response carries restart semantics. |
+| GET | `/admin/api/settings` | — | The gateway-wide settings: `{bearer_token, introspect_interval, log_level, log_max_bytes, log_backup_count}`. `bearer_token` is the stored `${ENV_VAR}` reference, never a resolved secret. OAuth deployments additionally return read-only `auth_mode` and public `oauth` metadata. |
+| PUT | `/admin/api/settings` | Any subset of the settings keys below. | Validates and persists boot-time settings. A launchd-managed daemon is asked to restart (`reloaded: "restarting"`); a foreground/development process returns `"dev-no-restart"`, leaving the saved values for its next real restart. In OAuth mode, changing `bearer_token` is rejected. |
+
+### Gateway settings payload
+
+`PUT /admin/api/settings` accepts any subset of these keys:
+
+| Key | JSON type | Meaning and validation |
+|-----|-----------|------------------------|
+| `bearer_token` | string or `null` | Optional static-bearer token reference. Use one `${ENV_VAR}` reference; `""` or `null` clears it. Raw secrets are rejected. This key cannot change while `[oauth]` is configured. |
+| `introspect_interval` | integer | Seconds between scheduled backend re-inspection sweeps; `0` disables the scheduled sweep. Must be `0` or greater. Event-driven refresh remains available when it is `0`. |
+| `log_level` | string | Structured-log verbosity: `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL` (normalized to uppercase). |
+| `log_max_bytes` | integer | Maximum size of the active log before rotation, from `65536` to `1073741824` bytes. |
+| `log_backup_count` | integer | Number of rotated log files to retain, from `1` to `100`. |
+
+The Gateway page currently writes `bearer_token`, `introspect_interval`, and
+`log_level`. It displays the two retention values read-only; set
+`log_max_bytes` and `log_backup_count` through this API or
+[configuration.md](configuration.md). All five values take effect after the
+managed restart, or after the next real restart in foreground/development mode.
 
 ## Claude Code registration
 
@@ -95,11 +122,22 @@ server. Codex has no Claude-style registration scope. When gateway bearer auth
 is enabled, the configured token must be a single `${ENV_VAR}` reference; only
 the variable name is stored in Codex configuration.
 
+The register and deregister routes return `{ok, exit, stdout, stderr, command,
+note}` on every completed CLI invocation. A non-zero Codex exit is therefore
+an HTTP `200` response with `ok:false`, so callers can use the captured CLI
+receipt. If the CLI is unavailable, those mutation routes return `400` instead.
+`GET /admin/api/codex-registrations` always returns HTTP `200`: it returns
+`{available:false}` when the CLI is unavailable, `{available:true, ok:false,
+error}` when listing or parsing registrations fails, and `{available:true,
+ok:true, registered}` on success.
+
 | Method | Path | Body | Response |
 |--------|------|------|----------|
-| POST | `/admin/api/backend/{name}/codex/register` | `{}` | Runs `codex mcp add gateway-<name> --url <backend endpoint>`, with `--bearer-token-env-var` when applicable. `{ok, exit, stdout, stderr, command, note}`. |
+| POST | `/admin/api/backend/{name}/codex/register` | `{}` | Runs `codex mcp add gateway-<name> --url <backend endpoint>`, with `--bearer-token-env-var` when applicable. The backend must exist. |
 | POST | `/admin/api/backend/{name}/codex/deregister` | `{}` | Runs `codex mcp remove gateway-<name>`. Works after the backend has been removed so cleanup remains possible. |
-| GET | `/admin/api/codex-registrations` | — (`?fresh=1` busts the 60s cache) | Exact registration state parsed from `codex mcp list --json`. `{available, ok, registered: {<backend>: bool}}`; `{available:false}` when the CLI is unavailable. |
+| POST | `/admin/api/virtual/codex/register` | `{}` | Runs `codex mcp add gateway-virtual --url <virtual endpoint>`, with `--bearer-token-env-var` when applicable. |
+| POST | `/admin/api/virtual/codex/deregister` | `{}` | Runs `codex mcp remove gateway-virtual`. |
+| GET | `/admin/api/codex-registrations` | — (`?fresh=1` busts the 60s cache) | Exact registration state parsed from `codex mcp list --json`; see the response cases above. |
 
 ## Virtual Tools
 
@@ -111,13 +149,13 @@ current effective names are resolved from the live transformed proxies.
 |--------|------|------|----------|
 | GET | `/admin/api/virtual-tools` | — | `{mounted, endpoint, tools}` with full definitions, live member resolution, and last test/dispatch status. Router API keys are `${ENV}` references, never resolved values. |
 | GET | `/admin/api/virtual-catalog` | — | Picker catalog: backend IDs plus original/effective backend, tool, and parameter names. |
-| POST | `/admin/api/virtual-tools` | Full definition | Creates a disabled draft after model validation and dry-build. `{ok, tool, lifecycle:"draft"}`. |
-| PUT | `/admin/api/virtual-tools/{name}` | Full definition | Atomically saves a disabled draft, including when editing an active definition. Submitted consent fingerprints are ignored; activation binds consent to the resulting definition. |
-| DELETE | `/admin/api/virtual-tools/{name}` | — | Deletes the definition and hot-reloads `/virtual/mcp`; rolls back on reload failure. |
-| POST | `/admin/api/virtual-tools/{name}/validate` | — | Live resolution receipt `{ok, members, errors}` without member calls. |
-| POST | `/admin/api/virtual-tools/{name}/test` | `{arguments}` | Calls the saved definition without changing activation and returns its fidelity-preserving MCP result receipt. |
-| POST | `/admin/api/virtual-tools/{name}/activate` | — | Live-resolves, dry-builds, persists `enabled=true`, then hot-reloads atomically. |
-| POST | `/admin/api/virtual-tools/{name}/disable` | — | Persists `enabled=false` and removes the tool from the shared endpoint without unmounting it. |
+| POST | `/admin/api/virtual-tools` | Full definition | Creates a disabled draft after model validation and dry-build. `{ok, tool, lifecycle:"draft"}` with HTTP `201`; invalid, duplicate, or unbuildable definitions return `400`. |
+| PUT | `/admin/api/virtual-tools/{name}` | Full definition | Atomically saves a disabled draft, including when editing an active definition. Submitted consent fingerprints are ignored; activation binds consent to the resulting definition. `404` if the name is unknown; `400` for an invalid, colliding, or unbuildable definition; `500` if replacing an active definition cannot hot-reload and is restored. |
+| DELETE | `/admin/api/virtual-tools/{name}` | — | Deletes the definition and hot-reloads `/virtual/mcp`; `404` if unknown and `500` if reload fails and the definition is restored. |
+| POST | `/admin/api/virtual-tools/{name}/validate` | — | Live resolution receipt `{ok, members, errors}` without member calls. `404` if unknown; unresolved members return that receipt with `400`. |
+| POST | `/admin/api/virtual-tools/{name}/test` | `{arguments}` | Calls the saved definition without changing activation and returns its fidelity-preserving MCP result receipt. `404` if unknown; invalid or unresolved input returns `400`. A completed tool-level error remains a `200` receipt with `ok:false`. |
+| POST | `/admin/api/virtual-tools/{name}/activate` | — | Live-resolves, dry-builds, persists `enabled=true`, then hot-reloads atomically. `404` if unknown; unresolved or unbuildable definitions return `400`; a failed hot reload returns `500` after restoring the draft. |
+| POST | `/admin/api/virtual-tools/{name}/disable` | — | Persists `enabled=false` and removes the tool from the shared endpoint without unmounting it. `404` if unknown; a failed hot reload returns `500` after restoring the active definition. |
 
 Backend removal is rejected while a Virtual Tool references its stable ID.
 Backend rename preserves the ID and proves the new effective route can mount
@@ -128,7 +166,7 @@ unresolved are rejected before persistence.
 
 | Method | Path | Body | Response |
 |--------|------|------|----------|
-| POST | `/admin/api/run` | `{backend, tool, args}` | Executes one tool through the live proxy (the same path Claude uses). `{ok, is_error, ms, content, structured}`. `400` if the backend isn't mounted or the input is invalid; `502` if the call itself raised. |
+| POST | `/admin/api/run` | `{backend, tool, args}` | Executes one tool through the live proxy (the same path MCP clients use). `{ok, is_error, ms, content, structured}`. `400` if the backend isn't mounted or the input is invalid; `502` if the call itself raised. |
 | POST | `/admin/api/restart` | — | Restarts the daemon on demand (honest no-op in foreground/dev). |
 | POST | `/admin/api/introspect/{name}` | — | Forces a re-capture of the backend's live tool list (bypasses the throttle) and hot-reloads. `{ok, ...}` with the tool delta; `502` if introspection failed. |
 | GET | `/admin/api/status` | — | Per-backend liveness, one concurrent probe each. `{backends: {<name>: {state, ms?, tools?, error?}}}` where `state` is `ok`, `error`, `disabled`, or `unmounted`. |

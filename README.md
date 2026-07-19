@@ -2,35 +2,67 @@
 
 [![check](https://github.com/voidfreud/mcp-gateway/actions/workflows/check.yml/badge.svg)](https://github.com/voidfreud/mcp-gateway/actions/workflows/check.yml)
 
-A local service that sits between MCP clients such as Claude Code and Codex and
-the MCP servers they talk to, and
-**rewrites everything those servers broadcast** — tool names, titles,
-descriptions, parameter docs, resource and prompt text, and the server's own
-instructions — while passing the actual tool calls through untouched. When an MCP server is written badly
-enough that Claude can't tell what its tools do, you fix what Claude reads about
-it here, without forking the server. It runs as one background daemon on your Mac,
-shared by every client session, with a web admin UI at
-**http://127.0.0.1:9100/admin**.
+**Make MCP servers easier for every MCP client to use.** mcp-gateway is a local
+MCP proxy that lets you improve a backend's tool names, descriptions,
+parameters, prompts, resources, and server instructions without forking that
+backend. Calls still reach the original backend; the gateway improves the
+surface your client receives.
+
+It runs one local HTTP service with an admin UI at
+<http://127.0.0.1:9100/admin>. Claude Code and Codex are supported equally as
+independent clients: each backend keeps its own `/<backend>/mcp` endpoint.
 
 ![The admin UI's backend view — live status, grouped controls, stale-override
 repair, and inline tool editing (follows your system's light/dark theme)](docs/img/admin-backend-dark.png)
 
-## Why this exists
+## At a glance
 
-MCP is largely wasted in Claude Code today, and the fault is upstream: server
-authors ship tools with vague names, empty instructions, and parameter
-descriptions that tell the model nothing. The protocol is fine — the surface
-authors expose over it is not, so many servers arrive as dead weight Claude can't
-reliably select or call. And that waste is doubly a shame, because Claude Code
-**lazy-loads** tools: a server costs almost nothing to keep connected until one of
-its tools is actually used. mcp-gateway reclaims those servers — it lets you
-override the text a backend broadcasts until a sloppy server reads to the model
-like a well-designed one, no fork required. It is hand-work, but it turns
-otherwise-useless MCP servers into ones that work.
+```text
+MCP client (Claude Code, Codex, or another MCP client)
+                        │
+                        ▼
+          mcp-gateway — localhost:9100/<backend>/mcp
+                        │
+                        ▼
+              remote or local MCP backend
+```
 
-## Quickstart (about 5 minutes)
+The gateway is deliberately a proxy and editor, not a replacement MCP client or
+an identity provider. It can rewrite what a backend advertises and optionally
+validate or post-process calls; it does not silently change a backend's core
+behavior.
 
-You need [`uv`](https://docs.astral.sh/uv/) installed. Then:
+## Start here
+
+Prerequisites:
+
+- [`uv`](https://docs.astral.sh/uv/) to install and run the foreground package.
+- [`just`](https://just.systems/) only for the repository's check and macOS
+  deployment recipes, including `just update`.
+- GitHub access that can clone this private repository. Configure Git or the
+  GitHub CLI with an authorized account before using a GitHub URL below.
+
+For a portable, foreground run on any platform:
+
+```bash
+uv tool install git+https://github.com/voidfreud/mcp-gateway
+mcp-gateway
+```
+
+The gateway selects its configuration in this order: `MCP_GATEWAY_CONFIG`, an
+existing `./config.toml`, then `~/.config/mcp-gateway/config.toml`. It seeds the
+selected missing path from the packaged default, so a fresh `uv tool` run
+normally creates the home-path file. The bundled DeepWiki and Context7 examples
+are stateless proxies once running, but a freshly seeded default configuration
+with no captured-default state is not network-silent: before the app mounts its
+endpoints, startup connects to both public services to capture each backend's
+baseline metadata and tool list. Complete captured defaults are normally reused
+on later starts. That initial capture is separate from ordinary proxy use; tool
+calls can also make backend requests. Replace or remove those entries before
+starting the gateway if those outbound connections are not appropriate for your
+environment. Stop the foreground process with Ctrl-C.
+
+For a macOS login service, clone the repository and install it:
 
 ```bash
 git clone https://github.com/voidfreud/mcp-gateway
@@ -38,104 +70,79 @@ cd mcp-gateway
 ./install.sh
 ```
 
-`./install.sh` sets everything up: it builds the environment, installs a login
-service so the gateway starts with your Mac, and starts it now. Removal is just
-as easy: `./install.sh --uninstall` reverses it all, keeping your config and
-state unless you add `--purge` (see
-[docs/installation.md](docs/installation.md)). Confirm it's up:
+This stateful installation manages a LaunchAgent, a stable symlink, and local
+runtime state. Preview it with `./install.sh --dry-run`. For the exact behavior,
+moving, upgrades, and removal, read [the installation guide](docs/installation.md).
+
+Open <http://127.0.0.1:9100/admin> to import or edit backends. If the relevant
+client CLI is installed, the admin UI provides verified registration controls for
+both Claude Code and Codex; otherwise register the backend endpoint manually in
+your MCP client. See [the admin guide](docs/admin-guide.md).
+
+## Running and updating
+
+`/health` answers whether the gateway process is alive and identifies the code
+path it is running. `/ready` answers whether the gateway and every enabled
+backend are mounted; it returns `503` while any enabled backend is unavailable.
 
 ```bash
-curl -s http://127.0.0.1:9100/health   # -> ok mcp-gateway <version> @ /path/to/clone
+curl -s http://127.0.0.1:9100/health
+curl -s http://127.0.0.1:9100/ready
 ```
 
-To update a Path A installation after changes are merged to GitHub, run the
-single guarded deployment command from a clean checkout on `main`:
+For a macOS checkout installation only, `just update` is a guarded, stateful,
+readiness-dependent deployment command. Run it from a clean `main` checkout
+after changes have merged: it fast-forwards `origin/main`, synchronizes the
+locked environment, reinstalls/reloads the LaunchAgent, and waits for both
+endpoints. It preserves the configuration and runtime state, but briefly
+interrupts MCP sessions.
 
 ```bash
 just update
 ```
 
-It fast-forwards from `origin/main`, synchronizes the locked environment,
-reloads the LaunchAgent, and verifies `/health` and `/ready`. It preserves your
-admin-edited configuration and runtime state.
+It is not a general upgrade command for `uv tool` installations; use `uv tool
+upgrade mcp-gateway` for that path.
 
-Now open the admin UI at **http://127.0.0.1:9100/admin** and:
+## What you can change
 
-1. Click **Import MCP** and add a backend (its URL, or its local command).
-2. Use the backend's **Claude Code** or **Codex** controls to register that
-   independent MCP with either client.
-3. Edit the backend's tool names and descriptions to taste — edits auto-save.
-4. Optionally open **Virtual Tools** to compose or route several backend tools
-   behind one gateway-owned tool on `/virtual/mcp`.
+- Tool, parameter, resource, prompt, and server-instruction text.
+- Visibility, injected defaults, output budgets, and per-tool behavior hooks.
+- Backend configuration and independent client registrations.
+- Gateway-owned Virtual Tools that compose or route backend tools at
+  `/virtual/mcp`.
 
-That's it. See [docs/admin-guide.md](docs/admin-guide.md) for the full tour.
+The detailed configuration and security contracts live in the linked manuals;
+this README intentionally does not duplicate them.
 
-## What you get
+## Validation boundaries
 
-- **One endpoint per backend** — each backend is its own MCP server in Claude
-  Code (`/<backend>/mcp`), with its own instructions budget.
-- **First-class Virtual Tools** — create, validate, live-test, and activate
-  gateway-owned composite/routing tools from the UI. Stable source bindings,
-  concurrent fan-out, keyword/LLM selection, explicit fallbacks, rich MCP result
-  preservation, and output budgets share one permanent `/virtual/mcp` endpoint.
-- **Live editing with hot reload** — rewrite any tool name, title, description, or
-  parameter doc; text changes apply to the running gateway instantly, no restart.
-- **Connection status dots** — each backend shows a live green/red health dot with
-  its tool count, probed through the real proxy.
-- **Auto-refreshing tool lists** — the captured baseline refreshes itself on
-  reconnect, on a backend's own change signal, and on admin page load; your edits
-  are never clobbered.
-- **Injected parameter defaults** — pin a fixed value the gateway sends on every
-  call, and safely hide the parameter from Claude even when it's required.
-- **Hard rename** — change a backend's real identity (endpoint, config key,
-  registration) in one action, with a prompt to re-register.
-- **One-click Claude Code registration** — register or remove a backend's endpoint
-  from the UI, at the scope you choose, no terminal.
-- **One-click Codex registration** — add or remove that same independent backend
-  through Codex's own CLI/config. Codex discovers its tools after restart or in a
-  new task; backends are never collapsed into one aggregate MCP.
-- **Collision handling** — two tools can never share a broadcast name; bulk
-  renames can auto-uniquify with a suffix.
-- **Resource & prompt rewriting** — the same override story for everything else
-  a backend broadcasts: resource names and descriptions, prompt renames (calls
-  reverse-map to the original), prompt argument docs.
-- **Behavior hooks** — attach your own `validate` (reject bad calls with a clear
-  message) or `post_process` (reshape noisy output) Python function to any tool,
-  without forking the backend.
-- **Optional bearer token** — require an `Authorization` header on every endpoint
-  and the admin API, for defense against other local processes. With it set, the
-  gateway may also bind beyond loopback (e.g. a Tailscale IP) — refused otherwise.
-- **Standard OAuth resource-server mode** — protect each independent backend and
-  `/virtual/mcp` with endpoint-specific JWT audiences, RFC 9728 metadata, and
-  proper 401/403 scope challenges. Login and token issuance stay in your
-  external OAuth/OIDC provider; the Admin API uses a separate static token.
-- **Export / import** — round-trip all your overrides as one JSON bundle.
-
-## Alternative install (any platform)
-
-To install just the `mcp-gateway` command without the login service (the only
-option off macOS):
-
-```bash
-uv tool install git+https://github.com/voidfreud/mcp-gateway
-mcp-gateway            # runs in the foreground; config auto-seeds at
-                       # ~/.config/mcp-gateway/config.toml on first run
-```
-
-Distribution is uv-from-GitHub by choice — the package is not on PyPI.
+`just check` is the repeatable local quality gate. CI runs that gate and a
+hermetic MCP conformance job using disposable fixtures; it does not contact your
+personal backends or exercise your installed daemon. Those stateful, local
+integration checks remain your responsibility. `just verify` is opt-in: it may
+call the public DeepWiki service, sends no bearer or OAuth credentials, and is
+only suitable for an equivalent unprotected test instance.
 
 ## Documentation
 
-- **[docs/installation.md](docs/installation.md)** — both install paths,
-  upgrading, moving the repo, uninstalling.
-- **[docs/admin-guide.md](docs/admin-guide.md)** — a full tour of the admin UI.
-- **[docs/configuration.md](docs/configuration.md)** — the complete `config.toml`
-  reference and how secrets work.
-- **[docs/operations.md](docs/operations.md)** — the daemon, logs, health checks,
-  backups, recovery, and troubleshooting.
-- **[docs/security.md](docs/security.md)** — the threat model: what's protected and
-  what isn't.
-- **[docs/api.md](docs/api.md)** — the admin HTTP API for scripting.
+- [Installation](docs/installation.md) — foreground and macOS service paths,
+  upgrades, moves, and uninstalling.
+- [Admin guide](docs/admin-guide.md) — editing, registration, and Virtual Tools.
+- [Configuration reference](docs/configuration.md) — `config.toml`, backends,
+  secrets, and behavior hooks.
+- [Operations](docs/operations.md) — readiness, logs, recovery, and local
+  verification boundaries.
+- [Security](docs/security.md) — network exposure, bearer tokens, OAuth, and
+  local trust boundaries.
+- [Admin API](docs/api.md) — scripting interface and API contracts.
+
+## Contributing
+
+Work through pull requests, with CI as the shared baseline. Start with
+[CONTRIBUTING.md](CONTRIBUTING.md) and the repository's
+[agent instructions](AGENTS.md); they define the development workflow,
+validation expectations, and where to record deferred work.
 
 ## License
 

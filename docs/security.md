@@ -54,18 +54,26 @@ token. `[oauth]` and the legacy `bearer_token` setting are mutually exclusive.
 ## The Origin guard (built in, always on)
 
 Web browsers can be tricked, by a technique called DNS rebinding, into making
-requests to `127.0.0.1` from a malicious web page you are visiting. The MCP
+requests to a local gateway from a malicious web page you are visiting. The MCP
 specification requires servers to defend against this, and the gateway does: a
 middleware inspects the `Origin` header on every request and returns `403` for
-any origin that is not the gateway's own loopback origin.
+an origin it does not recognize.
+
+The recognized set is deliberately narrow: the configured gateway host and
+port, the standard loopback spellings for that port, and—when OAuth is enabled—
+the validated `oauth.public_base_url`. The OAuth origin is needed for the
+configured deployment's browser traffic; it is not a general cross-origin
+allowlist. `Origin: null` and all other origins are rejected. This secure
+default applies to loopback and remote deployments alike.
 
 - Requests from a real browser page always carry that page's `Origin`, so a
   rebinding attempt is rejected.
-- Requests from non-browser clients (Claude Code, `curl`) carry no `Origin` and
-  pass normally.
+- Requests from non-browser MCP clients (including Claude Code, Codex, and
+  `curl`) carry no `Origin` and pass normally.
 
-This applies to every route, including the admin UI and `/health`. It needs no
-configuration.
+This applies to every route, including the admin UI and `/health`. Apart from
+the gateway bind configuration and the validated OAuth deployment origin, it
+has no separate configuration.
 
 ## The optional bearer token
 
@@ -96,17 +104,23 @@ then fetches is challenged).
 **How the admin UI handles it.** On the first `401`, the UI prompts you for the
 token and stores it in the browser's local storage, so you enter it once.
 
-**Consequence for Claude Code.** A backend registered in Claude Code must carry
-the header, or every call would `401`. The admin UI's **Register** button (Claude Code cluster)
-adds it automatically. If you register by hand, include it:
+**Client registration.** Every client registration must carry the configured
+credential or its calls return `401`. The admin UI has separate, supported
+registration controls for Claude Code and Codex; use the one for the client you
+run. Their credential mechanisms differ:
+
+**Claude Code.** The registration carries an `Authorization` header. The admin
+UI adds it automatically. If you register by hand, include it:
 
 ```bash
-claude mcp add --transport http --header "Authorization: Bearer ${MCP_GATEWAY_TOKEN}" gateway-<name> http://127.0.0.1:9100/<name>/mcp
+claude mcp add --transport http gateway-<name> http://127.0.0.1:9100/<name>/mcp --header "Authorization: Bearer ${MCP_GATEWAY_TOKEN}"
 ```
 
-Note the `--header` option must come **after** the name and URL. If you add or
-change the token later, you must re-register your backends so Claude Code sends
-the new header.
+`--header` is variadic, so it must come **after** the positional name and URL;
+otherwise Claude Code treats them as header values. The command expands
+`${MCP_GATEWAY_TOKEN}` in the shell that runs it, so export the variable there
+without printing its value. If you add or change the token later, re-register
+the backend so Claude Code sends the new header.
 
 **Consequence for Codex.** Codex's CLI accepts a bearer-token environment
 variable rather than a literal header. With `bearer_token = "${MCP_GATEWAY_TOKEN}"`,
@@ -184,7 +198,7 @@ commit or share. The secrets file is not.
 
 Independently of the token, you can drop any tool you do not want exposed at all
 by disabling it (`enabled = false` on the tool, or the toggle in the admin UI).
-A disabled tool is not broadcast to Claude and cannot be called through the
+A disabled tool is not broadcast to an MCP client and cannot be called through the
 gateway.
 
 ## Behavior hooks run your code

@@ -32,14 +32,15 @@ Ctrl-C).
 ### Updating the login service
 
 After a change is merged to GitHub, use `just update` from a clean checkout on
-`main`. It fast-forwards the source, synchronizes the locked dependencies,
-reloads launchd, and verifies `/health` plus `/ready`. It does not overwrite
-`config.toml` or runtime state. See [installation.md](installation.md#upgrading-path-a).
+`main`. This is the macOS service deployment path: it fast-forwards the source,
+synchronizes locked dependencies, reloads launchd, and waits for `/health` plus
+`/ready`. It does not overwrite `config.toml` or runtime state. See
+[installation.md](installation.md#upgrading-path-a).
 
 The update command intentionally refuses dirty worktrees and feature branches;
-this prevents an accidental local experiment from being deployed as the
-service. A restart drops active MCP sessions briefly, after which clients can
-reconnect.
+this prevents an accidental local experiment from being deployed as the service.
+It is stateful and may briefly drop active MCP sessions, after which clients can
+reconnect. Do not use it for a foreground `uv tool` installation.
 
 ## Health and readiness
 
@@ -172,6 +173,20 @@ The starter/default config ships inside the package and seeds a fresh
 `config.toml` automatically if the file is missing entirely — so deleting
 `config.toml` and restarting gives you a clean, working baseline.
 
+## What automated checks do not cover
+
+`just check` is the repeatable local gate, and CI runs it together with a
+hermetic MCP conformance job. Those checks use disposable fixtures: they do not
+contact your personal backends, read your secrets, or exercise your installed
+daemon and launchd state.
+
+Test the installed service, local daemon behavior, and integrations with your
+own client/harness separately. `just verify` is deliberately opt-in: it may
+contact the public DeepWiki backend, sends neither bearer nor OAuth credentials,
+and therefore fits only an equivalent unprotected test instance. See the
+[admin guide](admin-guide.md) and [security guide](security.md) before using a
+credentialed or remote deployment for live verification.
+
 ## Troubleshooting
 
 | Symptom | Likely cause | What to do |
@@ -179,10 +194,10 @@ The starter/default config ships inside the package and seeds a fresh
 | `/health` doesn't respond at all | Daemon not running | `launchctl print gui/$(id -u)/com.void.mcp-gateway` for status; `launchctl kickstart -k …` to (re)start. Check `gateway.log` and `err.log`. |
 | `/health` green but from the wrong path | Ghost process from an old/moved clone | Re-run `./install.sh` from the current clone location. |
 | `/ready` returns 503; a backend shows red in the UI | An enabled backend failed to connect or mount | Check that backend's URL/command and its secret; use **Re-inspect** in the UI, or read the error on its status dot. Other backends keep working. |
-| Every call to the gateway returns 401 | A bearer token is set but the caller isn't sending it | Register the backend in Claude Code with the `Authorization` header (the UI's **Register** button in the Claude Code cluster does this automatically), or paste the token when the admin UI prompts. See [security.md](security.md). |
-| Claude Code still shows the old tool name/description after an edit | The session hasn't re-listed the backend's tools yet | Reconnect the MCP server, start a new session, or trigger a tool use. Text edits are live in the gateway immediately, but a connected session caches the old broadcast. |
+| Every call to the gateway returns 401 | A bearer token is set but the caller is not sending it | Use the matching Claude Code or Codex registration flow described in [security.md](security.md), or provide the token to the admin UI when prompted. |
+| A client still shows the old tool name/description after an edit | The session has not re-listed the backend's tools yet | Reconnect the MCP server, start a new session, or trigger a tool use. Text edits are live in the gateway immediately, but a connected session can cache the old broadcast. |
 | A tool you renamed can't be saved | Its name (or a deliberately identical description) collides with another tool | Pick a unique name, or turn on **auto-uniquify** in the ⚙ Gateway header for bulk renames. |
-| Claude sees a backend's tools twice | The backend is registered *both* directly and through the gateway | Remove the direct registration so Claude sees only the gateway's rewritten version. |
+| A client sees a backend's tools twice | The backend is registered *both* directly and through the gateway | Remove the direct registration so the client sees only the gateway's rewritten version. |
 | A benign-looking `reusing existing session … context mixing` line in the log | Framework informational message | Expected and harmless here; it is quieted to WARNING and does not indicate a problem. |
 
 ## Related
