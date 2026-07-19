@@ -1,0 +1,364 @@
+name: Release Please
+
+# Release Please is the only actor that creates release PRs, tags, and GitHub
+# Releases. A manual run is deliberately repair-only: it can attach the
+# deterministic artifacts to an existing release, but cannot mint a tag.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      repair_tag:
+        description: Existing vX.Y.Z release tag at this run's selected SHA
+        required: false
+        type: string
+
+# The workflow uses only the short-lived App installation token below. Keep the
+# automatic default token powerless so it cannot create unreviewed repository
+# state or suppress the normal pull-request CI trigger.
+permissions: {}
+
+concurrency:
+  group: release-please-main
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    # Dispatch is for a strictly bounded artifact repair. It must never create
+    # a fresh release PR, tag, or release.
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      prs_created: ${{ steps.release-please.outputs.prs_created }}
+      release_created: ${{ steps.release-please.outputs.release_created }}
+      tag_name: ${{ steps.release-please.outputs.tag_name }}
+      release_sha: ${{ steps.release-please.outputs.sha }}
+    steps:
+      - name: Mint repository-scoped release token
+        id: app-token
+        # actions/create-github-app-token v2.2.2
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349
+        with:
+          app-id: ${{ vars.RELEASE_PLEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-pull-requests: write
+          permission-issues: write
+
+      - name: Create or update the release PR and release
+        id: release-please
+        # googleapis/release-please-action v5.0.0
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+      - name: Parse the release PR number
+        id: release-pr
+        if: steps.release-please.outputs.prs_created == 'true'
+        env:
+          RELEASE_PLEASE_PR: ${{ steps.release-please.outputs.pr }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          import os
+
+          pull_request = json.loads(os.environ["RELEASE_PLEASE_PR"])
+          if not isinstance(pull_request, dict):
+              raise SystemExit("release-please returned a malformed pull request")
+          number = pull_request.get("number")
+          if isinstance(number, bool) or not isinstance(number, int) or number < 1:
+              raise SystemExit("release-please did not return a valid pull request number")
+          print(f"number={number}")
+          PY
+
+      - name: Check out the release PR
+        if: steps.release-please.outputs.prs_created == 'true'
+        # actions/checkout v4.3.0
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up uv for the release PR
+        if: steps.release-please.outputs.prs_created == 'true'
+        # astral-sh/setup-uv v8.1.0
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Refresh the release PR lockfile when needed
+        if: steps.release-please.outputs.prs_created == 'true'
+        env:
+          APP_TOKEN: ${{ steps.app-token.outputs.token }}
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PR_NUMBER: ${{ steps.release-pr.outputs.number }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          fail() {
+            echo "::error::$*"
+            exit 1
+          }
+
+          [[ "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]] || fail "invalid release PR number"
+          pull="repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}"
+          head_ref="$(gh api "$pull" --jq '.head.ref')"
+          head_sha="$(gh api "$pull" --jq '.head.sha')"
+          git check-ref-format "refs/heads/${head_ref}" >/dev/null || fail "invalid release PR head ref"
+          [[ "$head_sha" =~ ^[0-9a-f]{40}$ ]] || fail "invalid release PR head SHA"
+
+          # The checkout action intentionally did not persist credentials. The
+          # short-lived token exists only for this runner's fetch and push.
+          git remote set-url origin "https://x-access-token:${APP_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git fetch --no-tags origin "refs/heads/${head_ref}:refs/remotes/origin/${head_ref}"
+          [[ "$(git rev-parse "refs/remotes/origin/${head_ref}")" == "$head_sha" ]] || fail "release PR head changed while resolving it"
+          git checkout --detach "$head_sha"
+          [[ "$(git rev-parse HEAD)" == "$head_sha" ]] || fail "could not check out the release PR head"
+
+          # Prefer the hermetic resolver. A GitHub-hosted runner may not have
+          # every wheel cached, so only then retry with its network access.
+          if ! uv lock --offline; then
+            echo "::warning::uv lock --offline needed unavailable runner cache; retrying online"
+            uv lock
+          fi
+
+          mapfile -t changed < <(git diff --name-only HEAD)
+          if (( ${#changed[@]} == 0 )); then
+            echo "uv.lock is already current; no release PR commit is needed"
+            exit 0
+          fi
+          if (( ${#changed[@]} != 1 )) || [[ "${changed[0]}" != "uv.lock" ]]; then
+            printf 'unexpected files changed while refreshing lockfile:\n%s\n' "${changed[*]}" >&2
+            exit 1
+          fi
+          [[ -z "$(git ls-files --others --exclude-standard)" ]] || fail "lock refresh produced untracked files"
+
+          [[ "$APP_SLUG" =~ ^[a-z0-9-]+$ ]] || fail "invalid GitHub App slug"
+          bot_id="$(gh api "/users/${APP_SLUG}[bot]" --jq '.id')"
+          [[ "$bot_id" =~ ^[0-9]+$ ]] || fail "could not resolve GitHub App bot identity"
+          git config user.name "${APP_SLUG}[bot]"
+          git config user.email "${bot_id}+${APP_SLUG}[bot]@users.noreply.github.com"
+          git add -- uv.lock
+          git commit --no-verify -m "chore: refresh uv.lock for release PR #${PR_NUMBER}"
+          git push origin "HEAD:refs/heads/${head_ref}"
+
+  release-artifacts:
+    needs: release-please
+    # A normal run attaches files only after Release Please made the tag and
+    # release. A dispatch can repair only an already-existing release tag.
+    if: always() && (needs.release-please.outputs.release_created == 'true' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Mint repository-scoped release token
+        id: app-token
+        # actions/create-github-app-token v2.2.2
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349
+        with:
+          app-id: ${{ vars.RELEASE_PLEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+
+      - name: Check out the selected repository state and tags
+        # actions/checkout v4.3.0
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Resolve the existing release tag
+        id: release-target
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          RELEASE_CREATED: ${{ needs.release-please.outputs.release_created }}
+          RELEASE_PLEASE_TAG: ${{ needs.release-please.outputs.tag_name }}
+          RELEASE_PLEASE_SHA: ${{ needs.release-please.outputs.release_sha }}
+          REPAIR_TAG: ${{ inputs.repair_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          fail() {
+            echo "::error::$*"
+            exit 1
+          }
+
+          validate_tag() {
+            local tag="$1"
+            [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "release tag must be stable vX.Y.Z"
+            git check-ref-format "refs/tags/${tag}" >/dev/null || fail "invalid release tag"
+          }
+
+          if [[ "$RELEASE_CREATED" == "true" ]]; then
+            release_tag="$RELEASE_PLEASE_TAG"
+            selected_sha="$RELEASE_PLEASE_SHA"
+            [[ "$selected_sha" =~ ^[0-9a-f]{40}$ ]] || fail "release-please returned an invalid release SHA"
+          else
+            [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]] || fail "repair mode requires workflow_dispatch"
+            selected_sha="$(git rev-parse --verify "${GITHUB_SHA}^{commit}")"
+            if [[ -n "$REPAIR_TAG" ]]; then
+              release_tag="$REPAIR_TAG"
+            else
+              candidates=()
+              while IFS= read -r candidate; do
+                [[ "$(git rev-list -n 1 "$candidate")" == "$selected_sha" ]] && candidates+=("$candidate")
+              done < <(git tag --list 'v*')
+              (( ${#candidates[@]} == 1 )) || fail "select one existing release tag for this SHA with repair_tag"
+              release_tag="${candidates[0]}"
+            fi
+          fi
+
+          validate_tag "$release_tag"
+          git show-ref --verify --quiet "refs/tags/${release_tag}" || fail "release tag does not exist"
+          tag_sha="$(git rev-list -n 1 "$release_tag")"
+          [[ "$tag_sha" == "$selected_sha" ]] || fail "release tag does not point to the selected SHA"
+
+          # A repair is intentionally tag-immutable: it verifies an existing
+          # tag and existing published release, then uploads assets only. It
+          # never creates, moves, or deletes a tag or GitHub Release.
+          release_json="$(gh release view "$release_tag" --repo "$GITHUB_REPOSITORY" --json tagName,targetCommitish,isDraft)" || fail "GitHub Release does not exist for the tag"
+          RELEASE_JSON="$release_json" RELEASE_TAG="$release_tag" python - <<'PY'
+          import json
+          import os
+
+          release = json.loads(os.environ["RELEASE_JSON"])
+          if release.get("tagName") != os.environ["RELEASE_TAG"]:
+              raise SystemExit("GitHub Release tag did not match the selected tag")
+          if release.get("isDraft"):
+              raise SystemExit("refusing to repair a draft GitHub Release")
+          PY
+
+          git checkout --detach "$tag_sha"
+          printf 'release_tag=%s\nrelease_sha=%s\n' "$release_tag" "$tag_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Set up uv
+        # astral-sh/setup-uv v8.1.0
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Set up just
+        # extractions/setup-just v3.0.0
+        uses: extractions/setup-just@e33e0265a09d6d736e2ee1e0eb685ef1de4669ff
+
+      - name: Verify the exact release source and build artifacts
+        env:
+          RELEASE_TAG: ${{ steps.release-target.outputs.release_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv sync --locked
+          python tools/release_contract.py versions --tag "$RELEASE_TAG"
+          # The project's normal gate is the only build entry point for a
+          # release, keeping artifact validation identical locally and in CI.
+          just check
+
+      - name: Add only verified missing release artifacts
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          RELEASE_TAG: ${{ steps.release-target.outputs.release_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "::error::release tag must be stable vX.Y.Z"
+            exit 1
+          }
+
+          shopt -s nullglob
+          wheels=("dist/mcp_gateway-${version}-"*.whl)
+          sdists=("dist/mcp_gateway-${version}.tar.gz")
+          (( ${#wheels[@]} == 1 )) || { echo "::error::expected one wheel"; exit 1; }
+          (( ${#sdists[@]} == 1 )) || { echo "::error::expected one source archive"; exit 1; }
+          [[ -f dist/SHA256SUMS ]] || { echo "::error::missing SHA256SUMS"; exit 1; }
+
+          artifacts=("${wheels[0]}" "${sdists[0]}" "dist/SHA256SUMS")
+          sbom="dist/mcp_gateway-${version}.cdx.json"
+          [[ -f "$sbom" ]] && artifacts+=("$sbom")
+
+          for file in dist/*; do
+            allowed=false
+            for artifact in "${artifacts[@]}"; do
+              [[ "$file" == "$artifact" ]] && allowed=true && break
+            done
+            # uv may retain this ignore marker in the build directory. It is
+            # not a release artifact and is never passed to `gh release`.
+            [[ "$file" == "dist/.gitignore" ]] && allowed=true
+            $allowed || { echo "::error::unexpected release artifact: $file"; exit 1; }
+          done
+
+          # The checksum manifest is generated by the release-contract build.
+          # Confirm it before comparing any local bytes to immutable release
+          # assets, and do not upload a replacement for an existing asset.
+          (
+            cd dist
+            sha256sum --check SHA256SUMS
+          )
+
+          mapfile -t existing_names < <(
+            gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name'
+          )
+          for existing_name in "${existing_names[@]}"; do
+            expected=false
+            for artifact in "${artifacts[@]}"; do
+              [[ "$existing_name" == "$(basename "$artifact")" ]] && expected=true && break
+            done
+            # Existing assets outside the release-contract allowlist mean this
+            # release no longer has a deterministic artifact set. Fail closed
+            # rather than silently preserve or overwrite unknown bytes.
+            $expected || {
+              echo "::error::unexpected existing release asset: $existing_name"
+              exit 1
+            }
+          done
+
+          asset_dir="$(mktemp -d)"
+          trap 'rm -rf "$asset_dir"' EXIT
+          missing=()
+          for artifact in "${artifacts[@]}"; do
+            asset_name="$(basename "$artifact")"
+            found=false
+            for existing_name in "${existing_names[@]}"; do
+              [[ "$existing_name" == "$asset_name" ]] && found=true && break
+            done
+            if ! $found; then
+              missing+=("$artifact")
+              continue
+            fi
+
+            gh release download "$RELEASE_TAG" --pattern "$asset_name" --dir "$asset_dir"
+            [[ -f "$asset_dir/$asset_name" ]] || {
+              echo "::error::could not download existing release asset: $asset_name"
+              exit 1
+            }
+            cmp --silent "$artifact" "$asset_dir/$asset_name" || {
+              echo "::error::existing release asset differs from verified build: $asset_name"
+              exit 1
+            }
+          done
+
+          if (( ${#missing[@]} == 0 )); then
+            echo "all verified release artifacts are already attached"
+            exit 0
+          fi
+          # Release Please already created this release. A repair is additive:
+          # it uploads only missing allowed files and never replaces an asset.
+          gh release upload "$RELEASE_TAG" "${missing[@]}"
