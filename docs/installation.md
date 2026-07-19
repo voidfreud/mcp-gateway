@@ -3,12 +3,14 @@
 mcp-gateway can run in the foreground on any platform or as a macOS login
 service. There are two installation paths:
 
-- **From a clone, as a login service (recommended, macOS).** You clone the
-  repository and run `./install.sh`. The gateway then starts automatically every
-  time you log in and stays running in the background. This is the intended setup.
-- **As a standalone tool.** You install the `mcp-gateway` command with `uv` and
-  start it yourself when you want it. No login service is set up; on Linux or
-  Windows this is the portable option.
+- **A verified GitHub Release wheel (stable, any platform).** Download a tagged
+  private release with the GitHub CLI, verify its checksum, install the wheel
+  with `uv`, and start it in the foreground. No login service is set up; this is
+  the stable installation path.
+- **A checkout as a macOS login service.** Contributors and operators who need
+  the repository deployment workflow can clone it and run `./install.sh`. The
+  gateway then starts automatically every time they log in and stays in the
+  background.
 
 Both paths are described below.
 
@@ -22,11 +24,11 @@ separately. To install `uv`:
 curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-The repository is private. Before cloning it or installing from its GitHub URL,
-configure Git or GitHub CLI credentials for an account authorized to read this
-repository. `uv` is sufficient for the foreground package install and run.
-Install [`just`](https://just.systems/) only when you need the repository or
-macOS recipes, including the guarded `just update` command.
+The repository is private. Authenticate the [GitHub CLI](https://cli.github.com/)
+with an account authorized to read it before downloading a release. Before an
+HTTPS clone, run `gh auth setup-git` after `gh auth login` so Git can use that
+authorized account. Install [`just`](https://just.systems/) only when you need
+the repository or macOS recipes, including the guarded `just update` command.
 
 To register backends from inside the admin UI, install the client CLI you want
 the gateway to manage: `claude` for Claude Code and/or `codex` for Codex. On
@@ -34,11 +36,14 @@ macOS the gateway also detects the Codex executable bundled with ChatGPT desktop
 Both integrations are optional—you can always register each `/<backend>/mcp`
 endpoint by hand.
 
-## Path A — clone and install as a login service (macOS)
+## Path A — checkout and install as a login service (macOS)
 
-This is the recommended setup on a Mac.
+Use this stateful deployment path when you intentionally operate from a
+repository checkout. It is not the stable release-asset channel.
 
 ```bash
+gh auth login
+gh auth setup-git
 git clone https://github.com/voidfreud/mcp-gateway
 cd mcp-gateway
 ./install.sh
@@ -85,15 +90,27 @@ the launchd capture logs, create its account-specific configuration locally from
 `newsyslog.conf(5)`; it must use your absolute paths and account ownership and is
 not a tracked project file (see [operations.md](operations.md#logs)).
 
-## Path B — install as a standalone tool (any platform)
+## Path B — install a stable release (any platform)
 
-This installs the `mcp-gateway` command globally with `uv`, straight from GitHub.
-It does **not** set up a login service — you start the gateway yourself.
+This installs the `mcp-gateway` command globally from a verified GitHub Release
+wheel. It does **not** set up a login service — you start the gateway yourself.
+In the commands below, replace `vX.Y.Z` with the latest GitHub Release tag after
+reviewing its notes.
 
 ```bash
-uv tool install git+https://github.com/voidfreud/mcp-gateway
+gh auth login
+gh release download vX.Y.Z --repo voidfreud/mcp-gateway --dir mcp-gateway-vX.Y.Z
+cd mcp-gateway-vX.Y.Z
+shasum -a 256 -c SHA256SUMS
+uv tool install --reinstall ./mcp_gateway-*.whl
 mcp-gateway
 ```
+
+`gh release download` uses the authenticated account for this private
+repository. On systems without `shasum`, use an equivalent SHA-256 checker.
+The release may also contain an SBOM; it is not an install input. Do not use a
+mutable `main` Git URL as stable-install guidance. A tag-pinned Git install is
+only a developer convenience; see [releases.md](releases.md#installing-a-private-release).
 
 The first time it runs, a fresh standalone install normally creates a starter
 config at `~/.config/mcp-gateway/config.toml` (see [Where the config
@@ -115,7 +132,7 @@ To confirm the installed version:
 mcp-gateway --version
 ```
 
-> **Why install from GitHub and not PyPI?** Distribution is uv-from-GitHub by
+> **Why a GitHub Release and not PyPI?** Releases are private GitHub assets by
 > choice. The `mcp-gateway` name is already taken on PyPI, and the project's
 > package metadata deliberately blocks an accidental upload there.
 
@@ -170,11 +187,18 @@ uv sync --locked
 Confirm the new version with the `/health` check above. A restart briefly drops
 active MCP sessions; clients reconnect to the freshly loaded daemon.
 
-For Path B, upgrade with:
+For Path B, download and verify the next release wheel, then reinstall it:
 
 ```bash
-uv tool upgrade mcp-gateway
+gh release download vX.Y.Z --repo voidfreud/mcp-gateway --dir mcp-gateway-vX.Y.Z
+cd mcp-gateway-vX.Y.Z
+shasum -a 256 -c SHA256SUMS
+uv tool install --reinstall ./mcp_gateway-*.whl
 ```
+
+For foreground development instead of a stable installation, clone the
+repository, run `uv sync --locked`, then start `uv run mcp-gateway`. Do not
+treat an unpinned `main` checkout as a release.
 
 ## Moving the repository
 
@@ -246,3 +270,4 @@ registrations stay until you remove them by hand.
 - [configuration.md](configuration.md) — the full `config.toml` reference.
 - [operations.md](operations.md) — running, logs, health checks, troubleshooting.
 - [security.md](security.md) — what the gateway protects and what it does not.
+- [releases.md](releases.md) — release automation and private release use.

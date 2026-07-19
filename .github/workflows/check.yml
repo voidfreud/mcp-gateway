@@ -33,24 +33,12 @@ jobs:
       # edit that forgot `uv lock`
       - run: uv lock --check
       - run: uv sync --locked
+      - name: Validate pull request title
+        if: github.event_name == 'pull_request'
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: uv run python tools/release_contract.py pr-title --title "$PR_TITLE"
       - run: just check
-      # the wheel must build and carry its data files (admin.html + the seed
-      # config ship inside the package — a packaging regression breaks install)
-      - run: uv build
-      - run: |
-          python3 - <<'EOF'
-          import glob, zipfile
-          whl = glob.glob("dist/*.whl")[0]
-          names = zipfile.ZipFile(whl).namelist()
-          for want in ("mcp_gateway/admin.html", "mcp_gateway/config.default.toml"):
-              assert any(n.endswith(want) for n in names), f"{want} missing from {whl}"
-          print("wheel carries its data files")
-          EOF
-      - name: Install wheel in a clean environment
-        run: |
-          python3 -m venv "$RUNNER_TEMP/mcp-gateway-wheel-venv"
-          "$RUNNER_TEMP/mcp-gateway-wheel-venv/bin/python" -m pip install --no-deps dist/*.whl
-          "$RUNNER_TEMP/mcp-gateway-wheel-venv/bin/python" -m mcp_gateway --version
 
   mcp-contract:
     runs-on: ubuntu-latest

@@ -6,8 +6,16 @@ log_path := env_var_or_default("MCP_GATEWAY_LOG_FILE", env_var("HOME") + "/.loca
 default:
     @just --list
 
-# Full local gate: lint + format check + unit/property tests + import smoke.
-check: lint test smoke
+# Full local gate: lint + format check + unit/property tests + import smoke +
+# one offline release-contract build. The release recipe is intentionally last:
+# tests inspect the contract through synthetic fixtures rather than nesting
+# another package build inside pytest.
+check: lint test smoke release-contract
+
+# Build, inspect, install-check, SBOM, and checksum the local release assets.
+# This is strictly local verification: it never tags, publishes, or deploys.
+release-contract:
+    uv run python tools/release_contract.py build --out-dir dist
 
 # Ruff lint + format check
 lint:

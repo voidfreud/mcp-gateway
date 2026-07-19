@@ -39,22 +39,30 @@ Prerequisites:
 - [`uv`](https://docs.astral.sh/uv/) to install and run the foreground package.
 - [`just`](https://just.systems/) only for the repository's check and macOS
   deployment recipes, including `just update`.
-- GitHub access that can clone this private repository. Configure Git or the
-  GitHub CLI with an authorized account before using a GitHub URL below.
+- The [GitHub CLI](https://cli.github.com/) authenticated as an account that can
+  read this private repository, to download a release asset.
 
-For a portable, foreground run on any platform:
+For a portable, stable foreground run on any platform, download a tagged GitHub
+Release and verify it before installing its wheel:
 
 ```bash
-uv tool install git+https://github.com/voidfreud/mcp-gateway
+gh auth login
+gh release download vX.Y.Z --repo voidfreud/mcp-gateway --dir mcp-gateway-vX.Y.Z
+cd mcp-gateway-vX.Y.Z
+shasum -a 256 -c SHA256SUMS
+uv tool install --reinstall ./mcp_gateway-*.whl
 mcp-gateway
 ```
 
-The gateway selects its configuration in this order: `MCP_GATEWAY_CONFIG`, an
-existing `./config.toml`, then `~/.config/mcp-gateway/config.toml`. It seeds the
-selected missing path from the packaged default, so a fresh `uv tool` run
-normally creates the home-path file. The bundled DeepWiki and Context7 examples
-are stateless proxies once running, but a freshly seeded default configuration
-with no captured-default state is not network-silent: before the app mounts its
+Replace `vX.Y.Z` with the release tag you chose. The [installation guide](docs/installation.md)
+has the complete private-release procedure, including verification and the
+separate checkout workflow for development. The gateway selects its
+configuration in this order: `MCP_GATEWAY_CONFIG`, an existing `./config.toml`,
+then `~/.config/mcp-gateway/config.toml`. It seeds the selected missing path
+from the packaged default, so a fresh installation normally creates the
+home-path file. The bundled DeepWiki and Context7 examples are stateless proxies
+once running, but a freshly seeded default configuration with no
+captured-default state is not network-silent: before the app mounts its
 endpoints, startup connects to both public services to capture each backend's
 baseline metadata and tool list. Complete captured defaults are normally reused
 on later starts. That initial capture is separate from ordinary proxy use; tool
@@ -65,6 +73,8 @@ environment. Stop the foreground process with Ctrl-C.
 For a macOS login service, clone the repository and install it:
 
 ```bash
+gh auth login
+gh auth setup-git
 git clone https://github.com/voidfreud/mcp-gateway
 cd mcp-gateway
 ./install.sh
@@ -101,8 +111,8 @@ interrupts MCP sessions.
 just update
 ```
 
-It is not a general upgrade command for `uv tool` installations; use `uv tool
-upgrade mcp-gateway` for that path.
+It is not a general upgrade command for a release-asset installation; install a
+new verified wheel from the next GitHub Release instead.
 
 ## What you can change
 
@@ -128,6 +138,8 @@ only suitable for an equivalent unprotected test instance.
 
 - [Installation](docs/installation.md) — foreground and macOS service paths,
   upgrades, moves, and uninstalling.
+- [Releases](docs/releases.md) — versioning, automation, and private release
+  installation.
 - [Admin guide](docs/admin-guide.md) — editing, registration, and Virtual Tools.
 - [Configuration reference](docs/configuration.md) — `config.toml`, backends,
   secrets, and behavior hooks.

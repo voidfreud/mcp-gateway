@@ -26,7 +26,14 @@ restart, uninstall, or purge commands without explicit authorization.
 Use a focused branch and a GitHub Issue for bugs, deferred work, features,
 follow-ups, or decisions. Include the relevant tests and documentation, explain
 which verification layers ran, and open a pull request for CI and review.
-Approved changes are squash-merged; do not push directly to `main`.
+Use an accurate Conventional Commit pull-request title: `fix:` releases a patch,
+`feat:` releases a minor, and `!` releases a major. The title check does not
+accept a `BREAKING CHANGE` footer alone as a major signal. Approved changes are
+squash-merged; do not push directly to `main`.
+
+[The release guide](docs/releases.md) is the canonical policy for versioning,
+Release Please, release pull-request review, correction, and private release
+consumption. Do not manually bump ordinary versions or duplicate its workflow.
 
 For a decision proposal or accepted ADR, follow the
 [decision process](docs/decisions/README.md).

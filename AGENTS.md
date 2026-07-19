@@ -22,6 +22,7 @@ tool-specific instruction files.
 | Package metadata and current version | [pyproject.toml](pyproject.toml) |
 | Release history | [CHANGELOG.md](CHANGELOG.md) |
 | Automated checks and releases | [.github/workflows/](.github/workflows/) |
+| Versioning, release automation, and private release use | [docs/releases.md](docs/releases.md) |
 | Accepted architecture decisions and their process | [docs/decisions/](docs/decisions/README.md) |
 | Advertised MCP surface and safe gateway tuning | [.agents/skills/mcp-tool-design/SKILL.md](.agents/skills/mcp-tool-design/SKILL.md) |
 | Example configuration | [config.example.toml](config.example.toml) |
@@ -71,6 +72,13 @@ in Issues, then add or update an ADR only when a decision is accepted.
 6. Squash-merge the approved PR, then deploy only through the documented
    deployment path.
 
+Use a Conventional Commit pull-request title. Release automation derives SemVer
+from the squash title: `fix:` is a patch, `feat:` is a minor, and `!` is a
+major. The PR-title check does not accept a `BREAKING CHANGE` footer alone as a
+major signal. Other accurate Conventional Commit types are allowed but may not
+release. The canonical process, including corrections, is in
+[docs/releases.md](docs/releases.md); do not duplicate or bypass it.
+
 ## Verification layers
 
 Use the layer that matches the risk. CI is intentionally hermetic: it runs the
@@ -111,10 +119,10 @@ update tests when behavior changes; and remove stale statements rather than
 preserving historical clutter. Keep this manual focused on workflow, not a
 second architecture reference.
 
-Do not invent version numbers, release tags, changelog conventions, or release
-commands. Follow the version and release automation currently documented in
-the repository when a release change is explicitly in scope, and update the
-sources that own that automation together.
+For release work, follow [docs/releases.md](docs/releases.md). Release Please
+owns ordinary version, changelog, and lockfile updates; people review its PR and
+its required CI rather than making a separate manual bump. Do not retag or
+rewrite a published release.
 
 ## Handoff checklist
 
