@@ -76,6 +76,7 @@ def backend_routes(  # noqa: PLR0915
             return deps().error("unknown backend")
         b.always_load = bool(payload.get("value", False))
         ctx.commit(cfg, name)
+        ctx.log.info("backend_pin_changed", backend=name, pinned=b.always_load)
         return JSONResponse({"ok": True, "reloaded": "in-process"})
 
     async def _apply_enabled(b: Backend, value: bool) -> None:
@@ -105,6 +106,9 @@ def backend_routes(  # noqa: PLR0915
         recycle = ctx.hooks.get("recycle")
         if recycle is not None:
             recycle(name)
+        ctx.log.info(
+            "backend_session_mode_changed", backend=name, stateless=b.stateless
+        )
         return JSONResponse(
             {"ok": True, "reloaded": "recycled", "stateless": b.stateless}
         )
@@ -121,6 +125,7 @@ def backend_routes(  # noqa: PLR0915
         b.enabled = value
         ctx.commit(cfg)
         await _apply_enabled(b, value)
+        ctx.log.info("backend_enabled_changed", backend=name, enabled=value)
         return JSONResponse({"ok": True, "reloaded": "in-process"})
 
     async def enable_all(request: Request):
@@ -133,6 +138,9 @@ def backend_routes(  # noqa: PLR0915
         ctx.commit(cfg)
         for b in cfg.backends:
             await _apply_enabled(b, value)
+        ctx.log.info(
+            "backends_enabled_changed", enabled=value, backend_count=len(cfg.backends)
+        )
         return JSONResponse({"ok": True, "reloaded": "in-process"})
 
     async def set_display_name(request: Request):
@@ -148,6 +156,9 @@ def backend_routes(  # noqa: PLR0915
         except cl.ConfigError as exc:
             return deps().error(str(exc))
         ctx.commit(cfg)
+        ctx.log.info(
+            "backend_display_name_changed", backend=name, display_name=b.display_name
+        )
         return JSONResponse({"ok": True})
 
     async def rename_backend(  # noqa: PLR0911, PLR0912, PLR0915
@@ -212,6 +223,7 @@ def backend_routes(  # noqa: PLR0915
                 mount_error = f": {type(exc).__name__}: {exc}"
             if mounted:
                 remove(name)
+                ctx.log.info("backend_renamed", old_backend=name, backend=new_name)
                 return JSONResponse({"ok": True, "reloaded": "hot-rename", **response})
             remove(new_name)
             ctx.commit(cfg, validate_virtual_refs=False)
@@ -294,13 +306,15 @@ def backend_routes(  # noqa: PLR0915
         hot_add = ctx.hooks.get("add")
         if hot_add is not None:
             if await hot_add(b):
-                ctx.log.info("backend_hot_added", backend=b.name)
+                ctx.log.info("backend_added", backend=b.name, reloaded="hot-add")
                 return JSONResponse(
                     {"ok": True, "reloaded": "hot-add", "backend": b.name}
                 )
+            ctx.log.info("backend_added", backend=b.name, reloaded="mount-failed")
             return JSONResponse(
                 {"ok": True, "reloaded": "mount-failed", "backend": b.name}
             )
+        ctx.log.info("backend_added", backend=b.name, reloaded="restarting")
         return ctx.restart_response({"backend": b.name})
 
     async def remove_backend(request: Request):
@@ -325,6 +339,7 @@ def backend_routes(  # noqa: PLR0915
             return deps().error("unknown backend")
         ctx.commit(cfg)
         (deps().defaults_dir / f"{name}.json").unlink(missing_ok=True)
+        ctx.log.info("backend_removed", backend=name)
         return ctx.restart_response({})
 
     return [

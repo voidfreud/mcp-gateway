@@ -20,6 +20,8 @@ class AdminContext(Protocol):
 
     def load(self) -> GatewayConfig: ...
 
+    log: Any
+
 
 @dataclass(frozen=True)
 class ClaudeRouteDeps:
@@ -96,6 +98,9 @@ def claude_routes(  # noqa: PLR0915 - nested route handlers stay cohesive
             argv = deps.command("add", name, url=url, scope=scope, bearer_token=token)
         except cl.ConfigError as exc:
             return deps.error(str(exc))
+        ctx.log.info(
+            "claude_registration_changed", backend=name, action="add", scope=scope
+        )
         return await _run_cli(argv, redact=token)
 
     async def deregister_backend(request: Request):
@@ -111,6 +116,9 @@ def claude_routes(  # noqa: PLR0915 - nested route handlers stay cohesive
             argv = deps.command("remove", name, scope=scope)
         except cl.ConfigError as exc:
             return deps.error(str(exc))
+        ctx.log.info(
+            "claude_registration_changed", backend=name, action="remove", scope=scope
+        )
         return await _run_cli(argv)
 
     async def cc_registrations(_request: Request):

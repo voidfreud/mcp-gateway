@@ -114,12 +114,20 @@ def test_request_middleware_emits_status_and_latency(tmp_path):
     async def health(_request):
         return PlainTextResponse("ok")
 
+    async def action(_request):
+        return PlainTextResponse("ok")
+
     app = Starlette(
-        routes=[Route("/health", health)],
+        routes=[
+            Route("/health", health),
+            Route("/admin/api/demo", action, methods=["POST"]),
+        ],
         middleware=[Middleware(logging_setup.RequestLogMiddleware, log=log)],
     )
     try:
-        assert TestClient(app).get("/health").status_code == 200
+        client = TestClient(app)
+        assert client.get("/health").status_code == 200
+        assert client.post("/admin/api/demo").status_code == 200
         logging_setup.flush()
         records = [
             json.loads(line)
@@ -130,5 +138,10 @@ def test_request_middleware_emits_status_and_latency(tmp_path):
         assert record["path"] == "/health"
         assert record["status_code"] == 200
         assert record["ms"] >= 0
+        action_record = next(
+            item for item in records if item.get("event") == "admin_action"
+        )
+        assert action_record["action"] == "demo"
+        assert action_record["method"] == "POST"
     finally:
         logging_setup.shutdown()
