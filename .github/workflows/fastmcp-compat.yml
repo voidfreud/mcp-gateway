@@ -29,6 +29,8 @@ jobs:
     steps:
       # actions/checkout v4.3.0
       - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955
+        with:
+          persist-credentials: false
       # actions/setup-python v6.3.0
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
         with:

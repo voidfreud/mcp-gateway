@@ -24,6 +24,7 @@ jobs:
         with:
           # The secret scan compares immutable commit IDs, not a shallow clone.
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Check workflow policy
         # zizmorcore/zizmor-action v0.6.0
