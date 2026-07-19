@@ -91,6 +91,8 @@ jobs:
         if: steps.release-please.outputs.prs_created == 'true'
         # astral-sh/setup-uv v8.1.0
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
+        with:
+          enable-cache: false
 
       - name: Refresh the release PR lockfile when needed
         if: steps.release-please.outputs.prs_created == 'true'
@@ -247,6 +249,8 @@ jobs:
       - name: Set up uv
         # astral-sh/setup-uv v8.1.0
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
+        with:
+          enable-cache: false
 
       - name: Set up just
         # extractions/setup-just v3.0.0
