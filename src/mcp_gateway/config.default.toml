@@ -5,6 +5,9 @@
 host = "127.0.0.1"
 port = 9100
 log_file = "~/.local/state/mcp-gateway/gateway.log"
+# log_level = "INFO"       # DEBUG, INFO, WARNING, ERROR, or CRITICAL
+# log_max_bytes = 5242880  # active-file cap (5 MiB by default)
+# log_backup_count = 5     # rotated files kept in addition to the active file
 
 [[backends]]
 name = "gitnexus"

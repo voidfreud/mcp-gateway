@@ -86,11 +86,41 @@ right one).
 ## Logs
 
 The gateway writes structured JSON logs (one event per line) to
-**`~/.local/state/mcp-gateway/gateway.log`** — connection events, tool calls with
-latency, and errors. This file **rotates automatically**: 5 MB per file, up to 5
-files kept. Library logging (from the web server and the MCP framework) at WARNING
-and above is folded into the same file; routine informational chatter from those
-libraries is dropped.
+**`~/.local/state/mcp-gateway/gateway.log`** — connection events, HTTP requests,
+tool calls with latency, configuration saves, refreshes/recycles, and errors.
+Logging is event-based: a line is emitted when an operation or request produces
+an event, not on a fixed heartbeat or timer. Every event starts with an ISO
+timestamp field, followed by level, logger, event name, and call-site data;
+timing events also carry `ms`. The file handler runs on a listener thread, so
+request and MCP call paths enqueue records without waiting on filesystem I/O.
+The queue is bounded; an overload is visible as `dropped_events` in the
+dashboard/log status.
+
+The active file **rotates automatically**: 5 MiB per file, up to 5 files kept by
+default. Set `log_level`, `log_max_bytes`, and `log_backup_count` in
+`config.toml`; the Gateway settings card also exposes `log_level`. Changes take
+effect after the normal daemon restart. Library logging (from the web server and the MCP
+framework) is WARNING-and-above by default; `DEBUG` enables their routine
+diagnostics too.
+
+### Viewing and collecting logs
+
+The Gateway row in the Admin dashboard includes a live, bounded tail of the
+structured log and the listener/queue/retention counters. The file updates on
+events; the dashboard polls for new entries every 3 seconds and displays the
+last refresh time. It never exposes the log path as a browser-controlled
+parameter and reads the file off the event loop. From a shell, use:
+
+```bash
+just logs             # last 100 JSON events
+just logs 250         # last 250 events
+just logs-follow      # follow the active file (Ctrl-C to stop)
+```
+
+Set `MCP_GATEWAY_LOG_FILE` when inspecting a non-default path. The dashboard
+endpoint is `GET /admin/api/logs?limit=100` and accepts optional exact `level`
+and `event` filters. Rotated files remain available beside the active file for
+longer incident review.
 
 Two other files live alongside it under `~/.local/state/mcp-gateway/`:
 

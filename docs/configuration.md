@@ -24,6 +24,9 @@ A few things to know first:
 host = "127.0.0.1"
 port = 9100
 log_file = "~/.local/state/mcp-gateway/gateway.log"
+# log_level = "INFO"
+# log_max_bytes = 5242880
+# log_backup_count = 5
 # introspect_interval = 0
 # baseline_max_age = 86400
 # bearer_token = "${MCP_GATEWAY_TOKEN}"
@@ -73,7 +76,10 @@ diff-vs-default model (see below).
 |-----|------|---------|---------|
 | `host` | string | `"127.0.0.1"` | The address to bind. Loopback by default; a non-loopback address requires `bearer_token` or a complete `[oauth]` profile with `admin_bearer_token`. See [security.md](security.md#binding-beyond-loopback). |
 | `port` | integer | `9100` | The port the gateway listens on. |
-| `log_file` | string | `"~/.local/state/mcp-gateway/gateway.log"` | Where the structured log is written. Rotates automatically (5 MB × 5 files). |
+| `log_file` | string | `"~/.local/state/mcp-gateway/gateway.log"` | Where the structured log is written. File I/O is handled on a listener thread. |
+| `log_level` | `DEBUG` \| `INFO` \| `WARNING` \| `ERROR` \| `CRITICAL` | `INFO` | Minimum event level. `DEBUG` includes routine framework/library diagnostics; the gateway's own events include timestamps, logger/call-site, and operation latency. |
+| `log_max_bytes` | integer | `5242880` | Maximum size of the active JSON-lines file before rotation (64 KiB–1 GiB). |
+| `log_backup_count` | integer | `5` | Number of rotated files retained in addition to the active file (1–100). |
 | `introspect_interval` | integer (seconds) | `0` (off) | How often to re-scan every backend's tool list on a timer. `0` means off, which is the recommended default — the gateway already refreshes on reconnect, on a backend's own change notification, and on admin page load. Set an interval only for a long-lived remote backend that silently swaps its tools. |
 | `baseline_max_age` | integer (seconds) | `86400` (24 h) | How long a captured baseline counts as fresh for the **post-mount** refresh: at boot (or remount) a backend whose stored baseline is younger than this is not re-introspected, sparing slow stdio backends a second cold start per boot. `0` disables the gate (re-capture on every mount). Only the mount-time trigger is gated — a backend's own change notification, an admin page load, and the manual Re-inspect button always refresh. |
 | `bearer_token` | string or unset | unset | Optional access token. When set (as a `${ENV}` reference), every backend endpoint **and** the admin API require `Authorization: Bearer <token>`. See [security.md](security.md#the-optional-bearer-token). |
