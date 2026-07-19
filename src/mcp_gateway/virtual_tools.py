@@ -27,6 +27,37 @@ VIRTUAL_ROUTE = "virtual"
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 _OMISSION_DETAIL_LIMIT = 2
 
+# This is intentionally an envelope schema rather than a schema for every
+# upstream result.  Virtual members can proxy arbitrary MCP servers, so their
+# individual structured results and execution metadata cannot be constrained
+# safely by the gateway.  The stable top-level fields let clients rely on the
+# virtual-tool contract while ``additionalProperties`` preserves backend
+# fidelity as the envelope evolves.
+VIRTUAL_OUTPUT_SCHEMA: dict[str, Any] = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "required": [
+        "virtual_tool",
+        "dispatch",
+        "selected",
+        "selected_omitted",
+        "members",
+        "budget",
+    ],
+    "properties": {
+        "virtual_tool": {"type": "string"},
+        "dispatch": {"type": "string"},
+        "selected": {"type": "array", "items": {"type": "string"}},
+        "selected_omitted": {"type": "integer", "minimum": 0},
+        "members": {
+            "type": "array",
+            "items": {"type": "object", "additionalProperties": True},
+        },
+        "budget": {"type": "object", "additionalProperties": True},
+    },
+    "additionalProperties": True,
+}
+
 _JSON_TYPES: dict[str, str | list[str]] = {
     "string": "string",
     "integer": "integer",
@@ -302,6 +333,7 @@ async def call_member(
                 "error": text or "tool returned an error",
                 "content": list(result.content or []),
                 "structured": result.structuredContent,
+                "meta": result.meta,
             }
         return {
             "member": label,
@@ -309,6 +341,7 @@ async def call_member(
             "ms": elapsed,
             "content": list(result.content or []),
             "structured": result.structuredContent,
+            "meta": result.meta,
         }
     except TimeoutError:
         return {
@@ -483,6 +516,21 @@ def aggregate_results(  # noqa: PLR0912, PLR0915 - one ordered budget-accounting
                     record.pop("result")
                     omit(member, "structured", structured_size)
 
+        # Upstream ``_meta`` remains inside its member's result record so two
+        # backends cannot collide.  It is subject to the same exact wire-size
+        # accounting as content and structured results.
+        if outcome.get("meta") is not None:
+            metadata_size = _json_size(outcome["meta"])
+            if record not in structured_members:
+                omit(member, "meta", metadata_size)
+            else:
+                record["meta"] = outcome["meta"]
+                if fits_with_first_omission():
+                    used += metadata_size
+                else:
+                    record.pop("meta")
+                    omit(member, "meta", metadata_size)
+
     while _json_size(result()) > tool.max_result_bytes and structured_members:
         dropped = structured_members.pop()
         omit(dropped.get("member", "unknown"), "member", _json_size(dropped))
@@ -582,7 +630,7 @@ class _VirtualRuntimeTool(Tool):
             name=definition.name,
             description=definition.description,
             parameters=input_schema(definition),
-            output_schema=None,
+            output_schema=VIRTUAL_OUTPUT_SCHEMA,
             meta=(dict(cl.ALWAYS_LOAD_META) if definition.always_load else None),
         )
         self._definition = definition
@@ -641,7 +689,9 @@ def replace_tools(  # noqa: PLR0913 - explicit lifecycle dependencies
     status_store: dict | None = None,
 ) -> None:
     """Stage every component before one provider-map swap can mutate live tools."""
-    staged = FastMCP(name=f"{server.name}-staging")
+    staged = FastMCP(
+        name=f"{server.name}-staging", list_page_size=cl.DOWNSTREAM_TOOLS_PAGE_SIZE
+    )
     for item in [
         build_virtual_tool(tool, cfg_source, registry, log, status_store)
         for tool in cfg.virtual_tools
@@ -658,6 +708,8 @@ def build_virtual_server(
     log,
     status_store: dict | None = None,
 ) -> FastMCP:
-    server = FastMCP(name="mcp-gateway-virtual")
+    server = FastMCP(
+        name="mcp-gateway-virtual", list_page_size=cl.DOWNSTREAM_TOOLS_PAGE_SIZE
+    )
     replace_tools(server, cfg, cfg_source, registry, log, status_store)
     return server

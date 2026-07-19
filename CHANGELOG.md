@@ -8,6 +8,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Bounded MCP catalogs and structured Virtual Tool results** — every backend
+  and `/virtual/mcp` now serves its transformed `tools/list` catalog in
+  50-tool pages with gateway-owned opaque cursors, after fully consuming any
+  upstream pagination. Virtual Tools advertise a stable JSON Schema 2020-12
+  output envelope and preserve each member's upstream `_meta` inside that
+  member record under the existing strict serialized-result budget.
+
 - Exact-pin FastMCP 3.4.4 and add explicit compatibility tripwires for every
   private runtime seam used by proxy hot reload, capability suppression, and
   virtual-tool catalog replacement. CI and releases now install strictly from

@@ -99,6 +99,12 @@ layout, console script `mcp-gateway`). MIT; distributed via
   Admin hot swaps are immediately visible to an explicit re-list, but FastMCP
   3.4.4 exposes only a per-session public sender—never advertise a server-wide
   push until the gateway owns a tested downstream-session registry.
+- **Catalog pagination:** FastMCP consumes every upstream page before transforms;
+  the gateway then serves each independent backend and `/virtual/mcp` catalog
+  in 50-tool pages using gateway-owned opaque cursors. Never forward a source
+  cursor through the transform boundary. Virtual Tools advertise their stable
+  output envelope and keep upstream `_meta` namespaced per member under the
+  strict result budget.
 - Tools are exposed BARE per endpoint; apply `add_transform` AFTER `_reconcile`
   (reconcile must see source names).
 - **Transform target names are globally unique per backend — enabled OR
@@ -149,8 +155,7 @@ layout, console script `mcp-gateway`). MIT; distributed via
   `install.sh` waits out launchd's ASYNC bootout before bootstrapping (race →
   "Bootstrap failed: 5"). launchd runs the venv console script through the
   symlink; recreate the venv with `uv sync`.
-- Accepted spec gaps (#92): completions capability not forwarded; tools/list
-  served as one page. Framework-level, irrelevant to Claude Code.
+- Accepted spec gap (#92): completions capability is not forwarded.
 - Backlog (2026-07-15): the issue tracker is CLEAR except north-star #121
   (ongoing tuning mission) and the three STACKED DRAFT PRs #173→#175/#176
   (composites → smart routing / code mode) on `feat/14-composite-tools` —

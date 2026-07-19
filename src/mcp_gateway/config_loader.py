@@ -42,6 +42,12 @@ DEFAULT_SECRETS_PATH = "~/.config/mcp-gateway/secrets.env"
 # younger than 24h at mount time (see GatewayConfig.baseline_max_age).
 DEFAULT_BASELINE_MAX_AGE = 86_400
 
+# Bound each public ``tools/list`` response without changing the independent
+# per-backend topology.  FastMCP's proxy client fully consumes an upstream
+# catalog before applying gateway transforms; this value controls only the
+# gateway-to-client response pages.
+DOWNSTREAM_TOOLS_PAGE_SIZE = 50
+
 
 class ConfigError(RuntimeError):
     """Raised for any malformed or unresolvable configuration."""

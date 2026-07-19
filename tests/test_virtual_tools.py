@@ -6,6 +6,7 @@ import anyio
 import pytest
 import structlog
 from fastmcp import Client, FastMCP
+from fastmcp.tools import ToolResult
 from mcp.types import ImageContent, TextContent
 from starlette.applications import Starlette
 from starlette.testclient import TestClient
@@ -269,6 +270,66 @@ def test_aggregate_preserves_rich_blocks_and_structured_content():
     assert [block.type for block in result.content] == ["text", "text", "image"]
     assert result.structured_content["members"][0]["result"] == {"answer": 42}
     assert result.is_error is False
+
+
+def test_virtual_tool_advertises_envelope_schema_and_preserves_member_metadata():
+    source = FastMCP("source")
+
+    @source.tool(name="search")
+    def search(query: str) -> ToolResult:
+        return ToolResult(
+            content=[TextContent(type="text", text=f"found {query}")],
+            structured_content={"answer": query},
+            meta={"source": "catalog-a", "trace_id": "trace-123"},
+        )
+
+    raw = _raw_virtual(
+        members=[
+            {
+                "backend_id": "backend-a",
+                "tool_original": "search",
+                "label": "alpha",
+                "args": {"query": "query"},
+            }
+        ]
+    )
+    cfg = _cfg(raw)
+    server = vt.build_virtual_server(cfg, cfg, {"a": source}, log)
+
+    async def exercise():
+        async with Client(server) as client:
+            listed = await client.list_tools()
+            result = await client.call_tool("fanout", {"query": "needles"})
+            return listed, result
+
+    listed, result = anyio.run(exercise)
+    advertised = next(item for item in listed if item.name == "fanout")
+    assert advertised.outputSchema == vt.VIRTUAL_OUTPUT_SCHEMA
+    member = result.structured_content["members"][0]
+    assert member["result"] == {"answer": "needles"}
+    assert member["meta"] == {"source": "catalog-a", "trace_id": "trace-123"}
+    assert result.meta is not None
+    assert "mcp-gateway/virtual" in result.meta
+
+
+def test_aggregate_omits_oversize_member_metadata_within_strict_budget():
+    tool = _cfg(_raw_virtual(max_result_bytes=1024)).virtual_tools[0]
+    result = vt.aggregate_results(
+        tool,
+        [
+            {
+                "member": "alpha",
+                "status": "ok",
+                "content": [],
+                "meta": {"large": "z" * 8_000},
+            }
+        ],
+        ["alpha"],
+    )
+    assert vt._json_size(result) <= tool.max_result_bytes
+    assert result.structured_content["members"][0].get("meta") is None
+    omitted = result.structured_content["budget"]["omitted"]
+    assert {item["kind"] for item in omitted} == {"meta"}
 
 
 def test_aggregate_budget_omission_is_explicit():

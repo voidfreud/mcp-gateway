@@ -650,9 +650,17 @@ async def _mount_backend(  # noqa: PLR0913 — the mount needs the full lifespan
                     message_handler=message_handler,
                 )
             )
-            proxy = create_proxy(client, name=name)
+            proxy = create_proxy(
+                client,
+                name=name,
+                list_page_size=config_loader.DOWNSTREAM_TOOLS_PAGE_SIZE,
+            )
         else:
-            proxy = create_proxy(config_loader.to_proxy_config_one(b), name=name)
+            proxy = create_proxy(
+                config_loader.to_proxy_config_one(b),
+                name=name,
+                list_page_size=config_loader.DOWNSTREAM_TOOLS_PAGE_SIZE,
+            )
 
         _suppress_list_changed(proxy)  # #90
         proxy.add_middleware(CallLogMiddleware(log, b.name, on_session_death))
