@@ -8,6 +8,12 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Guarded Path A updates** — `just update` now provides one explicit,
+  fail-closed deployment command: it requires a clean `main` checkout, pulls
+  only fast-forward changes from `origin/main`, synchronizes `uv.lock`, reloads
+  launchd, and verifies daemon health/readiness without touching user config or
+  runtime state.
+
 - **Separated client registration policy** — Claude Code and Codex CLI
   discovery, command construction, auth handling, and registration parsing now
   live in dedicated reusable modules. The Admin API keeps compatibility

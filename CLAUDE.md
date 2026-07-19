@@ -78,6 +78,9 @@ layout, console script `mcp-gateway`). MIT; distributed via
   `MCP_GATEWAY_CONFIG` > `./config.toml` > `~/.config/mcp-gateway/config.toml`
   (auto-seeded).
 - Login service: `just install` (idempotent; re-run after moving the repo).
+  Updates: `just update` only from a clean `main` checkout; it fast-forwards
+  `origin/main`, runs `uv sync --locked`, reloads launchd, and checks `/health`
+  plus `/ready` without touching config/state.
 - Gate: `just check` = ruff lint+format, pytest, import smoke. CI runs it on
   every PR/push (cached, ~30s) + wheel-integrity check. A separate hermetic
   `mcp-contract` job runs `tests/live/run_mcp_wire.py` and the pinned official
@@ -179,6 +182,8 @@ layout, console script `mcp-gateway`). MIT; distributed via
   connected Claude session shows old text until reconnect (`/mcp`) — verify
   after reconnect or you grade stale text.
 - Topology changes restart via launchd (`restart_response` is honest in dev);
+  `just update` is the guarded source/dependency deployment path and refuses a
+  dirty worktree or feature branch;
   `install.sh` waits out launchd's ASYNC bootout before bootstrapping (race →
   "Bootstrap failed: 5"). launchd runs the venv console script through the
   symlink; recreate the venv with `uv sync`.
