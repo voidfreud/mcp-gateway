@@ -91,7 +91,7 @@ jobs:
       - name: Set up uv for the release PR
         if: steps.release-please.outputs.prs_created == 'true'
         # astral-sh/setup-uv v8.1.0
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990
         with:
           enable-cache: false
 
@@ -250,7 +250,7 @@ jobs:
 
       - name: Set up uv
         # astral-sh/setup-uv v8.1.0
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990
         with:
           enable-cache: false
 
