@@ -1,0 +1,4 @@
+# Research receipts are machine-local, time-sensitive, and never release artifacts.
+*
+!.gitignore
+!ABOUT.md
