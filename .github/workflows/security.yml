@@ -37,7 +37,6 @@ jobs:
           version: 1.22.0
           advanced-security: false
           annotations: true
-          token: ""
 
       - name: Scan changed tracked files for secrets
         env:
