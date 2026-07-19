@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
-import subprocess
 from collections.abc import Callable, MutableMapping
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -12,6 +10,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
+from mcp_gateway import admin_cli
 from mcp_gateway import config_loader as cl
 from mcp_gateway.config_loader import GatewayConfig
 
@@ -51,18 +50,7 @@ def codex_routes(
 
     async def _cli_raw(argv: list[str]) -> tuple[int, str, str]:
         deps = deps_factory()
-        try:
-            result = await asyncio.to_thread(
-                deps.subprocess_run,
-                argv,
-                capture_output=True,
-                text=True,
-                timeout=deps.cli_timeout,
-                check=False,
-            )
-            return result.returncode, result.stdout, result.stderr
-        except (subprocess.SubprocessError, OSError) as exc:
-            return -1, "", f"{type(exc).__name__}: {exc}"
+        return await admin_cli.run_cli(deps.subprocess_run, argv, deps.cli_timeout)
 
     def _binary() -> str | JSONResponse:
         deps = deps_factory()

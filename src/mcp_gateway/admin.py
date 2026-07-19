@@ -14,8 +14,6 @@ so those write config and restart the daemon.
 from __future__ import annotations
 
 import asyncio
-import functools
-import importlib.metadata
 import json
 import os
 import re
@@ -32,7 +30,15 @@ from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse
 from starlette.routing import Route
 
-from mcp_gateway import admin_routes_codex, runtime
+from mcp_gateway import (
+    admin_routes_backend,
+    admin_routes_claude,
+    admin_routes_codex,
+    admin_routes_ops,
+    admin_routes_settings,
+    admin_routes_virtual,
+    runtime,
+)
 from mcp_gateway import config_loader as cl
 from mcp_gateway import hooks as hooks_mod
 from mcp_gateway import virtual_tools as virtual_mod
@@ -45,6 +51,7 @@ from mcp_gateway.config_loader import (
     ResourceOverride,
     ToolOverride,
 )
+from mcp_gateway.metadata import gateway_version
 
 STATE_DIR = Path("~/.local/state/mcp-gateway").expanduser()
 DEFAULTS_DIR = STATE_DIR / "defaults"
@@ -71,29 +78,6 @@ STATUS_TIMEOUT = 5.0
 # only — resets on restart, which is exactly right: a fresh daemon means fresh
 # backend connections, whose baselines should re-capture once.
 _last_refresh: dict[str, float] = {}
-
-
-@functools.cache
-def gateway_version() -> str:
-    """The gateway's own version, from a single source (package metadata, else
-    the ``version = "..."`` line in pyproject.toml). Surfaced in the admin UI and
-    ``/health`` so the running build is visible after a restart/upgrade (#57).
-
-    Cached: the version is constant for a process, so we don't re-read pyproject
-    on every /health and /admin/api/state request (#79)."""
-    try:
-        return importlib.metadata.version("mcp-gateway")
-    except importlib.metadata.PackageNotFoundError:
-        pass
-    try:
-        # repo checkout fallback: pyproject sits at the repo root (src layout)
-        text = (HERE.parents[1] / "pyproject.toml").read_text(encoding="utf-8")
-        m = re.search(r'(?m)^version\s*=\s*"([^"]+)"', text)
-        if m:
-            return m.group(1)
-    except OSError:
-        pass
-    return "unknown"
 
 
 # ---------------------------------------------------------------------------
@@ -2022,191 +2006,24 @@ def _general_routes(ctx: _AdminCtx) -> list[Route]:
     ]
 
 
-def _settings_routes(ctx: _AdminCtx) -> list[Route]:  # noqa: PLR0915 — statement count is the nested handlers; the group is cohesive
-    """Text overrides: tool override, reset, instructions, import, and the #153
-    dangling-override migrate/discard repairs."""
+def _settings_routes(ctx: _AdminCtx) -> list[Route]:
+    """Compatibility facade for the independently testable settings routes."""
 
-    async def put_override(request: Request):
-        payload = await request.json()
-        cfg = ctx.load()
-        try:
-            uniquified = apply_tool_override(cfg, payload["backend"], payload)
-        except (cl.ConfigError, KeyError) as exc:
-            return _err(str(exc))
-        ctx.commit(cfg, payload["backend"])
-        out: dict = {"ok": True, "reloaded": "in-process"}
-        if uniquified is not None:
-            # #22: the opt-in uniquify stored a suffixed name — hand the final
-            # name back so the UI can reflect what actually shipped.
-            out.update({"name": uniquified, "uniquified": True})
-        return JSONResponse(out)
+    def deps() -> admin_routes_settings.SettingsRouteDeps:
+        # Resolve facade globals at request time so existing callers and tests
+        # can continue to monkeypatch mcp_gateway.admin collaborators.
+        return admin_routes_settings.SettingsRouteDeps(
+            error=_err,
+            needs_json=_needs_json,
+            apply_tool_override=apply_tool_override,
+            apply_resource_override=apply_resource_override,
+            apply_prompt_override=apply_prompt_override,
+            set_instructions=set_instructions,
+            migrate_override=migrate_override,
+            import_settings=import_settings,
+        )
 
-    async def reset_tool(request: Request):
-        """Clear all overrides for one tool (revert to the backend default)."""
-        payload = await request.json()
-        cfg = ctx.load()
-        b = next((x for x in cfg.backends if x.name == payload["backend"]), None)
-        if b is None:
-            return _err("unknown backend")
-        b.tools = [t for t in b.tools if t.original != payload["tool_original"]]
-        ctx.commit(cfg, payload["backend"])
-        return JSONResponse({"ok": True})
-
-    async def put_resource_override(request: Request):
-        """#15: upsert one resource/template override (keyed by uri)."""
-        payload = await request.json()
-        cfg = ctx.load()
-        try:
-            apply_resource_override(cfg, payload["backend"], payload)
-        except (cl.ConfigError, KeyError) as exc:
-            return _err(str(exc))
-        ctx.commit(cfg, payload["backend"])
-        return JSONResponse({"ok": True, "reloaded": "in-process"})
-
-    async def reset_resource(request: Request):
-        """#15: clear all overrides for one resource (revert to default)."""
-        payload = await request.json()
-        cfg = ctx.load()
-        b = next((x for x in cfg.backends if x.name == payload["backend"]), None)
-        if b is None:
-            return _err("unknown backend")
-        b.resources = [r for r in b.resources if r.uri != payload["uri"]]
-        ctx.commit(cfg, payload["backend"])
-        return JSONResponse({"ok": True})
-
-    async def put_prompt_override(request: Request):
-        """#15: upsert one prompt's override (rename, text, args, enabled)."""
-        payload = await request.json()
-        cfg = ctx.load()
-        try:
-            apply_prompt_override(cfg, payload["backend"], payload)
-        except (cl.ConfigError, KeyError) as exc:
-            return _err(str(exc))
-        ctx.commit(cfg, payload["backend"])
-        return JSONResponse({"ok": True, "reloaded": "in-process"})
-
-    async def reset_prompt(request: Request):
-        """#15: clear all overrides for one prompt (revert to default)."""
-        payload = await request.json()
-        cfg = ctx.load()
-        b = next((x for x in cfg.backends if x.name == payload["backend"]), None)
-        if b is None:
-            return _err("unknown backend")
-        b.prompts = [p for p in b.prompts if p.original != payload["prompt_original"]]
-        ctx.commit(cfg, payload["backend"])
-        return JSONResponse({"ok": True})
-
-    async def put_instructions(request: Request):
-        """Set a per-backend server-instructions override (``backend`` = name).
-        Hot-reloads that backend's endpoint — it only changes the blurb Claude
-        reads at initialize, no connection rebuild."""
-        payload = await request.json()
-        cfg = ctx.load()
-        backend = payload.get("backend")
-        try:
-            set_instructions(cfg, backend, payload.get("value"))
-        except (cl.ConfigError, KeyError) as exc:
-            return _err(str(exc))
-        ctx.commit(cfg, backend)  # set_instructions validated the name
-        return JSONResponse({"ok": True})
-
-    async def migrate_override_route(request: Request):
-        """#153: carry a dangling override's tuned text onto the tool's new
-        original, then drop the old entry. Hot-reloads that backend."""
-        name = request.path_params["name"]
-        payload = await request.json()
-        cfg = ctx.load()
-        try:
-            res = migrate_override(cfg, name, payload.get("from"), payload.get("to"))
-        except (cl.ConfigError, KeyError) as exc:
-            return _err(str(exc))
-        ctx.commit(cfg, name)
-        return JSONResponse({"ok": True, "reloaded": "in-process", **res})
-
-    async def discard_override_route(request: Request):
-        """#153: drop a dangling override entry (its tuned text no longer
-        applies). Same removal as /reset — the intent is different (clearing a
-        stale entry, not reverting a live tool)."""
-        name = request.path_params["name"]
-        payload = await request.json()
-        cfg = ctx.load()
-        b = next((x for x in cfg.backends if x.name == name), None)
-        if b is None:
-            return _err("unknown backend")
-        original = payload.get("original")
-        before = len(b.tools)
-        b.tools = [t for t in b.tools if t.original != original]
-        if len(b.tools) == before:
-            return _err(f"no stored override for {original!r}")
-        ctx.commit(cfg, name)
-        return JSONResponse({"ok": True, "reloaded": "in-process"})
-
-    async def post_import(request: Request):
-        """Atomic settings import (#136): validate the whole bundle against a
-        fresh cfg; persist and hot-reload only if EVERY item passes."""
-        payload = await request.json()
-        bundle = payload.get("settings") or payload
-        mode = payload.get("mode", "merge")
-        cfg = ctx.load()
-        affected, errors = import_settings(cfg, bundle, mode)
-        if errors:
-            return JSONResponse(
-                {"ok": False, "errors": errors, "applied": False}, status_code=400
-            )
-        # disabled backends: stored, effective on enable (commit skips unmounted)
-        ctx.commit(cfg, *affected)
-        return JSONResponse({"ok": True, "backends": affected, "mode": mode})
-
-    return [
-        Route(
-            "/admin/api/override",
-            _needs_json(ctx.locked(put_override)),
-            methods=["PUT"],
-        ),
-        Route(
-            "/admin/api/reset", _needs_json(ctx.locked(reset_tool)), methods=["POST"]
-        ),
-        Route(
-            "/admin/api/resource-override",
-            _needs_json(ctx.locked(put_resource_override)),
-            methods=["PUT"],
-        ),
-        Route(
-            "/admin/api/resource-reset",
-            _needs_json(ctx.locked(reset_resource)),
-            methods=["POST"],
-        ),
-        Route(
-            "/admin/api/prompt-override",
-            _needs_json(ctx.locked(put_prompt_override)),
-            methods=["PUT"],
-        ),
-        Route(
-            "/admin/api/prompt-reset",
-            _needs_json(ctx.locked(reset_prompt)),
-            methods=["POST"],
-        ),
-        Route(
-            "/admin/api/instructions",
-            _needs_json(ctx.locked(put_instructions)),
-            methods=["PUT"],
-        ),
-        Route(
-            "/admin/api/import",
-            _needs_json(ctx.locked(post_import)),
-            methods=["POST"],
-        ),
-        Route(
-            "/admin/api/backend/{name}/migrate-override",
-            _needs_json(ctx.locked(migrate_override_route)),
-            methods=["POST"],
-        ),
-        Route(
-            "/admin/api/backend/{name}/discard-override",
-            _needs_json(ctx.locked(discard_override_route)),
-            methods=["POST"],
-        ),
-    ]
+    return admin_routes_settings.settings_routes(ctx, deps)
 
 
 # ${ENV} reference guard for the bearer token (#155): a stored token must be a
@@ -2288,344 +2105,28 @@ def _gateway_settings_routes(ctx: _AdminCtx) -> list[Route]:
     ]
 
 
-def _backend_routes(ctx: _AdminCtx) -> list[Route]:  # noqa: PLR0915 — statement count is the nested handlers; the group is cohesive
-    """Per-backend flags and topology: pin, enable, display name, rename,
-    add, remove."""
+def _backend_routes(ctx: _AdminCtx) -> list[Route]:
+    """Compatibility facade for the independently testable backend routes."""
 
-    async def pin_backend(request: Request):
-        """Toggle per-backend always_load (pin all its tools upfront). Hot-reload —
-        it only adds `_meta`, no connection change."""
-        name = request.path_params["name"]
-        payload = await request.json()
-        cfg = ctx.load()
-        b = next((x for x in cfg.backends if x.name == name), None)
-        if b is None:
-            return _err("unknown backend")
-        b.always_load = bool(payload.get("value", False))
-        ctx.commit(cfg, name)
-        return JSONResponse({"ok": True, "reloaded": "in-process"})
-
-    async def _apply_enabled(b: Backend, value: bool) -> None:
-        """Bring one backend's live mount in line with its enabled flag (#78):
-        enable -> mount it if not already mounted; disable -> unmount it (so a
-        disabled backend runs no subprocess and its endpoint 404s)."""
-        if value:
-            # Not mounted -> mount it live (#7).
-            if b.name not in ctx.backend_runtime.proxies:
-                add = ctx.hooks.get("add")
-                if add is not None:
-                    await add(b)
-            else:  # already mounted (defensive) -> just refresh its transforms
-                hot_reload(ctx.backend_runtime, ctx.load(), b.name, ctx.log)
-        else:
-            remove = ctx.hooks.get("remove")
-            if remove is not None:
-                remove(b.name)
-
-    async def set_stateless(request: Request):
-        """Toggle a backend's warm/stateless session strategy (#161).
-
-        A warm session (``stateless=false``) reuses one backend connection across
-        calls and auto-recycles if it dies; stateless spins up a fresh session per
-        call. Flipping it is a per-backend topology change, but it needs NO daemon
-        restart: save the new flag, then recycle the backend via the lifespan hook
-        — the runner tears down and re-mounts, reading the fresh config (so the new
-        ``stateless`` value takes effect on the re-mount). If the hook isn't
-        registered (no lifespan, e.g. a unit test), the value is still persisted."""
-        name = request.path_params["name"]
-        payload = await request.json()
-        cfg = ctx.load()
-        b = next((x for x in cfg.backends if x.name == name), None)
-        if b is None:
-            return _err("unknown backend")
-        b.stateless = bool(payload.get("value", False))
-        ctx.commit(cfg)  # persist only — the recycle re-mounts with fresh config
-        recycle = ctx.hooks.get("recycle")
-        if recycle is not None:
-            recycle(name)
-        return JSONResponse(
-            {"ok": True, "reloaded": "recycled", "stateless": b.stateless}
+    def deps() -> admin_routes_backend.BackendRouteDeps:
+        # Resolve facade globals at request time so existing callers and tests
+        # can continue to monkeypatch mcp_gateway.admin collaborators.
+        return admin_routes_backend.BackendRouteDeps(
+            error=_err,
+            needs_json=_needs_json,
+            clean=_clean,
+            name_pattern=_NAME_RE,
+            virtual_route=virtual_mod.VIRTUAL_ROUTE,
+            stable_backend_id=virtual_mod.stable_backend_id,
+            hot_reload=hot_reload,
+            capture_defaults=capture_defaults,
+            save_defaults=save_defaults,
+            defaults_dir=DEFAULTS_DIR,
+            refresh_timestamps=_last_refresh,
+            monotonic=time.monotonic,
         )
 
-    async def enable_backend(request: Request):
-        """Enable/disable a backend (#38). Enable MOUNTS it live; disable UNMOUNTS
-        it (#78) — no subprocess and a 404 endpoint while disabled — until it's
-        re-enabled. No daemon restart either way."""
-        name = request.path_params["name"]
-        payload = await request.json()
-        cfg = ctx.load()
-        b = next((x for x in cfg.backends if x.name == name), None)
-        if b is None:
-            return _err("unknown backend")
-        value = bool(payload.get("value", True))
-        b.enabled = value
-        ctx.commit(cfg)
-        await _apply_enabled(b, value)
-        return JSONResponse({"ok": True, "reloaded": "in-process"})
-
-    async def enable_all(request: Request):
-        """Master switch (#40): enable/disable every backend, mounting or
-        unmounting each to match (#78)."""
-        payload = await request.json()
-        value = bool(payload.get("value", True))
-        cfg = ctx.load()
-        for b in cfg.backends:
-            b.enabled = value
-        ctx.commit(cfg)
-        for b in cfg.backends:
-            await _apply_enabled(b, value)
-        return JSONResponse({"ok": True, "reloaded": "in-process"})
-
-    async def set_display_name(request: Request):
-        """Set a backend's display-only name (#42). Purely cosmetic — routing,
-        endpoint URL, config keys and Claude Code registration all stay ``name`` —
-        so there's no hot-reload; empty clears it (falls back to ``name``)."""
-        name = request.path_params["name"]
-        payload = await request.json()
-        cfg = ctx.load()
-        b = next((x for x in cfg.backends if x.name == name), None)
-        if b is None:
-            return _err("unknown backend")
-        try:
-            b.display_name = _clean(payload.get("value"))  # validates encodability
-        except cl.ConfigError as exc:
-            return _err(str(exc))
-        ctx.commit(cfg)
-        return JSONResponse({"ok": True})
-
-    async def rename_backend(request: Request):  # noqa: PLR0911, PLR0912, PLR0915 - transactional validation/rollback exits
-        """Hard-rename a backend (#44) — a REAL identity change, unlike the
-        cosmetic display_name (#42). ``name`` drives the endpoint mount
-        (``/{name}/mcp``), the Claude Code registration (``gateway-{name}``),
-        the config key, and the captured-defaults file — all move together.
-        Topology change → restart; the response carries old/new endpoint and
-        registration so the UI can say exactly what to reconfigure in
-        Claude Code."""
-        name = request.path_params["name"]
-        payload = await request.json()
-        value = payload.get("value")
-        new_name = value.strip() if isinstance(value, str) else ""
-        if not _NAME_RE.match(new_name):
-            return _err(
-                f"invalid backend name {new_name!r}: use only letters, digits, "
-                f"'_' or '-' (max 64 chars)"
-            )
-        if new_name == virtual_mod.VIRTUAL_ROUTE:
-            return _err("backend name 'virtual' is reserved for Virtual Tools")
-        cfg = ctx.load()
-        old_backend = next((x for x in cfg.backends if x.name == name), None)
-        if old_backend is None:
-            return _err("unknown backend")
-        if any(x.name == new_name for x in cfg.backends):
-            return _err(
-                f"backend name {new_name!r} already exists — pick a different one"
-            )
-        candidate = cfg.model_copy(deep=True)
-        new_backend = next(x for x in candidate.backends if x.name == name)
-        new_backend.name = new_name
-        try:
-            candidate = GatewayConfig.model_validate(candidate.model_dump())
-        except Exception as exc:  # noqa: BLE001 - complete candidate validation
-            return _err(str(exc))
-        # Persist the complete valid candidate first, but keep the old live mount
-        # until the new identity has mounted successfully. This makes the runtime
-        # topology transactional even though two names briefly coexist.
-        ctx.commit(candidate, validate_virtual_refs=False)
-        # Migrate the captured defaults (the immutable baseline) old → new so
-        # overrides keep diffing against it; tolerate a never-introspected
-        # backend (no file — the restart re-captures under the new name).
-        old_defaults = DEFAULTS_DIR / f"{name}.json"
-        new_defaults = DEFAULTS_DIR / f"{new_name}.json"
-        old_defaults_data = (
-            json.loads(old_defaults.read_text(encoding="utf-8"))
-            if old_defaults.is_file()
-            else None
-        )
-        if old_defaults_data is not None:
-            data = dict(old_defaults_data)
-            data["backend"] = new_name
-            save_defaults(data)
-            old_defaults.unlink(missing_ok=True)
-        base = f"http://{candidate.host}:{candidate.port}"
-        response = {
-            "backend": new_name,
-            "old_endpoint": f"{base}/{name}/mcp",
-            "new_endpoint": f"{base}/{new_name}/mcp",
-            "old_registration": f"gateway-{name}",
-            "new_registration": f"gateway-{new_name}",
-        }
-        # In the live daemon, mount the new identity before responding so stable
-        # Virtual Tool references resolve immediately. Claude Code still needs
-        # its external registration moved, which the response makes explicit.
-        remove = ctx.hooks.get("remove")
-        add = ctx.hooks.get("add")
-        if remove is not None and add is not None:
-            mount_error = None
-            try:
-                mounted = await add(new_backend)
-            except Exception as exc:  # noqa: BLE001 - transaction rolls back below
-                mounted = False
-                mount_error = f": {type(exc).__name__}: {exc}"
-            if mounted:
-                remove(name)
-                return JSONResponse({"ok": True, "reloaded": "hot-rename", **response})
-            # The old runner was deliberately left alive. Remove any partial new
-            # runner, restore config/defaults, and only re-add old if it somehow
-            # disappeared independently while the new mount was attempted.
-            remove(new_name)
-            ctx.commit(cfg, validate_virtual_refs=False)
-            new_defaults.unlink(missing_ok=True)
-            if old_defaults_data is not None:
-                save_defaults(old_defaults_data)
-            recovery_error = None
-            if name not in ctx.backend_runtime.proxies:
-                try:
-                    if not await add(old_backend):
-                        recovery_error = "; old backend re-mount also failed"
-                except Exception as exc:  # noqa: BLE001 - report safe rollback state
-                    recovery_error = (
-                        f"; old backend re-mount failed: {type(exc).__name__}: {exc}"
-                    )
-            return JSONResponse(
-                {
-                    "ok": False,
-                    "reloaded": "mount-failed-rolled-back",
-                    "error": "new backend mount failed; rename rolled back"
-                    + (mount_error or "")
-                    + (recovery_error or ""),
-                    **response,
-                },
-                status_code=500,
-            )
-        return ctx.restart_response(response)
-
-    async def add_backend(request: Request):  # noqa: PLR0911 — one early return per validation/probe/mount outcome
-        """Import a new backend MCP. Validates + introspects, then restarts."""
-        payload = await request.json()
-        if payload.get("name") == virtual_mod.VIRTUAL_ROUTE:
-            return _err("backend name 'virtual' is reserved for Virtual Tools")
-        if any(b.name == payload.get("name") for b in ctx.load().backends):
-            return JSONResponse(
-                {"ok": False, "error": "backend name already exists"}, status_code=400
-            )
-        try:
-            b = Backend(
-                name=payload["name"],
-                transport=payload["transport"],
-                url=_clean(payload.get("url")),
-                command=_clean(payload.get("command")),
-                args=payload.get("args") or [],
-                auth_header=_clean(payload.get("auth_header")),
-                auth_value=_clean(payload.get("auth_value")),
-                headers=payload.get("headers") or {},
-                auth=_clean(payload.get("auth")),
-                headers_helper=_clean(payload.get("headers_helper")),
-                stateless=bool(payload.get("stateless", False)),
-            )
-        except Exception as exc:  # noqa: BLE001 (pydantic/validation)
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
-        b.id = virtual_mod.stable_backend_id(b)
-        # Probe + capture defaults before committing it to config — and BEFORE
-        # taking config_lock, so a slow backend can't block other admin edits.
-        try:
-            save_defaults(await capture_defaults(b))
-            _last_refresh[b.name] = time.monotonic()  # fresh — see #43 throttle
-        except Exception as exc:  # noqa: BLE001
-            return JSONResponse(
-                {"ok": False, "error": f"could not connect to backend: {exc}"},
-                status_code=400,
-            )
-        async with ctx.lock:
-            cfg = ctx.load()  # re-load + re-check: the probe await is a real gap
-            if any(x.name == b.name for x in cfg.backends):
-                return JSONResponse(
-                    {"ok": False, "error": "backend name already exists"},
-                    status_code=400,
-                )
-            candidate = cfg.model_copy(
-                update={"backends": [*cfg.backends, b]}, deep=True
-            )
-            try:
-                candidate = GatewayConfig.model_validate(candidate.model_dump())
-            except Exception as exc:  # noqa: BLE001 - complete candidate validation
-                return _err(str(exc))
-            ctx.commit(candidate)
-        # Hot-add (#7): mount the new backend into the RUNNING daemon — no
-        # restart, no /health polling race. Config is already saved either way,
-        # so a failed mount still lands the backend on the next real restart.
-        hot_add = ctx.hooks.get("add")
-        if hot_add is not None:
-            if await hot_add(b):
-                ctx.log.info("backend_hot_added", backend=b.name)
-                return JSONResponse(
-                    {"ok": True, "reloaded": "hot-add", "backend": b.name}
-                )
-            return JSONResponse(
-                {"ok": True, "reloaded": "mount-failed", "backend": b.name}
-            )
-        return ctx.restart_response({"backend": b.name})
-
-    async def remove_backend(request: Request):
-        name = request.path_params["name"]
-        cfg = ctx.load()
-        backend = next((b for b in cfg.backends if b.name == name), None)
-        if backend is None:
-            return _err("unknown backend")
-        backend_id = virtual_mod.stable_backend_id(backend)
-        referenced_by = [
-            tool.name
-            for tool in cfg.virtual_tools
-            if any(member.backend_id == backend_id for member in tool.members)
-        ]
-        if referenced_by:
-            return _err(
-                f"backend is referenced by Virtual Tool(s): {', '.join(referenced_by)}"
-            )
-        before = len(cfg.backends)
-        cfg.backends = [b for b in cfg.backends if b.name != name]
-        if len(cfg.backends) == before:
-            return _err("unknown backend")
-        ctx.commit(cfg)
-        # prune the captured defaults so removed backends don't accumulate
-        # orphaned files (#54); best-effort — the file may never have existed
-        (DEFAULTS_DIR / f"{name}.json").unlink(missing_ok=True)
-        return ctx.restart_response({})
-
-    return [
-        Route(
-            "/admin/api/backend/{name}/pin",
-            _needs_json(ctx.locked(pin_backend)),
-            methods=["POST"],
-        ),
-        Route(
-            "/admin/api/backend/{name}/enabled",
-            _needs_json(ctx.locked(enable_backend)),
-            methods=["POST"],
-        ),
-        Route(
-            "/admin/api/backend/{name}/stateless",
-            _needs_json(ctx.locked(set_stateless)),
-            methods=["POST"],
-        ),
-        Route(
-            "/admin/api/enabled", _needs_json(ctx.locked(enable_all)), methods=["POST"]
-        ),
-        Route(
-            "/admin/api/backend/{name}/display-name",
-            _needs_json(ctx.locked(set_display_name)),
-            methods=["POST"],
-        ),
-        Route(
-            "/admin/api/backend/{name}/rename",
-            _needs_json(ctx.locked(rename_backend)),
-            methods=["POST"],
-        ),
-        # add_backend takes ctx.lock itself (probe stays outside the lock)
-        Route("/admin/api/backend", _needs_json(add_backend), methods=["POST"]),
-        Route(
-            "/admin/api/backend/{name}", ctx.locked(remove_backend), methods=["DELETE"]
-        ),
-    ]
+    return admin_routes_backend.backend_routes(ctx, deps)
 
 
 async def admin_refresh(ctx: _AdminCtx, b: Backend, *, force: bool = False) -> dict:
@@ -2635,202 +2136,26 @@ async def admin_refresh(ctx: _AdminCtx, b: Backend, *, force: bool = False) -> d
     )
 
 
-def _claude_routes(ctx: _AdminCtx) -> list[Route]:  # noqa: PLR0915 — nested handlers; the group is cohesive
-    """One-click Claude Code registration (#45): shell out to `claude mcp
-    add/remove` for a backend's gateway endpoint (never edit Claude's config
-    files by hand). The CLI runs in a thread so the event loop stays free.
-    A CLI failure comes back as ``ok: false`` with its output at HTTP 200 (the
-    HTTP call itself succeeded); missing binary / bad scope are 400."""
+def _claude_routes(ctx: _AdminCtx) -> list[Route]:
+    """Compatibility facade for the independently testable Claude route group."""
 
-    async def _cli_raw(argv: list[str]) -> tuple[int, str, str]:
-        """Run one `claude` CLI invocation off the event loop; never raises —
-        a spawn failure comes back as ``(-1, "", "<error>")``."""
-        try:
-            r = await asyncio.to_thread(
-                subprocess.run,
-                argv,
-                capture_output=True,
-                text=True,
-                timeout=CLAUDE_CLI_TIMEOUT,
-                check=False,  # a CLI failure is surfaced as ok:false, not raised
-            )
-            return r.returncode, r.stdout, r.stderr
-        except (subprocess.SubprocessError, OSError) as exc:
-            return -1, "", f"{type(exc).__name__}: {exc}"
-
-    async def _run_cli(argv: list[str], redact: str | None = None) -> JSONResponse:
-        rc, stdout, stderr = await _cli_raw(argv)
-
-        def _hide(s: str) -> str:
-            # never echo the bearer token (#26) back to the browser
-            return s.replace(redact, "***") if redact else s
-
-        return JSONResponse(
-            {
-                "ok": rc == 0,
-                "exit": rc,
-                "stdout": _hide(stdout),
-                "stderr": _hide(stderr),
-                "command": _hide(" ".join(argv)),
-                "note": "Claude Code may need a reload/restart to pick up the change",
-            }
+    def deps() -> admin_routes_claude.ClaudeRouteDeps:
+        # Resolve facade globals at request time so existing callers and tests
+        # can continue to monkeypatch mcp_gateway.admin collaborators.
+        return admin_routes_claude.ClaudeRouteDeps(
+            cli_path=lambda: shutil.which("claude"),
+            command=claude_mcp_command,
+            parse_registrations=parse_cc_registrations,
+            error=_err,
+            needs_json=_needs_json,
+            cache=_cc_reg_cache,
+            cache_ttl=CC_REG_CACHE_TTL,
+            monotonic=time.monotonic,
+            subprocess_run=subprocess.run,
+            cli_timeout=CLAUDE_CLI_TIMEOUT,
         )
 
-    def _missing_cli() -> JSONResponse | None:
-        if shutil.which("claude") is None:
-            return _err(
-                "claude CLI not found on the daemon's PATH — install Claude "
-                "Code (or expose `claude` to the daemon's environment), then "
-                "retry"
-            )
-        return None
-
-    async def register_backend(request: Request):
-        """``claude mcp add`` for one backend as ``gateway-<name>``. Requires
-        the backend to exist in config so the registered URL is real."""
-        name = request.path_params["name"]
-        payload = await request.json()
-        scope = payload.get("scope") or "local"
-        cfg = ctx.load()
-        if not any(x.name == name for x in cfg.backends):
-            return _err("unknown backend")
-        missing = _missing_cli()
-        if missing is not None:
-            return missing
-        url = f"http://{cfg.host}:{cfg.port}/{name}/mcp"
-        try:
-            # #26 × #45: a bearer-protected gateway needs the header in the
-            # registration or every call would 401. Resolved once, redacted
-            # from the response.
-            token = cl.expand_env(cfg.bearer_token) if cfg.bearer_token else None
-            argv = claude_mcp_command(
-                "add", name, url=url, scope=scope, bearer_token=token
-            )
-        except cl.ConfigError as exc:
-            return _err(str(exc))
-        return await _run_cli(argv, redact=token)
-
-    async def deregister_backend(request: Request):
-        """``claude mcp remove`` for ``gateway-<name>``. Deliberately does NOT
-        require the backend to exist in config — this is the cleanup path after
-        a remove/rename, when the backend is already gone."""
-        name = request.path_params["name"]
-        payload = await request.json()
-        scope = payload.get("scope") or "local"
-        missing = _missing_cli()
-        if missing is not None:
-            return missing
-        try:
-            argv = claude_mcp_command("remove", name, scope=scope)
-        except cl.ConfigError as exc:
-            return _err(str(exc))
-        return await _run_cli(argv)
-
-    async def cc_registrations(request: Request):
-        """#46: which backends are registered in Claude Code. Runs
-        ``claude mcp list`` ONCE (in a thread), caches the output in-process for
-        ``CC_REG_CACHE_TTL`` so page reloads don't re-shell the CLI; ``?fresh=1``
-        busts the cache (used right after a register/deregister). Returns
-        ``{"available": false}`` when the CLI isn't on PATH, else
-        ``{"available": true, "registered": {backend: bool}}``."""
-        if shutil.which("claude") is None:
-            return JSONResponse({"available": False})
-        fresh = request.query_params.get("fresh") in ("1", "true")
-        now = time.monotonic()
-        output = _cc_reg_cache.get("output")
-        if fresh or output is None or now - _cc_reg_cache["ts"] > CC_REG_CACHE_TTL:
-            try:
-                r = await asyncio.to_thread(
-                    subprocess.run,
-                    ["claude", "mcp", "list"],
-                    capture_output=True,
-                    text=True,
-                    timeout=CLAUDE_CLI_TIMEOUT,
-                    check=False,
-                )
-                output = (r.stdout or "") + (r.stderr or "")
-            except (subprocess.SubprocessError, OSError):
-                output = ""
-            _cc_reg_cache["output"] = output
-            _cc_reg_cache["ts"] = now
-        names = [b.name for b in ctx.load().backends]
-        return JSONResponse(
-            {"available": True, "registered": parse_cc_registrations(output, names)}
-        )
-
-    async def reregister_all(request: Request):
-        """#154: deregister + register EVERY enabled backend in Claude Code, so
-        one click re-points them all at this gateway (e.g. after the bearer token
-        changed — every registration must carry the new header). Sequential;
-        each backend gets a fresh `remove` then `add`. A per-backend failure is
-        recorded and does NOT abort the rest — the summary reports ok/fail each."""
-        payload = await request.json()
-        scope = payload.get("scope") or "local"
-        cfg = ctx.load()
-        missing = _missing_cli()
-        if missing is not None:
-            return missing
-        try:
-            # Resolved once for every registration; redacted from all output.
-            token = cl.expand_env(cfg.bearer_token) if cfg.bearer_token else None
-        except cl.ConfigError as exc:
-            return _err(str(exc))
-
-        def _hide(s: str) -> str:
-            return s.replace(token, "***") if token else s
-
-        results: list[dict] = []
-        for b in cfg.backends:
-            if not b.enabled:
-                continue  # only enabled backends are broadcast, so only they register
-            url = f"http://{cfg.host}:{cfg.port}/{b.name}/mcp"
-            try:
-                rm_argv = claude_mcp_command("remove", b.name, scope=scope)
-                add_argv = claude_mcp_command(
-                    "add", b.name, url=url, scope=scope, bearer_token=token
-                )
-            except cl.ConfigError as exc:
-                results.append({"backend": b.name, "ok": False, "error": str(exc)})
-                continue
-            await _cli_raw(rm_argv)  # best-effort cleanup; a missing reg is fine
-            rc, _out, err = await _cli_raw(add_argv)
-            results.append(
-                {
-                    "backend": b.name,
-                    "ok": rc == 0,
-                    "exit": rc,
-                    "stderr": _hide(err),
-                }
-            )
-        ok_count = sum(1 for r in results if r["ok"])
-        return JSONResponse(
-            {
-                "ok": all(r["ok"] for r in results),
-                "count": len(results),
-                "ok_count": ok_count,
-                "backends": results,
-                "note": "Claude Code may need a reload/restart to pick up the change",
-            }
-        )
-
-    return [
-        Route(
-            "/admin/api/cc-reregister-all",
-            _needs_json(reregister_all),
-            methods=["POST"],
-        ),
-        Route(
-            "/admin/api/backend/{name}/register",
-            _needs_json(register_backend),
-            methods=["POST"],
-        ),
-        Route(
-            "/admin/api/backend/{name}/deregister",
-            _needs_json(deregister_backend),
-            methods=["POST"],
-        ),
-        Route("/admin/api/cc-registrations", cc_registrations, methods=["GET"]),
-    ]
+    return admin_routes_claude.claude_routes(ctx, deps)
 
 
 def _codex_routes(ctx: _AdminCtx) -> list[Route]:
@@ -2857,500 +2182,36 @@ def _codex_routes(ctx: _AdminCtx) -> list[Route]:
     return admin_routes_codex.codex_routes(ctx, deps)
 
 
-def _ops_routes(ctx: _AdminCtx) -> list[Route]:  # noqa: PLR0915 — nested handlers; the group is cohesive
-    """Operational endpoints: mini-inspector, manual restart, re-introspect,
-    liveness status (#23), and the dashboard-load refresh sweep (#43)."""
+def _ops_routes(ctx: _AdminCtx) -> list[Route]:
+    """Compatibility facade for the independently testable operational routes."""
 
-    async def restart_gateway(_request: Request):
-        """Manual on-demand restart of the daemon (#56). Same launchd-gated
-        semantics as a topology change: restarts when managed, honest no-op in
-        dev/foreground."""
-        return ctx.restart_response({})
-
-    async def run_tool(request: Request):  # noqa: PLR0911 — one early return per input-validation failure
-        """Mini-Inspector (#3): execute one tool through the LIVE proxy — the
-        same path Claude uses, so renames/transforms apply and reverse-map —
-        and return structured + unstructured content + error state. Read-only
-        w.r.t. config, so no lock; call_tool_mcp doesn't raise on a
-        tool-level error (isError comes back in the payload)."""
-        payload = await request.json()
-        backend = payload.get("backend")
-        proxy = ctx.backend_runtime.get_proxy(backend)
-        if proxy is None:
-            return JSONResponse(
-                {"ok": False, "error": "backend not mounted"}, status_code=400
-            )
-        tool = payload.get("tool")
-        if not isinstance(tool, str) or not tool:
-            return JSONResponse(
-                {"ok": False, "error": "missing or invalid tool (must be a string)"},
-                status_code=400,
-            )
-        args = payload.get("args") or {}
-        if not isinstance(args, dict):
-            return JSONResponse(
-                {"ok": False, "error": "args must be an object"}, status_code=400
-            )
-        started = time.perf_counter()
-        try:
-            async with Client(proxy) as c:
-                res = await c.call_tool_mcp(tool, args, timeout=60)
-        except Exception as exc:  # noqa: BLE001 — surface, don't 500
-            return JSONResponse(
-                {"ok": False, "error": f"{type(exc).__name__}: {exc}"},
-                status_code=502,
-            )
-        return JSONResponse(
-            {
-                "ok": True,
-                "is_error": bool(res.isError),
-                "ms": round((time.perf_counter() - started) * 1000, 1),
-                "content": [
-                    blk.model_dump(mode="json", exclude_none=True)
-                    for blk in (res.content or [])
-                ],
-                "structured": res.structuredContent,
-            }
+    def deps() -> admin_routes_ops.OpsRouteDeps:
+        # Resolve facade globals at request time so existing callers and tests
+        # can continue to monkeypatch mcp_gateway.admin collaborators.
+        return admin_routes_ops.OpsRouteDeps(
+            error=_err,
+            needs_json=_needs_json,
+            refresh=admin_refresh,
+            status_timeout=STATUS_TIMEOUT,
         )
 
-    async def reintrospect(request: Request):
-        """Manual Re-inspect: force a re-capture (bypasses the #43 throttle)
-        and hot-reload so pins/enabled reconcile with the fresh tool list.
-        Unlike the auto triggers, a failure here is surfaced (502), not just
-        logged — the user explicitly asked and deserves the answer."""
-        name = request.path_params["name"]
-        cfg = ctx.load()
-        b = next((x for x in cfg.backends if x.name == name), None)
-        if b is None:
-            return _err("unknown backend")
-        res = await admin_refresh(ctx, b, force=True)
-        if res["status"] == "error":
-            return _err(f"introspection failed: {res['error']}", status=502)
-        return JSONResponse({"ok": True, **res})
-
-    async def get_status(_request: Request):
-        """#23: per-backend liveness — one concurrent probe per backend through
-        its LIVE mounted proxy (the same path Claude's list_tools takes), each
-        bounded by STATUS_TIMEOUT so a hung backend marks itself, not the UI."""
-
-        async def one(b: Backend) -> tuple[str, dict]:
-            if not b.enabled:
-                return b.name, {"state": "disabled"}
-            proxy = ctx.backend_runtime.get_proxy(b.name)
-            if proxy is None:
-                return b.name, {"state": "unmounted"}
-            started = time.perf_counter()
-            try:
-                async with asyncio.timeout(STATUS_TIMEOUT):
-                    async with Client(proxy) as c:
-                        tools = await c.list_tools()
-                return b.name, {
-                    "state": "ok",
-                    "ms": round((time.perf_counter() - started) * 1000, 1),
-                    "tools": len(tools),
-                }
-            except Exception as exc:  # noqa: BLE001 — the error IS the status
-                err = f"{type(exc).__name__}: {exc}"
-                # #161: a WARM backend that probes `error` may have a dead session
-                # fastmcp won't heal — recycle it best-effort (cooldown-debounced
-                # in the hook). Stateless backends spin a fresh session per probe,
-                # so there's nothing to recycle.
-                if not b.stateless:
-                    recycle = ctx.hooks.get("recycle")
-                    if recycle is not None:
-                        recycle(b.name)
-                return b.name, {"state": "error", "error": err}
-
-        cfg = ctx.load()
-        results = await asyncio.gather(*(one(b) for b in cfg.backends))
-        return JSONResponse({"backends": dict(results)})
-
-    async def refresh_all(_request: Request):
-        """#43 dashboard-load trigger: throttled re-introspect of every
-        enabled+mounted backend, concurrently and per-backend isolated — a
-        down/slow backend reports itself and never stalls the others."""
-
-        async def one(b: Backend) -> tuple[str, dict]:
-            if not b.enabled or b.name not in ctx.backend_runtime.proxies:
-                return b.name, {"status": "skipped"}
-            return b.name, await admin_refresh(ctx, b)
-
-        cfg = ctx.load()
-        results = await asyncio.gather(*(one(b) for b in cfg.backends))
-        return JSONResponse({"ok": True, "backends": dict(results)})
-
-    return [
-        Route("/admin/api/run", _needs_json(run_tool), methods=["POST"]),
-        Route("/admin/api/restart", restart_gateway, methods=["POST"]),
-        Route("/admin/api/introspect/{name}", reintrospect, methods=["POST"]),
-        Route("/admin/api/status", get_status, methods=["GET"]),
-        Route("/admin/api/refresh", refresh_all, methods=["POST"]),
-    ]
+    return admin_routes_ops.ops_routes(ctx, deps)
 
 
-def _virtual_routes(ctx: _AdminCtx) -> list[Route]:  # noqa: PLR0915
-    """First-class Virtual Tool catalog, draft lifecycle, testing and activation."""
+def _virtual_routes(ctx: _AdminCtx) -> list[Route]:
+    """Compatibility facade for the independently testable Virtual Tool routes."""
 
-    def _definition(tool: cl.VirtualTool) -> dict:
-        return tool.model_dump(mode="json", exclude_none=True)
-
-    def _find(cfg: GatewayConfig, name: str) -> cl.VirtualTool | None:
-        return next((tool for tool in cfg.virtual_tools if tool.name == name), None)
-
-    def _clean_virtual_payload(payload: dict) -> dict:
-        """Discard client-authored consent receipts; only activation may mint one."""
-        cleaned = dict(payload)
-        cleaned.pop("consent_fingerprint", None)
-        cleaned.pop("egress_consent_fingerprint", None)
-        if isinstance(cleaned.get("router"), dict):
-            cleaned["router"] = dict(cleaned["router"])
-            cleaned["router"].pop("consent_fingerprint", None)
-            cleaned["router"].pop("egress_consent_fingerprint", None)
-        return cleaned
-
-    def _consent_fingerprint(tool: cl.VirtualTool) -> str | None:
-        """Fingerprint exactly the administrator-visible OpenRouter egress shape."""
-        if tool.dispatch != "llm" or tool.router is None:
-            return None
-        return cl.llm_egress_consent_fingerprint(tool)
-
-    async def _resolution(tool: cl.VirtualTool, cfg: GatewayConfig) -> dict:
-        return await virtual_mod.resolve_tool(tool, cfg, ctx.backend_runtime.proxies)
-
-    def _hot_replace(cfg: GatewayConfig) -> None:
-        server = ctx.hooks.get("virtual_server")
-        if server is None:
-            raise cl.ConfigError("the shared /virtual/mcp endpoint is not mounted")
-        virtual_mod.replace_tools(
-            server,
-            cfg,
-            ctx.load,
-            ctx.backend_runtime.proxies,
-            ctx.log,
-            ctx.hooks.setdefault("virtual_status", {}),
+    def deps() -> admin_routes_virtual.VirtualRouteDeps:
+        # Resolve facade globals at request time so existing callers and tests
+        # can continue to monkeypatch mcp_gateway.admin collaborators.
+        return admin_routes_virtual.VirtualRouteDeps(
+            load_defaults=load_defaults,
+            find_tool_override=_find_tool_override,
+            error=_err,
+            needs_json=_needs_json,
         )
 
-    async def list_virtual_tools(_request: Request):
-        cfg = ctx.load()
-        resolutions = await asyncio.gather(
-            *(_resolution(tool, cfg) for tool in cfg.virtual_tools)
-        )
-        statuses = ctx.hooks.setdefault("virtual_status", {})
-        listed = []
-        for tool, resolution in zip(cfg.virtual_tools, resolutions, strict=True):
-            definition = _definition(tool)
-            definition["members"] = [
-                {**member, "resolution": resolved}
-                for member, resolved in zip(
-                    definition["members"], resolution["members"], strict=True
-                )
-            ]
-            listed.append(
-                {
-                    **definition,
-                    "resolution": resolution,
-                    **statuses.get(tool.name, {}),
-                }
-            )
-        return JSONResponse(
-            {
-                "mounted": "virtual_server" in ctx.hooks,
-                "endpoint": "/virtual/mcp",
-                "tools": listed,
-            }
-        )
-
-    async def virtual_catalog(_request: Request):
-        cfg = ctx.load()
-        backends = []
-        for backend in cfg.backends:
-            defaults = load_defaults(backend.name) or {}
-            tools = []
-            for source in defaults.get("tools", []):
-                override = _find_tool_override(backend, source["original"])
-                effective = (
-                    override.name if override and override.name else source["original"]
-                )
-                params = []
-                overrides = {
-                    item.original: item
-                    for item in (override.params if override else [])
-                }
-                for param in source.get("params", []):
-                    changed = overrides.get(param["original"])
-                    params.append(
-                        {
-                            "original": param["original"],
-                            "effective_name": (
-                                changed.name
-                                if changed is not None and changed.name
-                                else param["original"]
-                            ),
-                            "description": param.get("description"),
-                            "required": param.get("required", False),
-                            "hidden": changed.hide if changed else False,
-                        }
-                    )
-                tools.append(
-                    {
-                        "original": source["original"],
-                        "effective_name": effective,
-                        "description": (
-                            override.description
-                            if override and override.description is not None
-                            else source.get("description")
-                        ),
-                        "enabled": backend.enabled
-                        and (override.enabled if override else True),
-                        "params": params,
-                    }
-                )
-            backends.append(
-                {
-                    "id": virtual_mod.stable_backend_id(backend),
-                    "name": backend.name,
-                    "effective_name": backend.display_name or backend.name,
-                    "enabled": backend.enabled,
-                    "tools": tools,
-                }
-            )
-        return JSONResponse({"backends": backends})
-
-    async def create_virtual(request: Request):
-        payload = _clean_virtual_payload(await request.json())
-        payload = {**payload, "enabled": False}
-        try:
-            tool = cl.VirtualTool.model_validate(payload)
-        except Exception as exc:  # noqa: BLE001 - Pydantic/config validation
-            return _err(str(exc))
-        cfg = ctx.load()
-        if _find(cfg, tool.name) is not None:
-            return _err("virtual tool name already exists")
-        virtual_mod.ensure_backend_ids(cfg)
-        try:
-            candidate = cfg.model_copy(
-                update={"virtual_tools": [*cfg.virtual_tools, tool]}, deep=True
-            )
-            candidate = GatewayConfig.model_validate(candidate.model_dump())
-            virtual_mod.build_virtual_tool(
-                tool, candidate, ctx.backend_runtime.proxies, ctx.log
-            )
-        except Exception as exc:  # noqa: BLE001 - dry build
-            return _err(str(exc))
-        ctx.commit(candidate)
-        return JSONResponse(
-            {"ok": True, "tool": _definition(tool), "lifecycle": "draft"},
-            status_code=201,
-        )
-
-    async def update_virtual(request: Request):  # noqa: PLR0911 - validation/rollback exits
-        name = request.path_params["name"]
-        payload = _clean_virtual_payload(await request.json())
-        cfg = ctx.load()
-        previous = _find(cfg, name)
-        if previous is None:
-            return _err("unknown virtual tool", 404)
-        # PUT always creates/replaces an inactive draft. An active revision is
-        # removed from the shared endpoint after persistence; activation is the
-        # only operation that can put the edited definition back into service.
-        payload = {**payload, "enabled": False}
-        try:
-            tool = cl.VirtualTool.model_validate(payload)
-        except Exception as exc:  # noqa: BLE001
-            return _err(str(exc))
-        if tool.name != name and _find(cfg, tool.name) is not None:
-            return _err("virtual tool name already exists")
-        virtual_mod.ensure_backend_ids(cfg)
-        tools = [tool if item.name == name else item for item in cfg.virtual_tools]
-        try:
-            candidate = GatewayConfig.model_validate(
-                cfg.model_copy(update={"virtual_tools": tools}, deep=True).model_dump()
-            )
-            virtual_mod.build_virtual_tool(
-                tool, candidate, ctx.backend_runtime.proxies, ctx.log
-            )
-        except Exception as exc:  # noqa: BLE001
-            return _err(str(exc))
-        ctx.commit(candidate)
-        if previous.enabled:
-            try:
-                _hot_replace(candidate)
-            except Exception as exc:  # noqa: BLE001
-                ctx.commit(cfg, validate_virtual_refs=False)
-                _hot_replace(cfg)
-                return _err(
-                    f"hot reload failed; previous definition restored: {exc}", 500
-                )
-        return JSONResponse(
-            {"ok": True, "tool": _definition(tool), "lifecycle": "draft"}
-        )
-
-    async def validate_virtual(request: Request):
-        cfg = ctx.load()
-        tool = _find(cfg, request.path_params["name"])
-        if tool is None:
-            return _err("unknown virtual tool", 404)
-        resolution = await _resolution(tool, cfg)
-        return JSONResponse(resolution, status_code=200 if resolution["ok"] else 400)
-
-    async def test_virtual(request: Request):
-        cfg = ctx.load()
-        tool = _find(cfg, request.path_params["name"])
-        if tool is None:
-            return _err("unknown virtual tool", 404)
-        payload = await request.json()
-        resolution = await _resolution(tool, cfg)
-        if not resolution["ok"]:
-            return JSONResponse(resolution, status_code=400)
-        started = time.perf_counter()
-        try:
-            result = await virtual_mod.run_virtual(
-                tool,
-                payload.get("arguments") or {},
-                cfg,
-                ctx.backend_runtime.proxies,
-                ctx.log,
-            )
-            receipt = result.model_dump(mode="json", by_alias=True)
-            status = {
-                "last_test": {
-                    "ok": not result.is_error,
-                    "status": "passed" if not result.is_error else "failed",
-                    "ms": round((time.perf_counter() - started) * 1000, 1),
-                }
-            }
-            ctx.hooks.setdefault("virtual_status", {})[tool.name] = status
-            return JSONResponse(
-                {"ok": not result.is_error, "result": receipt, **status}
-            )
-        except Exception as exc:  # noqa: BLE001
-            status = {"last_test": {"ok": False, "status": "failed", "error": str(exc)}}
-            ctx.hooks.setdefault("virtual_status", {})[tool.name] = status
-            return _err(str(exc))
-
-    async def activate_virtual(request: Request):
-        cfg = ctx.load()
-        name = request.path_params["name"]
-        tool = _find(cfg, name)
-        if tool is None:
-            return _err("unknown virtual tool", 404)
-        fingerprint = _consent_fingerprint(tool)
-        consent_store = ctx.hooks.setdefault("virtual_consent_fingerprints", {})
-        if fingerprint is None:
-            consent_store.pop(name, None)
-        else:
-            consent_store[name] = fingerprint
-        ctx.hooks.setdefault("virtual_status", {}).setdefault(name, {})[
-            "consent_fingerprint"
-        ] = fingerprint
-        resolution = await _resolution(tool, cfg)
-        if not resolution["ok"]:
-            return JSONResponse(resolution, status_code=400)
-        candidate = cfg.model_copy(deep=True)
-        active = _find(candidate, name)
-        assert active is not None
-        active.enabled = True
-        if active.router is not None:
-            active.router.egress_consent_fingerprint = fingerprint
-        try:
-            candidate = GatewayConfig.model_validate(candidate.model_dump())
-            virtual_mod.build_virtual_tool(
-                active, candidate, ctx.backend_runtime.proxies, ctx.log
-            )
-        except Exception as exc:  # noqa: BLE001
-            return _err(str(exc))
-        # Full live resolution immediately above is stronger than the captured
-        # baseline guard used for synchronous legacy mutations.
-        ctx.commit(candidate, validate_virtual_refs=False)
-        try:
-            _hot_replace(candidate)
-        except Exception as exc:  # noqa: BLE001
-            ctx.commit(cfg, validate_virtual_refs=False)
-            _hot_replace(cfg)
-            return _err(f"activation failed; draft restored: {exc}", 500)
-        return JSONResponse({"ok": True, "enabled": True, "reloaded": "hot"})
-
-    async def disable_virtual(request: Request):
-        cfg = ctx.load()
-        tool = _find(cfg, request.path_params["name"])
-        if tool is None:
-            return _err("unknown virtual tool", 404)
-        candidate = cfg.model_copy(deep=True)
-        disabled = _find(candidate, tool.name)
-        assert disabled is not None
-        disabled.enabled = False
-        candidate = GatewayConfig.model_validate(candidate.model_dump())
-        ctx.commit(candidate)
-        try:
-            _hot_replace(candidate)
-        except Exception as exc:  # noqa: BLE001
-            ctx.commit(cfg, validate_virtual_refs=False)
-            _hot_replace(cfg)
-            return _err(f"disable failed; active definition restored: {exc}", 500)
-        return JSONResponse({"ok": True, "enabled": False, "reloaded": "hot"})
-
-    async def delete_virtual(request: Request):
-        cfg = ctx.load()
-        name = request.path_params["name"]
-        if _find(cfg, name) is None:
-            return _err("unknown virtual tool", 404)
-        candidate = cfg.model_copy(
-            update={
-                "virtual_tools": [
-                    tool for tool in cfg.virtual_tools if tool.name != name
-                ]
-            },
-            deep=True,
-        )
-        candidate = GatewayConfig.model_validate(candidate.model_dump())
-        ctx.commit(candidate)
-        try:
-            _hot_replace(candidate)
-        except Exception as exc:  # noqa: BLE001
-            ctx.commit(cfg, validate_virtual_refs=False)
-            _hot_replace(cfg)
-            return _err(f"delete failed; definition restored: {exc}", 500)
-        return JSONResponse({"ok": True})
-
-    return [
-        Route("/admin/api/virtual-tools", list_virtual_tools, methods=["GET"]),
-        Route("/admin/api/virtual-catalog", virtual_catalog, methods=["GET"]),
-        Route(
-            "/admin/api/virtual-tools",
-            _needs_json(ctx.locked(create_virtual)),
-            methods=["POST"],
-        ),
-        Route(
-            "/admin/api/virtual-tools/{name}",
-            _needs_json(ctx.locked(update_virtual)),
-            methods=["PUT"],
-        ),
-        Route(
-            "/admin/api/virtual-tools/{name}",
-            ctx.locked(delete_virtual),
-            methods=["DELETE"],
-        ),
-        Route(
-            "/admin/api/virtual-tools/{name}/validate",
-            validate_virtual,
-            methods=["POST"],
-        ),
-        Route(
-            "/admin/api/virtual-tools/{name}/test",
-            _needs_json(test_virtual),
-            methods=["POST"],
-        ),
-        Route(
-            "/admin/api/virtual-tools/{name}/activate",
-            ctx.locked(activate_virtual),
-            methods=["POST"],
-        ),
-        Route(
-            "/admin/api/virtual-tools/{name}/disable",
-            ctx.locked(disable_virtual),
-            methods=["POST"],
-        ),
-    ]
+    return admin_routes_virtual.virtual_routes(ctx, deps)
 
 
 def register(  # noqa: PLR0913 — public API; callers pass the lifespan plumbing
