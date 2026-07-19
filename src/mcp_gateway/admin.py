@@ -37,11 +37,26 @@ from mcp_gateway import (
     admin_routes_ops,
     admin_routes_settings,
     admin_routes_virtual,
+    claude_client,
+    codex_client,
     runtime,
 )
 from mcp_gateway import config_loader as cl
 from mcp_gateway import hooks as hooks_mod
 from mcp_gateway import virtual_tools as virtual_mod
+from mcp_gateway.claude_client import (
+    CC_REG_CACHE_TTL,
+    CLAUDE_CLI_TIMEOUT,
+    claude_mcp_command,
+    parse_cc_registrations,
+)
+from mcp_gateway.codex_client import (
+    CODEX_CLI_TIMEOUT,
+    CODEX_REG_CACHE_TTL,
+    codex_bearer_env_var,
+    codex_mcp_command,
+    parse_codex_registrations,
+)
 from mcp_gateway.config_loader import (
     Backend,
     GatewayConfig,
@@ -1650,163 +1665,25 @@ def restart_daemon(log) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Claude Code registration (#45) — via the `claude` CLI, never its config files
+# Claude Code + Codex registration state (#45/#46)
 # ---------------------------------------------------------------------------
 
-# `claude mcp add/remove` scopes (see `claude mcp add --help`).
-CLAUDE_SCOPES = ("local", "user", "project")
-# Upper bound on one CLI invocation; `claude mcp` is local bookkeeping, so a
-# longer hang means a broken install — surface it, don't wait on it.
-CLAUDE_CLI_TIMEOUT = 30
-
-# #46: cache `claude mcp list` output in-process so repeated /admin page loads
-# don't re-shell the CLI on every render; `?fresh=1` busts it after a
-# register/deregister. Module-level (resets on restart, which is fine).
-CC_REG_CACHE_TTL = 60.0
+# The client modules own the CLI contracts.  Caches remain in this composition
+# root because route dependencies intentionally resolve them dynamically: old
+# integrations and tests can still replace ``mcp_gateway.admin._*_reg_cache``.
+CLAUDE_SCOPES = claude_client.CLAUDE_SCOPES
 _cc_reg_cache: dict[str, Any] = {"ts": 0.0, "output": None}
-
-# Codex uses one user-level config and exposes JSON for reliable status parsing.
-# Keep its cache independent from Claude Code so either CLI can be absent or
-# refreshed without affecting the other client integration.
-CODEX_REG_CACHE_TTL = 60.0
 _codex_reg_cache: dict[str, Any] = {"ts": 0.0, "output": None}
 
 
-def parse_cc_registrations(output: str, backends: list[str]) -> dict[str, bool]:
-    """Map each configured backend to whether it is registered in Claude Code,
-    parsed from ``claude mcp list`` output (#46).
-
-    A backend counts as registered iff the token ``gateway-<name>:`` appears in
-    the output — the colon anchors the match so ``gateway-cc:`` can't be read
-    off ``gateway-cc-docs:``, and the connection-status suffix
-    (``✓ Connected`` / ``✘ Failed``) is deliberately ignored: this reports
-    REGISTRATION, not liveness (that is #23's ``/admin/api/status``).
-    """
-    return {name: f"gateway-{name}:" in output for name in backends}
-
-
-def claude_mcp_command(
-    action: str,
-    name: str,
-    url: str | None = None,
-    scope: str = "local",
-    bearer_token: str | None = None,
-) -> list[str]:
-    """Argv to register/deregister ONE backend in Claude Code via the CLI.
-
-    Registration name convention: ``gateway-<backend name>``; the endpoint is
-    the backend's own gateway mount (``http://host:port/<name>/mcp``). Pure —
-    builds the argv only (the route runs it), so the exact command is testable
-    and surfaceable to the UI.
-
-    *bearer_token* (#26 × #45): when the gateway requires a bearer token, a
-    registration without it would 401 on every call — so `add` carries it via
-    ``--header``, RESOLVED (the CLI stores the literal header in Claude's
-    config; the route redacts it from anything echoed back to the browser).
-    """
-    if scope not in CLAUDE_SCOPES:
-        raise cl.ConfigError(
-            f"invalid scope {scope!r}: use one of {', '.join(CLAUDE_SCOPES)}"
-        )
-    registration = f"gateway-{name}"
-    if action == "add":
-        if not url:
-            raise cl.ConfigError("register needs the backend's endpoint url")
-        argv = [
-            "claude",
-            "mcp",
-            "add",
-            "--transport",
-            "http",
-            "--scope",
-            scope,
-            registration,
-            url,
-        ]
-        # --header is a VARIADIC option (like -e/--env): placed before the
-        # positionals it swallows <name> <url> and the CLI errors with
-        # "missing required argument 'name'" — found live (#123). The CLI's
-        # own --help example puts --header last; do the same.
-        if bearer_token:
-            argv += ["--header", f"Authorization: Bearer {bearer_token}"]
-        return argv
-    if action == "remove":
-        return ["claude", "mcp", "remove", "--scope", scope, registration]
-    raise cl.ConfigError(f"unknown action {action!r} (use add or remove)")
-
-
-def parse_codex_registrations(output: str, backends: list[str]) -> dict[str, bool]:
-    """Map configured backends to exact registrations from ``codex mcp list``.
-
-    Codex provides a JSON mode, so avoid depending on human-readable output.
-    Registration state is intentionally distinct from ``enabled`` and
-    ``auth_status``: a disabled or unauthenticated entry still exists in Codex.
-    """
-    try:
-        items = json.loads(output)
-    except (json.JSONDecodeError, TypeError) as exc:
-        raise cl.ConfigError("codex mcp list returned malformed JSON") from exc
-    if not isinstance(items, list):
-        raise cl.ConfigError("codex mcp list returned JSON other than a list")
-    names = {
-        item.get("name")
-        for item in items
-        if isinstance(item, dict) and isinstance(item.get("name"), str)
-    }
-    return {name: f"gateway-{name}" in names for name in backends}
-
-
-def codex_bearer_env_var(bearer_token: str | None) -> str | None:
-    """Return the environment variable Codex should use for gateway auth.
-
-    ``codex mcp add`` deliberately accepts an environment-variable *name*, not
-    a literal token. Requiring a single ``${ENV}`` reference keeps credentials
-    out of argv, API responses, and ``~/.codex/config.toml``.
-    """
-    if bearer_token is None:
-        return None
-    match = re.fullmatch(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}", bearer_token.strip())
-    if match is None:
-        raise cl.ConfigError(
-            "Codex registration requires bearer_token to be a single ${ENV_VAR} "
-            "reference; literal tokens are never written to Codex config"
-        )
-    return match.group(1)
-
-
-def codex_mcp_command(
-    action: str,
-    name: str,
-    url: str | None = None,
-    bearer_env_var: str | None = None,
-) -> list[str]:
-    """Build the Codex CLI argv for one independent gateway backend."""
-    registration = f"gateway-{name}"
-    if action == "add":
-        if not url:
-            raise cl.ConfigError("register needs the backend's endpoint url")
-        argv = ["codex", "mcp", "add", registration, "--url", url]
-        if bearer_env_var:
-            argv += ["--bearer-token-env-var", bearer_env_var]
-        return argv
-    if action == "remove":
-        return ["codex", "mcp", "remove", registration]
-    raise cl.ConfigError(f"unknown action {action!r} (use add or remove)")
+def claude_cli_path() -> str | None:
+    """Compatibility seam that keeps Admin's ``shutil.which`` patchable."""
+    return claude_client.claude_cli_path(which=shutil.which)
 
 
 def codex_cli_path() -> str | None:
-    """Locate Codex for both interactive shells and the macOS login daemon."""
-    found = shutil.which("codex")
-    if found:
-        return found
-    candidates = [
-        os.environ.get("CODEX_CLI_PATH"),
-        "/Applications/ChatGPT.app/Contents/Resources/codex",
-    ]
-    for candidate in candidates:
-        if candidate and Path(candidate).is_file() and os.access(candidate, os.X_OK):
-            return candidate
-    return None
+    """Compatibility seam that keeps Admin's ``shutil.which`` patchable."""
+    return codex_client.codex_cli_path(which=shutil.which)
 
 
 # ---------------------------------------------------------------------------
@@ -2143,7 +2020,7 @@ def _claude_routes(ctx: _AdminCtx) -> list[Route]:
         # Resolve facade globals at request time so existing callers and tests
         # can continue to monkeypatch mcp_gateway.admin collaborators.
         return admin_routes_claude.ClaudeRouteDeps(
-            cli_path=lambda: shutil.which("claude"),
+            cli_path=claude_cli_path,
             command=claude_mcp_command,
             parse_registrations=parse_cc_registrations,
             error=_err,
@@ -2176,7 +2053,7 @@ def _codex_routes(ctx: _AdminCtx) -> list[Route]:
             cache_ttl=CODEX_REG_CACHE_TTL,
             monotonic=time.monotonic,
             subprocess_run=subprocess.run,
-            cli_timeout=CLAUDE_CLI_TIMEOUT,
+            cli_timeout=CODEX_CLI_TIMEOUT,
             virtual_route=virtual_mod.VIRTUAL_ROUTE,
         )
 

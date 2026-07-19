@@ -35,10 +35,18 @@ layout, console script `mcp-gateway`). MIT; distributed via
   guard → body limit → optional bearer. `_AutoRefresh` (baseline refresh) and
   the recycle worker (#161) live in the lifespan.
 - `src/mcp_gateway/admin.py` — admin API + helpers: capture/defaults, override
-  diffing, collision + transform-dry-build validation, hot reload, independent
-  Claude Code and Codex CLI registration, settings, stale-override migration.
+  diffing, collision + transform-dry-build validation, hot reload, settings,
+  stale-override migration, and the compatibility composition root for client
+  registration routes.
+- `src/mcp_gateway/claude_client.py` — reusable Claude Code CLI policy for
+  discovery, registration argv, scopes, and status parsing.
+- `src/mcp_gateway/codex_client.py` — reusable Codex CLI policy for discovery,
+  auth-safe registration argv, and JSON status parsing.
+- `src/mcp_gateway/admin_routes_claude.py` — typed Claude Code registration
+  route group; the route handlers work for every backend endpoint.
 - `src/mcp_gateway/admin_routes_codex.py` — typed per-backend Codex route group;
-  `admin.py` remains its compatibility facade and supplies live CLI/cache deps.
+  it also serves the Virtual Tools endpoint; `admin.py` supplies live
+  CLI/cache dependencies while preserving its compatibility facade.
 - `src/mcp_gateway/runtime.py` — typed ownership for each mounted proxy and its
   gateway transform holder; captured defaults remain separate snapshot inputs.
 - `src/mcp_gateway/admin.html` — single-file vanilla-JS admin UI (no build,
