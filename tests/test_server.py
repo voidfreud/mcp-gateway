@@ -25,7 +25,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
-from mcp_gateway import admin, server
+from mcp_gateway import admin, runtime, server
 from mcp_gateway import config_loader as cl
 
 # ---------------------------------------------------------------------------
@@ -1492,10 +1492,10 @@ def test_boot_skips_disabled_backends(tmp_path, monkeypatch):
     mounted = []
 
     async def fake_mount(
-        app, stack, b, cfg, all_tools, meta, captured, reg, _hold, log, *extra
+        app, stack, b, cfg, all_tools, meta, captured, rt, log, *extra
     ):
         mounted.append(b.name)
-        reg[b.name] = object()
+        rt.mount(b.name, object(), [])
         return True
 
     monkeypatch.setattr(server, "_mount_backend", fake_mount)
@@ -1535,7 +1535,7 @@ def test_unmount_drops_route_and_registry():
     inner = Starlette()
     app = Starlette(routes=[Route("/health", lambda r: None), Mount("/b", app=inner)])
     registry, holders = {"b": object()}, {"b": [object()]}
-    server._unmount(app, "b", registry, holders)
+    server._unmount(app, "b", runtime.BackendRuntime.from_legacy(registry, holders))
     assert "b" not in registry and "b" not in holders
     paths = [getattr(r, "path", None) for r in app.router.routes]
     assert "/b" not in paths  # backend mount removed
@@ -1805,7 +1805,9 @@ def test_autorefresh_event_paths_are_ungated(tmp_path, monkeypatch):
     b = cfg.backends[0]
 
     async def go():
-        ar = server._AutoRefresh(0, cfg.baseline_max_age, str(path), {}, {}, log)
+        ar = server._AutoRefresh(
+            0, cfg.baseline_max_age, str(path), runtime.BackendRuntime(), log
+        )
         await ar.refresh(b)  # the worker/interval path
         await ar.post_mount(b)  # the gated path, for contrast
 
@@ -2124,7 +2126,13 @@ def test_interval_refresh_loop_sweeps_and_stops(tmp_path, monkeypatch):
     log = structlog.get_logger("test")
 
     async def go():
-        ar = server._AutoRefresh(1, 0, str(path), {"up": object()}, {}, log)
+        ar = server._AutoRefresh(
+            1,
+            0,
+            str(path),
+            runtime.BackendRuntime.from_legacy({"up": object()}, {}),
+            log,
+        )
         ar.interval = 0.05  # fast clock for the test
         async with anyio.create_task_group() as tg:
             tg.start_soon(ar.interval_loop)
@@ -2303,10 +2311,10 @@ def _recycle_app(tmp_path, monkeypatch, mounts):
     real backend. refresh is stubbed out (no real capture on the fake command)."""
 
     async def fake_mount(
-        app, stack, b, cfg, all_tools, meta, captured, reg, hold, log, *extra
+        app, stack, b, cfg, all_tools, meta, captured, rt, log, *extra
     ):
         mounts.append(b.name)
-        reg[b.name] = object()
+        rt.mount(b.name, object(), [])
         return True
 
     async def fake_refresh(*a, **k):

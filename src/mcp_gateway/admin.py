@@ -32,6 +32,7 @@ from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse
 from starlette.routing import Route
 
+from mcp_gateway import admin_routes_codex, runtime
 from mcp_gateway import config_loader as cl
 from mcp_gateway import hooks as hooks_mod
 from mcp_gateway import virtual_tools as virtual_mod
@@ -1524,15 +1525,18 @@ def set_instructions(cfg: GatewayConfig, backend: str, value) -> None:
 
 
 def hot_reload(
-    registry: dict, holders: dict, cfg: GatewayConfig, backend: str, log
+    backend_runtime: runtime.BackendRuntime,
+    cfg: GatewayConfig,
+    backend: str,
+    log,
 ) -> None:
     """Rebuild ONE backend's transforms from cfg and swap them into its live
     proxy in-process (no restart); also re-set that backend's instructions.
 
-    ``registry`` maps backend name -> live proxy, ``holders`` maps backend name
-    -> [current transform]; both are populated by the server lifespan."""
+    ``backend_runtime`` owns each live proxy plus its current gateway transforms.
+    It is populated by the server lifespan."""
     b = next((x for x in cfg.backends if x.name == backend), None)
-    proxy = registry.get(backend)
+    proxy = backend_runtime.get_proxy(backend)
     if b is None or proxy is None:
         log.warning("hot_reload_skipped", backend=backend)
         return
@@ -1547,7 +1551,7 @@ def hot_reload(
     )
     # #15: the holder carries EVERY gateway-owned transform on this proxy (the
     # tool transform + the optional resource/prompt transform) — swap them all.
-    for old in holders.get(backend) or []:
+    for old in backend_runtime.get_transforms(backend):
         if old is not None and old in proxy._transforms:
             proxy._transforms.remove(old)
     proxy.add_transform(new_transform)
@@ -1556,7 +1560,7 @@ def hot_reload(
     if rp_transform is not None:
         proxy.add_transform(rp_transform)
         new_holder.append(rp_transform)
-    holders[backend] = new_holder
+    backend_runtime.replace_transforms(backend, new_holder)
     # Re-set this backend's live server-level instructions (override else captured
     # original) — each endpoint carries only its own, keeping the full per-server
     # budget.
@@ -1570,8 +1574,7 @@ def hot_reload(
 async def refresh_and_reload(  # noqa: PLR0913 — mirrors hot_reload's plumbing args
     b: Backend,
     config_path: str,
-    registry: dict,
-    holders: dict,
+    backend_runtime: runtime.BackendRuntime,
     log,
     *,
     force: bool = False,
@@ -1589,7 +1592,7 @@ async def refresh_and_reload(  # noqa: PLR0913 — mirrors hot_reload's plumbing
     )
     if res.get("changed"):
         cfg = cl.load(config_path)
-        hot_reload(registry, holders, cfg, b.name, log)
+        hot_reload(backend_runtime, cfg, b.name, log)
     return res
 
 
@@ -1918,8 +1921,7 @@ class _AdminCtx:
 
     config_path: str
     log: Any
-    registry: dict
-    holders: dict
+    backend_runtime: runtime.BackendRuntime
     hooks: dict
     # Guards every config read-modify-write (#52). Uvicorn runs a single worker,
     # so load->mutate->save WAS implicitly atomic as long as no handler awaited
@@ -1946,7 +1948,7 @@ class _AdminCtx:
         backup_config(self.config_path)
         cl.save(cfg, self.config_path)
         for name in backends:
-            hot_reload(self.registry, self.holders, cfg, name, self.log)
+            hot_reload(self.backend_runtime, cfg, name, self.log)
 
     def locked(self, handler):
         """Serialize a whole mutating handler under ``lock``. Fine for the
@@ -2267,12 +2269,13 @@ def _backend_routes(ctx: _AdminCtx) -> list[Route]:  # noqa: PLR0915 — stateme
         enable -> mount it if not already mounted; disable -> unmount it (so a
         disabled backend runs no subprocess and its endpoint 404s)."""
         if value:
-            if b.name not in ctx.registry:  # not mounted -> mount it live (#7)
+            # Not mounted -> mount it live (#7).
+            if b.name not in ctx.backend_runtime.proxies:
                 add = ctx.hooks.get("add")
                 if add is not None:
                     await add(b)
             else:  # already mounted (defensive) -> just refresh its transforms
-                hot_reload(ctx.registry, ctx.holders, ctx.load(), b.name, ctx.log)
+                hot_reload(ctx.backend_runtime, ctx.load(), b.name, ctx.log)
         else:
             remove = ctx.hooks.get("remove")
             if remove is not None:
@@ -2434,7 +2437,7 @@ def _backend_routes(ctx: _AdminCtx) -> list[Route]:  # noqa: PLR0915 — stateme
             if old_defaults_data is not None:
                 save_defaults(old_defaults_data)
             recovery_error = None
-            if name not in ctx.registry:
+            if name not in ctx.backend_runtime.proxies:
                 try:
                     if not await add(old_backend):
                         recovery_error = "; old backend re-mount also failed"
@@ -2587,7 +2590,7 @@ def _backend_routes(ctx: _AdminCtx) -> list[Route]:  # noqa: PLR0915 — stateme
 async def admin_refresh(ctx: _AdminCtx, b: Backend, *, force: bool = False) -> dict:
     """ctx-bound :func:`refresh_and_reload` (#43) for the admin routes."""
     return await refresh_and_reload(
-        b, ctx.config_path, ctx.registry, ctx.holders, ctx.log, force=force
+        b, ctx.config_path, ctx.backend_runtime, ctx.log, force=force
     )
 
 
@@ -2790,129 +2793,27 @@ def _claude_routes(ctx: _AdminCtx) -> list[Route]:  # noqa: PLR0915 — nested h
 
 
 def _codex_routes(ctx: _AdminCtx) -> list[Route]:
-    """One-click registration of each backend as an independent Codex MCP.
+    """Compatibility facade for the independently testable Codex route group."""
 
-    Codex and Claude Code intentionally remain separate client integrations:
-    this uses Codex's own CLI/config and never changes the backend mounts or
-    combines their tool catalogs.
-    """
-
-    async def _cli_raw(argv: list[str]) -> tuple[int, str, str]:
-        try:
-            result = await asyncio.to_thread(
-                subprocess.run,
-                argv,
-                capture_output=True,
-                text=True,
-                timeout=CLAUDE_CLI_TIMEOUT,
-                check=False,
-            )
-            return result.returncode, result.stdout, result.stderr
-        except (subprocess.SubprocessError, OSError) as exc:
-            return -1, "", f"{type(exc).__name__}: {exc}"
-
-    def _binary() -> str | JSONResponse:
-        binary = codex_cli_path()
-        if binary is None:
-            return _err(
-                "Codex CLI not found — install Codex/ChatGPT desktop or expose "
-                "the codex executable to the gateway daemon, then retry"
-            )
-        return binary
-
-    async def register_backend(request: Request):
-        name = request.path_params["name"]
-        cfg = ctx.load()
-        if not any(backend.name == name for backend in cfg.backends):
-            return _err("unknown backend")
-        binary = _binary()
-        if isinstance(binary, JSONResponse):
-            return binary
-        url = f"http://{cfg.host}:{cfg.port}/{name}/mcp"
-        try:
-            bearer_env_var = codex_bearer_env_var(cfg.bearer_token)
-            argv = codex_mcp_command(
-                "add", name, url=url, bearer_env_var=bearer_env_var
-            )
-        except cl.ConfigError as exc:
-            return _err(str(exc))
-        argv[0] = binary
-        rc, stdout, stderr = await _cli_raw(argv)
-        return JSONResponse(
-            {
-                "ok": rc == 0,
-                "exit": rc,
-                "stdout": stdout,
-                "stderr": stderr,
-                "command": " ".join(argv),
-                "note": "Restart Codex or open a new task to load the server",
-            }
+    def deps() -> admin_routes_codex.CodexRouteDeps:
+        # Resolve these facade globals at request time. Existing callers and
+        # tests patch ``mcp_gateway.admin`` directly, including replacing the
+        # cache dictionary, so capturing any of them here would be a regression.
+        return admin_routes_codex.CodexRouteDeps(
+            cli_path=codex_cli_path,
+            command=codex_mcp_command,
+            bearer_env_var=codex_bearer_env_var,
+            parse_registrations=parse_codex_registrations,
+            error=_err,
+            needs_json=_needs_json,
+            cache=_codex_reg_cache,
+            cache_ttl=CODEX_REG_CACHE_TTL,
+            monotonic=time.monotonic,
+            subprocess_run=subprocess.run,
+            cli_timeout=CLAUDE_CLI_TIMEOUT,
         )
 
-    async def deregister_backend(request: Request):
-        name = request.path_params["name"]
-        binary = _binary()
-        if isinstance(binary, JSONResponse):
-            return binary
-        argv = codex_mcp_command("remove", name)
-        argv[0] = binary
-        rc, stdout, stderr = await _cli_raw(argv)
-        return JSONResponse(
-            {
-                "ok": rc == 0,
-                "exit": rc,
-                "stdout": stdout,
-                "stderr": stderr,
-                "command": " ".join(argv),
-                "note": "Restart Codex or open a new task to unload the server",
-            }
-        )
-
-    async def registrations(request: Request):
-        binary = _binary()
-        if isinstance(binary, JSONResponse):
-            return JSONResponse({"available": False})
-        fresh = request.query_params.get("fresh") in ("1", "true")
-        now = time.monotonic()
-        output = _codex_reg_cache.get("output")
-        if (
-            fresh
-            or output is None
-            or now - _codex_reg_cache["ts"] > CODEX_REG_CACHE_TTL
-        ):
-            rc, stdout, stderr = await _cli_raw([binary, "mcp", "list", "--json"])
-            if rc != 0:
-                return JSONResponse(
-                    {
-                        "available": True,
-                        "ok": False,
-                        "error": stderr or stdout or f"codex mcp list exited {rc}",
-                    }
-                )
-            output = stdout
-            _codex_reg_cache["output"] = output
-            _codex_reg_cache["ts"] = now
-        try:
-            registered = parse_codex_registrations(
-                output, [backend.name for backend in ctx.load().backends]
-            )
-        except cl.ConfigError as exc:
-            return JSONResponse({"available": True, "ok": False, "error": str(exc)})
-        return JSONResponse({"available": True, "ok": True, "registered": registered})
-
-    return [
-        Route(
-            "/admin/api/backend/{name}/codex/register",
-            _needs_json(register_backend),
-            methods=["POST"],
-        ),
-        Route(
-            "/admin/api/backend/{name}/codex/deregister",
-            _needs_json(deregister_backend),
-            methods=["POST"],
-        ),
-        Route("/admin/api/codex-registrations", registrations, methods=["GET"]),
-    ]
+    return admin_routes_codex.codex_routes(ctx, deps)
 
 
 def _ops_routes(ctx: _AdminCtx) -> list[Route]:  # noqa: PLR0915 — nested handlers; the group is cohesive
@@ -2933,7 +2834,7 @@ def _ops_routes(ctx: _AdminCtx) -> list[Route]:  # noqa: PLR0915 — nested hand
         tool-level error (isError comes back in the payload)."""
         payload = await request.json()
         backend = payload.get("backend")
-        proxy = ctx.registry.get(backend)
+        proxy = ctx.backend_runtime.get_proxy(backend)
         if proxy is None:
             return JSONResponse(
                 {"ok": False, "error": "backend not mounted"}, status_code=400
@@ -2994,7 +2895,7 @@ def _ops_routes(ctx: _AdminCtx) -> list[Route]:  # noqa: PLR0915 — nested hand
         async def one(b: Backend) -> tuple[str, dict]:
             if not b.enabled:
                 return b.name, {"state": "disabled"}
-            proxy = ctx.registry.get(b.name)
+            proxy = ctx.backend_runtime.get_proxy(b.name)
             if proxy is None:
                 return b.name, {"state": "unmounted"}
             started = time.perf_counter()
@@ -3029,7 +2930,7 @@ def _ops_routes(ctx: _AdminCtx) -> list[Route]:  # noqa: PLR0915 — nested hand
         down/slow backend reports itself and never stalls the others."""
 
         async def one(b: Backend) -> tuple[str, dict]:
-            if not b.enabled or b.name not in ctx.registry:
+            if not b.enabled or b.name not in ctx.backend_runtime.proxies:
                 return b.name, {"status": "skipped"}
             return b.name, await admin_refresh(ctx, b)
 
@@ -3073,7 +2974,7 @@ def _virtual_routes(ctx: _AdminCtx) -> list[Route]:  # noqa: PLR0915
         return cl.llm_egress_consent_fingerprint(tool)
 
     async def _resolution(tool: cl.VirtualTool, cfg: GatewayConfig) -> dict:
-        return await virtual_mod.resolve_tool(tool, cfg, ctx.registry)
+        return await virtual_mod.resolve_tool(tool, cfg, ctx.backend_runtime.proxies)
 
     def _hot_replace(cfg: GatewayConfig) -> None:
         server = ctx.hooks.get("virtual_server")
@@ -3083,7 +2984,7 @@ def _virtual_routes(ctx: _AdminCtx) -> list[Route]:  # noqa: PLR0915
             server,
             cfg,
             ctx.load,
-            ctx.registry,
+            ctx.backend_runtime.proxies,
             ctx.log,
             ctx.hooks.setdefault("virtual_status", {}),
         )
@@ -3190,7 +3091,9 @@ def _virtual_routes(ctx: _AdminCtx) -> list[Route]:  # noqa: PLR0915
                 update={"virtual_tools": [*cfg.virtual_tools, tool]}, deep=True
             )
             candidate = GatewayConfig.model_validate(candidate.model_dump())
-            virtual_mod.build_virtual_tool(tool, candidate, ctx.registry, ctx.log)
+            virtual_mod.build_virtual_tool(
+                tool, candidate, ctx.backend_runtime.proxies, ctx.log
+            )
         except Exception as exc:  # noqa: BLE001 - dry build
             return _err(str(exc))
         ctx.commit(candidate)
@@ -3222,7 +3125,9 @@ def _virtual_routes(ctx: _AdminCtx) -> list[Route]:  # noqa: PLR0915
             candidate = GatewayConfig.model_validate(
                 cfg.model_copy(update={"virtual_tools": tools}, deep=True).model_dump()
             )
-            virtual_mod.build_virtual_tool(tool, candidate, ctx.registry, ctx.log)
+            virtual_mod.build_virtual_tool(
+                tool, candidate, ctx.backend_runtime.proxies, ctx.log
+            )
         except Exception as exc:  # noqa: BLE001
             return _err(str(exc))
         ctx.commit(candidate)
@@ -3259,7 +3164,11 @@ def _virtual_routes(ctx: _AdminCtx) -> list[Route]:  # noqa: PLR0915
         started = time.perf_counter()
         try:
             result = await virtual_mod.run_virtual(
-                tool, payload.get("arguments") or {}, cfg, ctx.registry, ctx.log
+                tool,
+                payload.get("arguments") or {},
+                cfg,
+                ctx.backend_runtime.proxies,
+                ctx.log,
             )
             receipt = result.model_dump(mode="json", by_alias=True)
             status = {
@@ -3304,7 +3213,9 @@ def _virtual_routes(ctx: _AdminCtx) -> list[Route]:  # noqa: PLR0915
             active.router.egress_consent_fingerprint = fingerprint
         try:
             candidate = GatewayConfig.model_validate(candidate.model_dump())
-            virtual_mod.build_virtual_tool(active, candidate, ctx.registry, ctx.log)
+            virtual_mod.build_virtual_tool(
+                active, candidate, ctx.backend_runtime.proxies, ctx.log
+            )
         except Exception as exc:  # noqa: BLE001
             return _err(str(exc))
         # Full live resolution immediately above is stronger than the captured
@@ -3405,23 +3316,26 @@ def register(  # noqa: PLR0913 — public API; callers pass the lifespan plumbin
     app,
     config_path: str,
     log,
-    registry: dict,
-    holders: dict,
+    backend_runtime: runtime.BackendRuntime | dict,
+    holders: dict | None = None,
     hooks: dict | None = None,
 ) -> None:
     """Attach the admin UI + API routes to the parent Starlette *app*.
 
-    ``registry`` (backend name -> live proxy) and ``holders`` (backend name ->
-    [current transform]) are populated during the server lifespan and shared by
-    reference, so hot-reload targets the right backend's live proxy. ``hooks``
-    is likewise filled by the lifespan: ``hooks["add"]`` mounts a just-imported
-    backend live (#7) so an import needs no daemon restart.
+    ``backend_runtime`` is populated during the server lifespan and shared by
+    reference, so hot-reload targets the right backend proxy + transform holder.
+    The legacy ``registry, holders`` pair remains accepted for external callers.
+    ``hooks`` is likewise filled by the lifespan: ``hooks["add"]`` mounts a
+    just-imported backend live (#7) so an import needs no daemon restart.
     """
+    if not isinstance(backend_runtime, runtime.BackendRuntime):
+        if holders is None:
+            raise TypeError("legacy register() calls require transform holders")
+        backend_runtime = runtime.BackendRuntime.from_legacy(backend_runtime, holders)
     ctx = _AdminCtx(
         config_path=config_path,
         log=log,
-        registry=registry,
-        holders=holders,
+        backend_runtime=backend_runtime,
         hooks=hooks if hooks is not None else {},
     )
     app.router.routes.extend(

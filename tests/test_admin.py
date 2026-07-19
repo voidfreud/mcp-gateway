@@ -14,7 +14,7 @@ import structlog
 from hypothesis import given
 from hypothesis import strategies as st
 
-from mcp_gateway import admin
+from mcp_gateway import admin, runtime
 from mcp_gateway import config_loader as cl
 
 ident = st.text(
@@ -1395,18 +1395,22 @@ def test_refresh_and_reload_hot_reloads_only_on_change(
     path = tmp_path / "config.toml"
     cl.save(cfg, str(path))
     reloads = []
-    monkeypatch.setattr(admin, "hot_reload", lambda *a, **k: reloads.append(a[3]))
+    monkeypatch.setattr(admin, "hot_reload", lambda *a, **k: reloads.append(a[2]))
     log = structlog.get_logger("test")
 
     monkeypatch.setattr(admin, "capture_defaults", _fake_capture(("t1",)))
     res = anyio.run(
-        lambda: admin.refresh_and_reload(_b(), str(path), {}, {}, log, force=True)
+        lambda: admin.refresh_and_reload(
+            _b(), str(path), runtime.BackendRuntime(), log, force=True
+        )
     )
     assert res["changed"] is False and reloads == []
 
     monkeypatch.setattr(admin, "capture_defaults", _fake_capture(("t1", "t2")))
     res = anyio.run(
-        lambda: admin.refresh_and_reload(_b(), str(path), {}, {}, log, force=True)
+        lambda: admin.refresh_and_reload(
+            _b(), str(path), runtime.BackendRuntime(), log, force=True
+        )
     )
     assert res["changed"] is True and reloads == ["b"]
 
@@ -2004,15 +2008,16 @@ def test_hot_reload_swaps_resource_prompt_transform_too(defaults_dir):
     baseline = len(proxy._transforms)
     registry, holders = {"b": proxy}, {}
     log = structlog.get_logger("test")
-    admin.hot_reload(registry, holders, cfg, "b", log)
+    backend_runtime = runtime.BackendRuntime.from_legacy(registry, holders)
+    admin.hot_reload(backend_runtime, cfg, "b", log)
     assert len(holders["b"]) == 2  # tool transform + rp transform
     assert len(proxy._transforms) == baseline + 2
     # second reload replaces, never accumulates
-    admin.hot_reload(registry, holders, cfg, "b", log)
+    admin.hot_reload(backend_runtime, cfg, "b", log)
     assert len(proxy._transforms) == baseline + 2
     # dropping the overrides drops the rp transform from the proxy
     cfg.backends[0].resources = []
-    admin.hot_reload(registry, holders, cfg, "b", log)
+    admin.hot_reload(backend_runtime, cfg, "b", log)
     assert len(holders["b"]) == 1
     assert len(proxy._transforms) == baseline + 1
 

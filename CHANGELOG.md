@@ -8,6 +8,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Typed live-runtime ownership and a smaller Admin facade** — backend proxies
+  and their transform holders now move together through `BackendRuntime`, while
+  snapshot inputs and Virtual Tool proxy lookup have explicit narrow types. The
+  per-backend Codex registration routes moved into a typed route module; the
+  existing `admin.py` API remains a compatibility facade with the same cache,
+  monkeypatch, response, and hot-reload behavior.
+
 - **Bounded MCP catalogs and structured Virtual Tool results** — every backend
   and `/virtual/mcp` now serves its transformed `tools/list` catalog in
   50-tool pages with gateway-owned opaque cursors, after fully consuming any

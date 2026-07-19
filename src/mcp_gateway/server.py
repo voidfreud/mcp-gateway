@@ -40,7 +40,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse
 from starlette.routing import Mount, Route
 
-from mcp_gateway import admin, config_loader, virtual_tools
+from mcp_gateway import admin, config_loader, runtime, virtual_tools
 
 
 def default_config_path() -> str:
@@ -339,15 +339,13 @@ class _AutoRefresh:
         interval: int,
         baseline_max_age: int,
         config_path: str,
-        registry: dict,
-        holders: dict,
+        backend_runtime: runtime.BackendRuntime,
         log,
     ) -> None:
         self.interval = interval
         self.baseline_max_age = baseline_max_age
         self._config_path = config_path
-        self._registry = registry
-        self._holders = holders
+        self._runtime = backend_runtime
         self._log = log
         self.shutdown = anyio.Event()
         self.send, self._recv = anyio.create_memory_object_stream(16)
@@ -359,8 +357,7 @@ class _AutoRefresh:
             await admin.refresh_and_reload(
                 b,
                 self._config_path,
-                self._registry,
-                self._holders,
+                self._runtime,
                 self._log,
                 throttle=admin.REFRESH_THROTTLE if throttle is None else throttle,
                 max_age=max_age,
@@ -390,7 +387,7 @@ class _AutoRefresh:
                 return
             live = config_loader.load(self._config_path)
             for b in live.backends:
-                if b.enabled and b.name in self._registry:
+                if b.enabled and b.name in self._runtime.proxies:
                     await self.refresh(b)
 
     def close(self) -> None:
@@ -570,12 +567,13 @@ def _reconcile(index: dict[str, str], known_tools, log) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _unmount(app: Starlette, name: str, registry: dict, holders: dict) -> None:
+def _unmount(
+    app: Starlette, name: str, backend_runtime: runtime.BackendRuntime
+) -> None:
     """Remove a backend's live mount — its Mount route plus registry + holder
     entries (#78). Runs from the backend's OWN runner as it unwinds (so a later
     re-enable / hot-add can cleanly re-append the route)."""
-    registry.pop(name, None)
-    holders.pop(name, None)
+    backend_runtime.unmount(name)
     app.router.routes[:] = [
         r for r in app.router.routes if getattr(r, "path", None) != f"/{name}"
     ]
@@ -614,11 +612,10 @@ async def _mount_backend(  # noqa: PLR0913 — the mount needs the full lifespan
     stack: AsyncExitStack,
     b: config_loader.Backend,
     cfg: config_loader.GatewayConfig,
-    all_tools: dict[str, list[str]],
-    captured_meta: dict[str, dict[str, dict]],
-    captured_instr: dict[str, str | None],
-    registry: dict,
-    holders: dict,
+    all_tools: runtime.CapturedTools,
+    captured_meta: runtime.CapturedMeta,
+    captured_instr: runtime.CapturedInstructions,
+    backend_runtime: runtime.BackendRuntime,
     log,
     message_handler: MessageHandler | None = None,
     on_session_death=None,
@@ -687,8 +684,7 @@ async def _mount_backend(  # noqa: PLR0913 — the mount needs the full lifespan
         await stack.enter_async_context(sub.lifespan(sub))
         app.router.routes.append(Mount(f"/{b.name}", app=sub))
 
-        registry[b.name] = proxy
-        holders[b.name] = holder
+        backend_runtime.mount(b.name, proxy, holder)
         log.info(
             "backend_mounted",
             backend=b.name,
@@ -711,9 +707,9 @@ async def _mount_backend(  # noqa: PLR0913 — the mount needs the full lifespan
 def _build_app(  # noqa: PLR0913, PLR0915 — composition root; takes what it wires, and its lifespan owns the per-runner anyio scope rules (splitting would scatter them)
     cfg: config_loader.GatewayConfig,
     log,
-    all_tools: dict,
-    captured_meta: dict,
-    captured_instr: dict,
+    all_tools: runtime.CapturedTools,
+    captured_meta: runtime.CapturedMeta,
+    captured_instr: runtime.CapturedInstructions,
     config_path: str = CONFIG_PATH,
 ) -> Starlette:
     """Assemble the parent Starlette app: /health, admin, and a lifespan that
@@ -739,8 +735,7 @@ def _build_app(  # noqa: PLR0913, PLR0915 — composition root; takes what it wi
     )
     # Populated in the lifespan; the admin closes over both (by reference) so its
     # hot-reload can target the right backend's live proxy + transform holder.
-    registry: dict = {}
-    holders: dict = {}
+    backend_runtime = runtime.BackendRuntime()
     hooks: dict = {}  # lifespan installs hooks["add"] (hot-add) for the admin
 
     @asynccontextmanager
@@ -756,8 +751,7 @@ def _build_app(  # noqa: PLR0913, PLR0915 — composition root; takes what it wi
             cfg.introspect_interval,
             cfg.baseline_max_age,
             config_path,
-            registry,
-            holders,
+            backend_runtime,
             log,
         )
         # #161: recycle requests (backend name) enqueued from arbitrary tasks —
@@ -808,8 +802,7 @@ def _build_app(  # noqa: PLR0913, PLR0915 — composition root; takes what it wi
                         all_tools_,
                         meta_,
                         captured_,
-                        registry,
-                        holders,
+                        backend_runtime,
                         log,
                         handler,
                         on_death,
@@ -826,7 +819,7 @@ def _build_app(  # noqa: PLR0913, PLR0915 — composition root; takes what it wi
                         await ev.wait()
             finally:
                 stops.pop(b.name, None)
-                _unmount(app, b.name, registry, holders)
+                _unmount(app, b.name, backend_runtime)
 
         async def virtual_runner():
             """Own the permanent gateway-authored ``/virtual/mcp`` endpoint.
@@ -844,7 +837,7 @@ def _build_app(  # noqa: PLR0913, PLR0915 — composition root; takes what it wi
                         server = virtual_tools.build_virtual_server(
                             cfg,
                             lambda: config_loader.load(config_path),
-                            registry,
+                            backend_runtime.proxies,
                             log,
                             hooks.setdefault("virtual_status", {}),
                         )
@@ -999,13 +992,13 @@ def _build_app(  # noqa: PLR0913, PLR0915 — composition root; takes what it wi
         # `registry` is populated by the runners as each backend connects.
         live = config_loader.load(config_path)
         want = [b.name for b in live.backends if b.enabled]
-        missing = [n for n in want if n not in registry]
+        missing = [n for n in want if n not in backend_runtime.proxies]
         virtual_ready = "virtual_server" in hooks
         ready = not missing and virtual_ready
         return JSONResponse(
             {
                 "ready": ready,
-                "mounted": sorted(registry),
+                "mounted": sorted(backend_runtime.proxies),
                 "enabled": want,
                 "missing": missing,
                 "virtual": {
@@ -1032,7 +1025,7 @@ def _build_app(  # noqa: PLR0913, PLR0915 — composition root; takes what it wi
             StarletteMiddleware(BearerAuthMiddleware, token=bearer_token),
         ],
     )
-    admin.register(parent, config_path, log, registry, holders, hooks)
+    admin.register(parent, config_path, log, backend_runtime, hooks=hooks)
     return parent
 
 

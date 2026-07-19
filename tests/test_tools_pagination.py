@@ -15,7 +15,7 @@ from starlette.applications import Starlette
 from starlette.testclient import TestClient
 
 from mcp_gateway import config_loader as cl
-from mcp_gateway import server
+from mcp_gateway import runtime, server
 from mcp_gateway import virtual_tools as vt
 
 
@@ -79,8 +79,7 @@ def test_mount_paginates_full_transformed_catalog_with_opaque_cursor(monkeypatch
                 {backend.name: [f"source_{number:02d}" for number in range(55)]},
                 {},
                 {},
-                {},
-                {},
+                runtime.BackendRuntime(),
                 structlog.get_logger("test"),
             )
             yield

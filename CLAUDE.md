@@ -37,6 +37,10 @@ layout, console script `mcp-gateway`). MIT; distributed via
 - `src/mcp_gateway/admin.py` — admin API + helpers: capture/defaults, override
   diffing, collision + transform-dry-build validation, hot reload, independent
   Claude Code and Codex CLI registration, settings, stale-override migration.
+- `src/mcp_gateway/admin_routes_codex.py` — typed per-backend Codex route group;
+  `admin.py` remains its compatibility facade and supplies live CLI/cache deps.
+- `src/mcp_gateway/runtime.py` — typed ownership for each mounted proxy and its
+  gateway transform holder; captured defaults remain separate snapshot inputs.
 - `src/mcp_gateway/admin.html` — single-file vanilla-JS admin UI (no build,
   no external assets; light+dark via prefers-color-scheme, #170). Guarded by
   tests: no merge-conflict markers, ONE inline `<script>` that must pass
@@ -105,6 +109,10 @@ layout, console script `mcp-gateway`). MIT; distributed via
   cursor through the transform boundary. Virtual Tools advertise their stable
   output envelope and keep upstream `_meta` namespaced per member under the
   strict result budget.
+- **Runtime ownership:** mount/unmount and transform replacement go through one
+  `BackendRuntime`; pass only its read-only proxy mapping to Virtual Tools.
+  `hot_reload` has a critical call graph, so preserve its remove/add/instruction
+  ordering when extracting more Admin services.
 - Tools are exposed BARE per endpoint; apply `add_transform` AFTER `_reconcile`
   (reconcile must see source names).
 - **Transform target names are globally unique per backend — enabled OR

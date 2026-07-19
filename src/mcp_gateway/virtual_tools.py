@@ -12,11 +12,12 @@ import json
 import re
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any
 
 import httpx
 from fastmcp import Client, FastMCP
+from fastmcp.server.providers.proxy import FastMCPProxy
 from fastmcp.tools import Tool, ToolResult
 from mcp.types import TextContent
 from pydantic import PrivateAttr
@@ -120,7 +121,9 @@ def resolve_member(
 
 
 async def resolve_tool(
-    tool: cl.VirtualTool, cfg: cl.GatewayConfig, registry: dict
+    tool: cl.VirtualTool,
+    cfg: cl.GatewayConfig,
+    registry: Mapping[str, FastMCPProxy],
 ) -> dict:
     """Return a live resolution receipt; no member call is made."""
     members = []
@@ -298,7 +301,7 @@ async def call_member(
     member: cl.VirtualMember,
     arguments: dict,
     cfg: cl.GatewayConfig,
-    registry: dict,
+    registry: Mapping[str, FastMCPProxy],
 ) -> dict:
     label = member_label(member)
     started = time.perf_counter()
@@ -565,7 +568,7 @@ async def run_virtual(
     tool: cl.VirtualTool,
     arguments: dict,
     cfg: cl.GatewayConfig,
-    registry: dict,
+    registry: Mapping[str, FastMCPProxy],
     log,
 ) -> ToolResult:
     values = _validate_arguments(tool, arguments)
@@ -614,7 +617,7 @@ class _VirtualRuntimeTool(Tool):
 
     _definition: cl.VirtualTool = PrivateAttr()
     _cfg_source: cl.GatewayConfig | Callable[[], cl.GatewayConfig] = PrivateAttr()
-    _registry: dict = PrivateAttr()
+    _registry: Mapping[str, FastMCPProxy] = PrivateAttr()
     _log: Any = PrivateAttr()
     _status_store: dict | None = PrivateAttr()
 
@@ -622,7 +625,7 @@ class _VirtualRuntimeTool(Tool):
         self,
         definition: cl.VirtualTool,
         cfg_source: cl.GatewayConfig | Callable[[], cl.GatewayConfig],
-        registry: dict,
+        registry: Mapping[str, FastMCPProxy],
         log,
         status_store: dict | None = None,
     ) -> None:
@@ -672,7 +675,7 @@ class _VirtualRuntimeTool(Tool):
 def build_virtual_tool(
     tool: cl.VirtualTool,
     cfg_source: cl.GatewayConfig | Callable[[], cl.GatewayConfig],
-    registry: dict,
+    registry: Mapping[str, FastMCPProxy],
     log,
     status_store: dict | None = None,
 ) -> Tool:
@@ -684,7 +687,7 @@ def replace_tools(  # noqa: PLR0913 - explicit lifecycle dependencies
     server: FastMCP,
     cfg: cl.GatewayConfig,
     cfg_source: cl.GatewayConfig | Callable[[], cl.GatewayConfig],
-    registry: dict,
+    registry: Mapping[str, FastMCPProxy],
     log,
     status_store: dict | None = None,
 ) -> None:
@@ -704,7 +707,7 @@ def replace_tools(  # noqa: PLR0913 - explicit lifecycle dependencies
 def build_virtual_server(
     cfg: cl.GatewayConfig,
     cfg_source: cl.GatewayConfig | Callable[[], cl.GatewayConfig],
-    registry: dict,
+    registry: Mapping[str, FastMCPProxy],
     log,
     status_store: dict | None = None,
 ) -> FastMCP:
