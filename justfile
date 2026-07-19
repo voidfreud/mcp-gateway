@@ -43,8 +43,8 @@ logs-follow:
 # and verify the new daemon. This is deliberately explicit and fail-closed:
 # never deploy a feature branch, a dirty checkout, or a half-ready service.
 update:
-    @if test "$$(git branch --show-current)" != "main"; then echo "error: just update must run from the main branch" >&2; exit 1; fi
-    @if test -n "$$(git status --porcelain=v1)"; then echo "error: just update requires a clean checkout" >&2; git status --short >&2; exit 1; fi
+    @if test "$(git branch --show-current)" != "main"; then echo "error: just update must run from the main branch" >&2; exit 1; fi
+    @if test -n "$(git status --porcelain=v1)"; then echo "error: just update requires a clean checkout" >&2; git status --short >&2; exit 1; fi
     git pull --ff-only origin main
     uv sync --locked
     ./install.sh
