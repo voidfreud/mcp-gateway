@@ -48,8 +48,8 @@ update:
     git pull --ff-only origin main
     uv sync --locked
     ./install.sh
-    @curl --fail --silent --show-error http://127.0.0.1:9100/health
-    @curl --fail --silent --show-error http://127.0.0.1:9100/ready
+    @curl --fail --silent --show-error --retry 10 --retry-delay 1 --retry-connrefused --retry-max-time 30 http://127.0.0.1:9100/health
+    @curl --fail --silent --show-error --retry 10 --retry-delay 1 --retry-connrefused --retry-max-time 30 http://127.0.0.1:9100/ready
 
 # Install/sync the LaunchAgent via the ~/.local/opt symlink (#149).
 # Re-run after moving the repo. Preview with: ./install.sh --dry-run
