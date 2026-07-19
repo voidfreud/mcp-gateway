@@ -2093,8 +2093,8 @@ def test_admin_html_has_client_registration_statuses():
         "CODEX_VIRTUAL",
     ):
         assert contract in text
-    assert "onclick=\"deregisterCC" in text
-    assert "onclick=\"deregisterCodex" in text
+    assert 'onclick="deregisterCC' in text
+    assert 'onclick="deregisterCodex' in text
 
 
 def test_admin_html_import_registers_by_backend_name():
