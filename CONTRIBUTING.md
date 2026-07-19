@@ -34,6 +34,8 @@ squash-merged; do not push directly to `main`.
 [The release guide](docs/releases.md) is the canonical policy for versioning,
 Release Please, release pull-request review, correction, and private release
 consumption. Do not manually bump ordinary versions or duplicate its workflow.
+Use the [testing and verification guide](docs/testing.md) to distinguish
+required CI from advisory checks and machine-specific release receipts.
 
 For a decision proposal or accepted ADR, follow the
 [decision process](docs/decisions/README.md).

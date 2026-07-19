@@ -26,6 +26,23 @@ lint:
 test:
     uv run pytest -q
 
+# Repository-only checks for material that must never enter a release review.
+# The complete test suite already includes these; this recipe is the fast,
+# explicit pre-review check for local-only paths and deployable templates.
+hygiene:
+    uv run pytest -q tests/test_release_hygiene.py
+
+# Deterministic, offline validation of tracked Markdown relative paths and
+# fragments. External URL reachability remains advisory and manual.
+docs-check:
+    uv run python tools/docs_links.py
+
+# Advisory type-baseline report. It deliberately preserves ty's real exit
+# status in the output while returning success so it does not impersonate a
+# required gate before the existing type debt is remediated.
+types:
+    @uv run ty check; status=$?; if test "$status" -ne 0; then echo "advisory: ty reported existing diagnostics; see the tracked type-debt Issue before promoting this to CI" >&2; fi; exit 0
+
 # Import smoke — server/admin/config_loader load cleanly
 smoke:
     uv run python -c "import mcp_gateway.server, mcp_gateway.admin, mcp_gateway.config_loader; print('imports OK')"

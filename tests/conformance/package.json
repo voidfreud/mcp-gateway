@@ -1,0 +1,9 @@
+{
+  "name": "mcp-gateway-conformance-fixture",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Pinned official MCP conformance runner for the gateway smoke suite",
+  "dependencies": {
+    "@modelcontextprotocol/conformance": "0.1.16"
+  }
+}

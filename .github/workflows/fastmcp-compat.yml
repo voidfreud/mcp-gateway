@@ -2,6 +2,8 @@ name: fastmcp compatibility canary
 
 # Production stays exact-pinned. This non-release lane discovers whether a
 # newer FastMCP still satisfies our explicit public and private API contracts.
+# It is scheduled/manual only, so it is an advisory compatibility signal rather
+# than a pull-request merge requirement.
 on:
   workflow_dispatch:
   schedule:
@@ -10,13 +12,32 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  # Avoid competing online resolver runs while preserving an in-progress
+  # nightly receipt for investigation.
+  group: fastmcp-compat-${{ github.workflow }}
+  cancel-in-progress: false
+
 jobs:
   newest-fastmcp:
-    runs-on: ubuntu-latest
+    name: FastMCP compatibility canary
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      # actions/checkout v4.3.0
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955
+        with:
+          persist-credentials: false
+      # actions/setup-python v6.3.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: ${{ matrix.python-version }}
+      # astral-sh/setup-uv v8.1.0
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
         with:
           enable-cache: true
           cache-dependency-glob: uv.lock
@@ -24,8 +45,10 @@ jobs:
         id: candidate
         run: |
           candidate_dir="$(mktemp -d)"
+          receipt="${RUNNER_TEMP}/fastmcp-compat-receipt.txt"
+          printf 'status=resolving\n' > "$receipt"
           cp pyproject.toml uv.lock README.md "$candidate_dir/"
-          python3 - "$candidate_dir/pyproject.toml" <<'PY'
+          python - "$candidate_dir/pyproject.toml" <<'PY'
           from pathlib import Path
           import sys
 
@@ -39,16 +62,30 @@ jobs:
           version="$("$candidate_dir/.venv/bin/python" -c 'from importlib.metadata import version; print(version("fastmcp"))')"
           echo "dir=$candidate_dir" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
+          printf 'candidate_fastmcp=%s\n' "$version" > "$receipt"
           echo "Resolved FastMCP $version"
       - name: Skip when the pin is still newest
         if: steps.candidate.outputs.version == '3.4.4'
-        run: echo "No newer FastMCP release; canary skipped."
+        run: |
+          echo "decision=skipped-current-pin-is-newest" >> "$RUNNER_TEMP/fastmcp-compat-receipt.txt"
+          echo "No newer FastMCP release; canary skipped."
       - name: Run full compatibility gate against candidate
         if: steps.candidate.outputs.version != '3.4.4'
         env:
           CANDIDATE_DIR: ${{ steps.candidate.outputs.dir }}
           PYTHONPATH: ${{ github.workspace }}/src:${{ github.workspace }}
         run: |
+          echo "decision=running-full-compatibility-gate" >> "$RUNNER_TEMP/fastmcp-compat-receipt.txt"
           "$CANDIDATE_DIR/.venv/bin/python" -m pytest -q tests
           "$CANDIDATE_DIR/.venv/bin/python" -c \
             "import mcp_gateway.server, mcp_gateway.admin, mcp_gateway.config_loader; print('candidate imports OK')"
+          echo "result=passed" >> "$RUNNER_TEMP/fastmcp-compat-receipt.txt"
+      - name: Publish compatibility receipt
+        if: always()
+        # actions/upload-artifact v4.6.2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: fastmcp-compat-receipt-py${{ matrix.python-version }}
+          path: ${{ runner.temp }}/fastmcp-compat-receipt.txt
+          if-no-files-found: warn
+          retention-days: 14

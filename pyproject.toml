@@ -7,7 +7,9 @@ name = "mcp-gateway"
 version = "1.0.0"
 description = "Independent MCP gateway with per-backend proxy and virtual-tool endpoints"
 readme = "README.md"
-requires-python = ">=3.12"
+# Python 3.12 and 3.13 are the supported runtime minors. Do not widen this
+# range until a new minor is explicitly exercised in CI and documented.
+requires-python = ">=3.12,<3.14"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "voidfreud" }]
@@ -18,6 +20,7 @@ keywords = ["mcp", "proxy", "fastmcp", "claude-code", "gateway"]
 classifiers = [
     "Private :: Do Not Upload",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Software Development :: Libraries",
 ]
 dependencies = [
@@ -50,8 +53,12 @@ only-include = ["src/mcp_gateway", "README.md", "LICENSE", "pyproject.toml"]
 dev = [
     "httpx2>=2.5.0",
     "hypothesis>=6.155.7",
+    "pip-audit==2.9.0",
     "pytest>=9.1.1",
     "ruff==0.15.22",
+    # Advisory only until the tracked type-debt Issue is resolved.  Keep the
+    # baseline reproducible without adding suppressions or source exclusions.
+    "ty==0.0.61",
 ]
 
 [tool.ruff]

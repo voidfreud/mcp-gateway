@@ -23,6 +23,7 @@ tool-specific instruction files.
 | Release history | [CHANGELOG.md](CHANGELOG.md) |
 | Automated checks and releases | [.github/workflows/](.github/workflows/) |
 | Versioning, release automation, and private release use | [docs/releases.md](docs/releases.md) |
+| Verification tiers and local release receipts | [docs/testing.md](docs/testing.md) |
 | Accepted architecture decisions and their process | [docs/decisions/](docs/decisions/README.md) |
 | Advertised MCP surface and safe gateway tuning | [.agents/skills/mcp-tool-design/SKILL.md](.agents/skills/mcp-tool-design/SKILL.md) |
 | Example configuration | [config.example.toml](config.example.toml) |
@@ -95,6 +96,9 @@ services, or live backends. It cannot prove machine-specific daemon behavior.
   only when the requested change needs that receipt and only with authorization
   to exercise that machine and its configured services. It is a local
   complement to CI, not a CI substitute.
+- The required CI, advisory local, and required local-receipt tiers are defined
+  in [docs/testing.md](docs/testing.md). Do not claim CI covered a local daemon,
+  client registration, credentials, or live backend.
 
 ## Local state, secrets, and destructive commands
 
