@@ -13,8 +13,8 @@ Status: Accepted (2026-06-28), amended by
 
 The repo has two test layers: a pytest + Hypothesis pure-logic suite (no backend
 dependency) and `just verify` (live-daemon assertions via `verify_rename.py`,
-hitting the running launchd-supervised gateway against stdio gitnexus + HTTP
-deepwiki/context7).
+hitting the running launchd-supervised gateway against a stdio backend plus
+HTTP documentation backends).
 
 A GitHub Actions runner can run the pure-logic suite. It cannot run `just verify`
 — the load-bearing tests need local backends and a running launchd daemon,

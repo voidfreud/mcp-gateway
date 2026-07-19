@@ -74,10 +74,10 @@ from. It should match where your clone lives. If it does not, see
 
 The login service starts under macOS's `launchd`, which does not understand `~`,
 so the installed service file contains your home directory as a full path.
-`install.sh` handles that for you. One related file is not templated: the
-optional log-rotation config `deploy/newsyslog-mcp-gateway.conf` contains
-hardcoded absolute paths — edit it to match your account before installing it (it
-is optional; see [operations.md](operations.md#logs)).
+`install.sh` handles that for you. If you need optional `newsyslog` rotation for
+the launchd capture logs, create its account-specific configuration locally from
+`newsyslog.conf(5)`; it must use your absolute paths and account ownership and is
+not a tracked project file (see [operations.md](operations.md#logs)).
 
 ## Path B — install as a standalone tool (any platform)
 

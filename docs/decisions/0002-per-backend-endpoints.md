@@ -11,8 +11,8 @@ The gateway originally aggregated all backends behind ONE `create_proxy` served
 at a single `/mcp` endpoint, registered as one `gateway` MCP server in Claude
 Code. Claude Code truncates each MCP server's `instructions` at ~2KB. With one
 server, every backend's server-level instructions were composed into that single
-2KB budget — measured at ~2306–2332 B for gitnexus + deepwiki + context7, over
-the cap, so the tail was silently truncated, and each added backend made it worse
+2KB budget — measured at ~2306–2332 B for the configured backend set, over the
+cap, so the tail was silently truncated, and each added backend made it worse
 ([#29](https://github.com/voidfreud/mcp-gateway/issues/29)).
 
 The single aggregating proxy also forced an all-or-nothing session strategy: any

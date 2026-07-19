@@ -41,6 +41,11 @@ packages = ["src/mcp_gateway"]
 # via Path(__file__).parent)
 artifacts = ["src/mcp_gateway/admin.html", "src/mcp_gateway/config.default.toml"]
 
+[tool.hatch.build.targets.sdist]
+# A source archive is a build input, not a repository mirror.  Keep it to the
+# installable package and the metadata files required to rebuild it.
+only-include = ["src/mcp_gateway", "README.md", "LICENSE", "pyproject.toml"]
+
 [dependency-groups]
 dev = [
     "httpx2>=2.5.0",
@@ -50,8 +55,9 @@ dev = [
 ]
 
 [tool.ruff]
-# corpus/ is read-only third-party source material (never reformat upstream
-# code); our own code — including .claude/ skill scripts — stays in scope.
+# corpus/ stores retained source pointers and provenance records rather than
+# lintable project code; our own code — including .claude/ skill scripts —
+# stays in scope.
 # .claude/worktrees holds agent checkouts (gitignored) — each runs its own
 # gate; linting them from the parent tree double-reports their WIP.
 extend-exclude = ["corpus", ".claude/worktrees"]

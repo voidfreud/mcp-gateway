@@ -1,6 +1,10 @@
 # Wording the broadcast surface
 
-The craft rules for every string the gateway broadcasts. Distilled from the MCP spec, Anthropic's tool-use and tool-search guidance, the Google/AWS style guides, and the reference skills — all in `corpus/` (map at the bottom). Where the corpus is thin, research wider and extend the corpus rather than guessing.
+The craft rules for every string the gateway broadcasts. They are distilled from
+the MCP specification, official client guidance, and supplemental style material
+catalogued in `corpus/RETENTION.md`. Use the live primary sources for a claim;
+when new evidence is needed, update `RETENTION.md` with its URL and provenance
+rather than copying third-party document bodies or cloned skills into the repo.
 
 ## Cross-cutting laws
 
@@ -50,14 +54,10 @@ Read at argument-construction time; argument names and descriptions are also sea
 - Hide (`hide: true`) any param an agent should never touch — the backend's default then applies. A hidden footgun beats a warned-about one.
 - Param renaming is being retired as a lever (`levers.md`) — fix confusing params with descriptions, not renames.
 
-## Corpus map
+## Evidence catalog
 
-| Topic | Source |
-|---|---|
-| Spec: tool fields, annotations, instructions lifecycle | `corpus/docs/spec/` |
-| Anthropic: descriptions, tool search, writing tools for agents, context engineering | `corpus/docs/anthropic/` |
-| Claude Code: MCP mechanics, tool-search guide, limits | `corpus/docs/claude-code/` |
-| Style guides (Google, AWS) and checklists | `corpus/docs/style-guides/`, `corpus/docs/checklists/`, `corpus/docs/articles/` |
-| Reference skills (inspiration, patterns) | `corpus/skills/` |
-
-The corpus is example material, not a boundary — when a judgment needs grounding it lacks, research the live docs and add what you learned to `corpus/`.
+`corpus/RETENTION.md` is the source catalog and retention policy. Its small
+local pointer files preserve the discovery-reference paths that still need them;
+they do not contain copied source material. When a judgment needs evidence the
+catalog lacks, research the live primary source and add its pointer and
+provenance to `RETENTION.md`.

@@ -6,8 +6,26 @@ dist/
 wheels/
 *.egg-info
 
+# Local environment and secret material. Keep the documented template shareable.
+.env
+.env.*
+!.env.example
+secrets.env
+config.secret.toml
+
+# Local extensions and developer-tool state.
+.hooks/
+hooks.local/
+.claude/hooks/
+.claude/cache/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
 # Virtual environments
-.venv
+.venv/
 
 # Runtime state / logs (created under ~/.local/state by default; this covers a
 # local ./state too).
