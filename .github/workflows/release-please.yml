@@ -24,6 +24,7 @@ concurrency:
 
 jobs:
   release-please:
+    name: Release Please
     # Dispatch is for a strictly bounded artifact repair. It must never create
     # a fresh release PR, tag, or release.
     if: github.event_name == 'push'
@@ -153,6 +154,7 @@ jobs:
           git push origin "HEAD:refs/heads/${head_ref}"
 
   release-artifacts:
+    name: Publish verified release artifacts
     needs: release-please
     # A normal run attaches files only after Release Please made the tag and
     # release. A dispatch can repair only an already-existing release tag.
