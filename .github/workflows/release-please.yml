@@ -82,7 +82,7 @@ jobs:
       - name: Check out the release PR
         if: steps.release-please.outputs.prs_created == 'true'
         # actions/checkout v4.3.0
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:
           token: ${{ steps.app-token.outputs.token }}
           fetch-depth: 0
@@ -175,7 +175,7 @@ jobs:
 
       - name: Check out the selected repository state and tags
         # actions/checkout v4.3.0
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:
           token: ${{ steps.app-token.outputs.token }}
           ref: ${{ github.sha }}
