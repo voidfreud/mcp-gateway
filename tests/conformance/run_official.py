@@ -12,8 +12,9 @@ Streamable HTTP endpoint with the generic official checks that apply now:
 * valid tool-list shape; and
 * DNS-rebinding protection.
 
-Run manually (it downloads the pinned official Node package on first use):
+Prepare the integrity-locked Node fixture once, then run manually:
 
+    npm ci --ignore-scripts --no-audit --no-fund --prefix tests/conformance
     uv run python tests/conformance/run_official.py
 
 Passing artifacts are removed by default.  Failures always retain their
@@ -38,6 +39,7 @@ from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FIXTURE = Path(__file__).with_name("official_fixture.py")
+NODE_FIXTURE = Path(__file__).parent
 CONFORMANCE_VERSION = "0.1.16"
 SPEC_VERSION = "2025-11-25"
 SCENARIOS = (
@@ -139,26 +141,33 @@ def _gateway_is_ready(base_url: str) -> bool:
     return payload["ready"] is True and payload["mounted"] == ["conformance"]
 
 
+def _runner_command(scenario: str, endpoint: str, scratch: Path) -> list[str]:
+    """Return the installed, no-download official runner invocation."""
+    return [
+        "npm",
+        "exec",
+        "--no",
+        "--",
+        "conformance",
+        "server",
+        "--url",
+        endpoint,
+        "--scenario",
+        scenario,
+        "--spec-version",
+        SPEC_VERSION,
+        "--output-dir",
+        str(scratch / "official-results"),
+    ]
+
+
 def _run_scenario(
     scenario: str, endpoint: str, environment: dict[str, str], scratch: Path
 ) -> None:
-    """Run exactly one stable official scenario and retain its complete output."""
+    """Run one scenario with the fixture's preinstalled official runner."""
     result = subprocess.run(
-        [
-            "npx",
-            "--yes",
-            f"@modelcontextprotocol/conformance@{CONFORMANCE_VERSION}",
-            "server",
-            "--url",
-            endpoint,
-            "--scenario",
-            scenario,
-            "--spec-version",
-            SPEC_VERSION,
-            "--output-dir",
-            str(scratch / "official-results"),
-        ],
-        cwd=REPO_ROOT,
+        _runner_command(scenario, endpoint, scratch),
+        cwd=NODE_FIXTURE,
         env=environment,
         stdin=subprocess.DEVNULL,
         capture_output=True,

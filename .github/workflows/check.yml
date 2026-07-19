@@ -19,20 +19,33 @@ permissions:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      # actions/checkout v4.3.0
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955
+      # actions/setup-python v6.3.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: ${{ matrix.python-version }}
+      # astral-sh/setup-uv v8.1.0
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
         with:
           # cache the uv download/wheel cache between runs, keyed on the lock
           enable-cache: true
           cache-dependency-glob: uv.lock
-      - uses: extractions/setup-just@v2
+      # extractions/setup-just v3.0.0
+      - uses: extractions/setup-just@e33e0265a09d6d736e2ee1e0eb685ef1de4669ff
       # the lockfile must be consistent with pyproject — catches a dependency
       # edit that forgot `uv lock`
       - run: uv lock --check
       - run: uv sync --locked
+      - name: Check tracked documentation links
+        run: just docs-check
       - name: Validate pull request title
         if: github.event_name == 'pull_request'
         env:
@@ -41,17 +54,30 @@ jobs:
       - run: just check
 
   mcp-contract:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      # actions/checkout v4.3.0
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955
+      # actions/setup-python v6.3.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: ${{ matrix.python-version }}
+      # astral-sh/setup-uv v8.1.0
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
         with:
           enable-cache: true
           cache-dependency-glob: uv.lock
-      - uses: actions/setup-node@v4
+      # actions/setup-node v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: 22
+      - name: Prepare the locked official conformance runner
+        run: npm ci --ignore-scripts --no-audit --no-fund --prefix tests/conformance
       - run: uv sync --locked
       - name: Gateway raw-wire contract
         env:
@@ -63,11 +89,18 @@ jobs:
         env:
           TMPDIR: ${{ runner.temp }}
         run: uv run python tests/conformance/run_official.py --keep
-      - name: Publish protocol receipts
+      - name: Assemble redacted protocol receipts
         if: always()
-        uses: actions/upload-artifact@v4
+        run: |
+          uv run python tools/ci_receipts.py \
+            --scratch-root "$RUNNER_TEMP" \
+            --output-dir "$RUNNER_TEMP/mcp-gateway-ci-receipts"
+      - name: Publish redacted protocol receipts
+        if: always()
+        # actions/upload-artifact v4.6.2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: mcp-contract-receipts
-          path: ${{ runner.temp }}/mcp-gateway-*
+          name: mcp-contract-receipts-py${{ matrix.python-version }}
+          path: ${{ runner.temp }}/mcp-gateway-ci-receipts
           if-no-files-found: warn
           retention-days: 14

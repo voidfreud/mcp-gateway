@@ -1,0 +1,21 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+
+  # The official MCP conformance runner is locked separately so Node updates
+  # remain reviewable alongside the Python and Action dependency updates.
+  - package-ecosystem: npm
+    directory: /tests/conformance
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5

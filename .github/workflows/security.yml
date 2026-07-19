@@ -1,0 +1,107 @@
+name: security
+
+# This is a hermetic repository gate. It intentionally does not inspect the
+# installed daemon, local credentials, configured backends, or client state.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: security-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  security:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      # actions/checkout v4.3.0
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955
+        with:
+          # The secret scan compares immutable commit IDs, not a shallow clone.
+          fetch-depth: 0
+
+      - name: Check workflow policy
+        # zizmorcore/zizmor-action v0.6.0
+        uses: zizmorcore/zizmor-action@6599ee8b7a49aef6a770f63d261d214911a7ce02
+        with:
+          collect: workflows
+          online-audits: false
+          persona: pedantic
+          # This exact version is resolved by the pinned action to a container
+          # digest. Advanced Security upload is deliberately entitlement-neutral.
+          version: 1.22.0
+          advanced-security: false
+          annotations: true
+          token: ""
+
+      - name: Scan changed tracked files for secrets
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+          PUSH_AFTER_SHA: ${{ github.sha }}
+          # TruffleHog OSS v3.95.9, linux/amd64 image digest.
+          TRUFFLEHOG_IMAGE: ghcr.io/trufflesecurity/trufflehog@sha256:977f8eb3c0172ece02bd41875656ed67b955ed595c472a42f819cc8ce9eec3ff
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
+            base_sha="$PR_BASE_SHA"
+            head_sha="$PR_HEAD_SHA"
+          else
+            base_sha="$PUSH_BEFORE_SHA"
+            head_sha="$PUSH_AFTER_SHA"
+          fi
+
+          [[ "$head_sha" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "::error::missing or invalid scan head SHA"
+            exit 1
+          }
+
+          args=(git file:///repo)
+          if [[ "$base_sha" != "0000000000000000000000000000000000000000" ]]; then
+            [[ "$base_sha" =~ ^[0-9a-f]{40}$ ]] || {
+              echo "::error::missing or invalid scan base SHA"
+              exit 1
+            }
+            args+=(--since-commit "$base_sha")
+          fi
+          args+=(--branch "$head_sha" --fail --no-update --github-actions)
+
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE:/repo:ro" \
+            --workdir /repo \
+            "$TRUFFLEHOG_IMAGE" \
+            "${args[@]}"
+
+      # actions/setup-python v6.3.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          # One interpreter is enough to audit a single shared lockfile.
+          python-version: "3.12"
+      # astral-sh/setup-uv v8.1.0
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Prepare the locked audit environment
+        run: |
+          uv lock --check
+          uv sync --locked
+      - name: Export locked runtime dependencies
+        run: |
+          uv export --locked --no-dev --no-emit-project --format requirements.txt \
+            --output-file "$RUNNER_TEMP/runtime-requirements.txt"
+      - name: Audit locked runtime dependencies
+        run: |
+          uv run pip-audit \
+            --requirement "$RUNNER_TEMP/runtime-requirements.txt" \
+            --no-deps \
+            --require-hashes \
+            --vulnerability-service osv

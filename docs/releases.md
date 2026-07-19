@@ -2,6 +2,8 @@
 
 This is the canonical release process for mcp-gateway. Releases are GitHub
 Releases for this private repository; mcp-gateway is never published to PyPI.
+For the verification tiers and the redacted local release receipt, see
+[testing and verification](testing.md).
 
 ## Version policy
 
@@ -38,6 +40,28 @@ bootstrap expectation, not a version to set by hand.
 
 No PyPI publishing occurs. The tracked workflow is the authority for the exact
 assets and checks.
+
+## Release verification evidence
+
+Release review has three deliberately separate evidence tiers:
+
+- **Required CI:** the PR checks configured by GitHub, including `just check`,
+  the hermetic MCP contract job, and release-artifact/version validation where
+  applicable. CI has no personal credentials, installed daemon, or configured
+  backend.
+- **Advisory local checks:** repeatable checks that can inform review but are
+  not an additional GitHub merge gate, such as `just hygiene`, disposable
+  loopback harnesses, and a local wheel inspection.
+- **Required local receipt when applicable:** machine-specific checks that CI
+  cannot prove: daemon lifecycle, installed-service behavior, client
+  registration, configured backends, and authenticated integrations. Run these
+  only with authorization for that machine and record a redacted receipt in the
+  release-acceptance Issue.
+
+The supported runtimes are CPython 3.12 and 3.13. `requires-python` and CI
+intentionally match those tested minors. A later Python minor is not supported
+merely because a resolver can produce a lockfile for it; add it only with
+explicit CI coverage and an accompanying compatibility decision.
 
 ## One-time GitHub setup
 

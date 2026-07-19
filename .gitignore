@@ -18,11 +18,13 @@ config.secret.toml
 hooks.local/
 .claude/hooks/
 .claude/cache/
+.gitnexus/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
 .coverage
 htmlcov/
+tests/conformance/node_modules/
 
 # Virtual environments
 .venv/
