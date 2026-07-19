@@ -1071,7 +1071,7 @@ ALWAYS_LOAD_META = {"anthropic/alwaysLoad": True}
 
 # Tool `_meta` hint Claude Code honors as a per-tool output budget (chars of
 # text content), overriding its global 25k-token MAX_MCP_OUTPUT_TOKENS cap
-# (#162). See the mcp-tool-design skill's references/discovery.md.
+# (#162). See .agents/skills/mcp-tool-design/references/clients/claude-code.md.
 MAX_RESULT_CHARS_META_KEY = "anthropic/maxResultSizeChars"
 
 

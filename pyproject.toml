@@ -56,7 +56,7 @@ dev = [
 
 [tool.ruff]
 # corpus/ stores retained source pointers and provenance records rather than
-# lintable project code; our own code — including .claude/ skill scripts —
+# lintable project code; our own code — including .agents/ skill scripts —
 # stays in scope.
 # .claude/worktrees holds agent checkouts (gitignored) — each runs its own
 # gate; linting them from the parent tree double-reports their WIP.
@@ -78,7 +78,7 @@ ignore = [
 "tests/*" = ["PLC0415", "PLR0913", "PLR0912"]
 # Skill scripts are CLI report tools: docstring usage examples overflow 88
 # cols, and the print tree is one long cohesive walk.
-".claude/skills/*" = ["E501", "PLR0912", "PLR0915"]
+".agents/skills/*" = ["E501", "PLR0912", "PLR0915"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

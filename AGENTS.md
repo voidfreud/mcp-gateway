@@ -23,6 +23,7 @@ tool-specific instruction files.
 | Release history | [CHANGELOG.md](CHANGELOG.md) |
 | Automated checks and releases | [.github/workflows/](.github/workflows/) |
 | Accepted architecture decisions and their process | [docs/decisions/](docs/decisions/README.md) |
+| Advertised MCP surface and safe gateway tuning | [.agents/skills/mcp-tool-design/SKILL.md](.agents/skills/mcp-tool-design/SKILL.md) |
 | Example configuration | [config.example.toml](config.example.toml) |
 | Verified behavior | [tests/](tests/) and the implementation in [src/](src/) |
 

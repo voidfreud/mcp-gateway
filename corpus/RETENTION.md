@@ -1,21 +1,23 @@
 # Corpus retention manifest
 
-Purpose: source catalog for `.claude/skills/mcp-tool-design/` and its references.
-The repository retains no third-party document bodies or cloned skills here. This
-avoids redistributing material whose license or website terms have not been verified.
+This catalog records the primary evidence cited by the canonical
+`mcp-tool-design` skill. It retains URLs and provenance only: no third-party
+document body, clone, local receipt, or private backend data belongs here.
 
-| Evidence set | Source URL(s) | Revision / retrieval | Purpose / consumer | License or terms status | Refresh or removal rule |
-| --- | --- | --- | --- | --- | --- |
-| MCP specification: architecture, lifecycle, tools, prompts, resources | https://modelcontextprotocol.io/specification/2025-11-25 ; https://modelcontextprotocol.io/specification/draft ; https://blog.modelcontextprotocol.io/posts/2026-03-16-tool-annotations/ | Version dates appear in the source names; repository retrieval date was not recorded. | Normative tool and server-text behavior; `mcp-tool-design` wording reference. | Not verified for vendoring; URL pointers only. | Recheck the current specification before a behavior claim; remove obsolete version pointers after references move to a replacement. |
-| Anthropic tool-use guidance | https://platform.claude.com/docs/en/agents-and-tools/tool-use/overview ; https://platform.claude.com/docs/en/agents-and-tools/tool-use/define-tools ; https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-search-tool ; https://platform.claude.com/docs/en/agents-and-tools/tool-use/strict-tool-use ; https://platform.claude.com/docs/en/agents-and-tools/tool-use/programmatic-tool-calling ; https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-reference | Revision and retrieval date not recorded. | Tool selection, schemas, deferred loading, and descriptions; `mcp-tool-design` wording/discovery references. | Not verified for vendoring; URL pointers only. | Check current official docs for every tuning pass; remove replaced URLs. |
-| Anthropic engineering and product guidance | https://www.anthropic.com/engineering/writing-tools-for-agents ; https://www.anthropic.com/engineering/advanced-tool-use ; https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents ; https://claude.com/blog/extending-claude-capabilities-with-skills-mcp-servers | Revision and retrieval date not recorded. | Supporting rationale for concise, discoverable tool text. | Not verified for vendoring; URL pointers only. | Refresh only when a reference needs evidence beyond the primary docs; remove stale commentary. |
-| Claude Code and connector documentation | https://code.claude.com/docs/en/mcp ; https://code.claude.com/docs/en/mcp-quickstart ; https://code.claude.com/docs/en/agent-sdk/tool-search ; https://code.claude.com/docs/en/agent-sdk/mcp ; https://claude.com/docs/en/connectors ; https://claude.com/docs/en/connectors/building | Revision and retrieval date not recorded. | Client-specific discovery, loading, instruction, and output-limit behavior; `mcp-tool-design` discovery reference. | Not verified for vendoring; URL pointers only. | Verify against current client docs before changing broadcast text; remove superseded paths. |
-| Open-source style/checklist material | https://github.com/googleapis/mcp-toolbox ; https://github.com/awslabs/mcp ; https://github.com/incultnitollc/mcp-probe/blob/main/docs/checklist.md | Exact commit and retrieval date not recorded. | Supplemental naming, schema, and preflight patterns; `mcp-tool-design` wording reference. | Repository licenses were not verified at retention time; URL pointers only. | Pin a commit and record its license before vendoring any excerpt; otherwise remove if no longer cited. |
-| Independent articles | https://llmbestpractices.com/ai-agents/mcp-tool-design ; https://yaw.sh/mcp-in-production/mcp-schema-design ; https://www.merge.dev/blog/mcp-tool-description ; https://qubittool.com/blog/mcp-tools-best-practices-ai-agent | Revision and retrieval date not recorded. | Non-normative corroboration only. | Not verified for vendoring; URL pointers only. | Never treat as normative; remove when a primary source covers the claim. |
-| Former third-party skill clones | https://github.com/haomingkoo/create-mcp ; https://github.com/sawzhang/sawzhang_skills ; https://github.com/EduardoRemedios/MCP-Builder-Skill ; https://github.com/anthropics/claude-code | Former shallow-clone retrieval was recorded as 2026-07-02; exact revisions and licenses were not retained. | No current file consumer; historic inspiration only. | Removed rather than vendored without revision and license verification. | Reacquire only the minimal, relevant upstream file after recording URL, commit, license, and purpose. |
+| Stable ID | Publisher / source | URL | Revision / retrieved | Usage / license constraint | Purpose | Canonical skill consumer path |
+| --- | --- | --- | --- | --- | --- | --- |
+| MCP-TOOLS-2025-11-25 | Model Context Protocol | https://modelcontextprotocol.io/specification/2025-11-25/server/tools | Revision 2025-11-25; retrieved 2026-07-19 | URL pointer only; verify terms and record a revision before vendoring. | Normative tool contract. | `.agents/skills/mcp-tool-design/references/generic-mcp.md` |
+| MCP-PRIMITIVES-2025-11-25 | Model Context Protocol | https://modelcontextprotocol.io/specification/2025-11-25/server | Revision 2025-11-25; retrieved 2026-07-19 | URL pointer only; verify terms and record a revision before vendoring. | Normative server primitives. | `.agents/skills/mcp-tool-design/references/generic-mcp.md` |
+| CLAUDE-CODE-MCP | Anthropic Claude Code | https://code.claude.com/docs/en/mcp | Current documentation; retrieved 2026-07-19 | URL pointer only; verify terms and record a revision before vendoring. | Claude Code MCP behavior. | `.agents/skills/mcp-tool-design/references/clients/claude-code.md` |
+| ANTHROPIC-TOOL-SEARCH | Anthropic Claude Platform | https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-search-tool | Current documentation; retrieved 2026-07-19 | URL pointer only; verify terms and record a revision before vendoring. | Claude Code tool-search evidence. | `.agents/skills/mcp-tool-design/references/clients/claude-code.md` |
+| CODEX-MANUAL | OpenAI Developers | https://developers.openai.com/codex/codex-manual.md | Current documentation; retrieved 2026-07-19 | URL pointer only; verify terms and record a revision before vendoring. | Codex instruction guidance. | `.agents/skills/mcp-tool-design/references/clients/codex.md` |
+| CODEX-MCP | OpenAI ChatGPT Learn | https://learn.chatgpt.com/docs/extend/mcp | Current documentation; retrieved 2026-07-19 | URL pointer only; verify terms and record a revision before vendoring. | Codex MCP-host evidence. | `.agents/skills/mcp-tool-design/references/clients/codex.md` |
 
-## Retained local pointers
+## Removed material and reacquisition
 
-Two small pointer files preserve the exact paths currently named by the discovery
-reference. They contain no upstream body text. All other source URLs are cataloged
-above until the skill references are updated to point here directly.
+Phase 4 removed copied source pointers, archived research, third-party clone
+categories, skill-script artifacts, and empty corpus category trees. Reacquire
+only the minimal primary source needed for an active claim, after recording its
+stable URL, retrieved date, fixed revision when available, terms or license,
+purpose, and canonical consumer here. Keep all research receipts local and
+untracked.
