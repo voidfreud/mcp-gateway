@@ -58,7 +58,7 @@ dev = [
     "ruff==0.15.22",
     # Advisory only until the tracked type-debt Issue is resolved.  Keep the
     # baseline reproducible without adding suppressions or source exclusions.
-    "ty==0.0.61",
+    "ty==0.0.63",
 ]
 
 [tool.ruff]
