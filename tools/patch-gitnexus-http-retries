@@ -1,0 +1,37 @@
+#!/usr/bin/env python3
+"""Retry transient 200 responses whose embedding body is empty or truncated."""
+
+from pathlib import Path
+import subprocess
+import sys
+
+EXPECTED_VERSION = "1.6.10-rc.117"
+TARGET = Path("/opt/homebrew/lib/node_modules/gitnexus/dist/core/embeddings/http-client.js")
+NEEDLE = """    catch (err) {
+        throw new HttpEmbeddingError(`Embedding endpoint returned an unparseable response (${safeUrl(url)}, batch ${batchIndex})`, { cause: err });
+    }"""
+REPLACEMENT = """    catch (err) {
+        if (maxAttempts > 1) {
+            await abortableSleep(Math.min(HTTP_RETRY_BACKOFF_MS, retryCapMs), requestOptions.signal);
+            return httpEmbedBatch(url, batch, model, apiKey, batchIndex, dimensions, requestOptions, maxAttempts - 1, retryCapMs, minIntervalMs);
+        }
+        throw new HttpEmbeddingError(`Embedding endpoint returned an unparseable response (${safeUrl(url)}, batch ${batchIndex})`, { cause: err });
+    }"""
+
+version = subprocess.run(
+    ["/opt/homebrew/bin/gitnexus", "--version"],
+    check=True,
+    capture_output=True,
+    text=True,
+).stdout.strip()
+if version != EXPECTED_VERSION:
+    sys.exit(f"Refusing to patch GitNexus {version}; expected {EXPECTED_VERSION}")
+
+source = TARGET.read_text(encoding="utf-8")
+if REPLACEMENT in source:
+    print(f"HTTP response retry patch already present in {TARGET}")
+elif NEEDLE in source:
+    TARGET.write_text(source.replace(NEEDLE, REPLACEMENT, 1), encoding="utf-8")
+    print(f"Patched {TARGET}")
+else:
+    sys.exit(f"Refusing to patch unexpected source shape in {TARGET}")
