@@ -1,0 +1,163 @@
+#!/usr/bin/env python3
+"""Protect all GitNexus writers while keeping queries concurrent."""
+
+from __future__ import annotations
+
+import fcntl
+import os
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import threading
+
+REAL_GITNEXUS = Path(
+    os.environ.get(
+        "GITNEXUS_REAL_BIN",
+        "/opt/homebrew/lib/node_modules/gitnexus/dist/cli/index.js",
+    )
+)
+NODE = os.environ.get("GITNEXUS_NODE", "node")
+LOCK_FILE = Path.home() / ".gitnexus/analyze-global.lock"
+SECRETS_FILE = Path.home() / ".config/mcp-gateway/secrets.env"
+WRITER_COMMANDS = {
+    "analyze",
+    "clean",
+    "embeddings",
+    "group",
+    "index",
+    "remove",
+    "setup",
+    "uninstall",
+    "wiki",
+}
+DEFAULT_ENV = {
+    "GITNEXUS_EMBEDDING_URL": "https://openrouter.ai/api/v1",
+    "GITNEXUS_EMBEDDING_MODEL": "qwen/qwen3-embedding-8b",
+    "GITNEXUS_EMBEDDING_DIMS": "2048",
+    "GITNEXUS_EMBEDDING_BATCH_SIZE": "32",
+    "GITNEXUS_EMBEDDING_SUB_BATCH_SIZE": "32",
+    "GITNEXUS_EMBEDDING_MAX_ATTEMPTS": "5",
+    "GITNEXUS_EMBEDDING_RETRY_CAP_MS": "30000",
+    "GITNEXUS_EMBEDDING_MIN_INTERVAL_MS": "250",
+    "GITNEXUS_WORKER_POOL_SIZE": "4",
+    "GITNEXUS_PARSE_CHUNK_CONCURRENCY": "1",
+    "GITNEXUS_INDEX_LOCK_TIMEOUT_MS": "1800000",
+    "GITNEXUS_LBUG_BUFFER_POOL_SIZE": "1073741824",
+    "GITNEXUS_FTS_STEMMER": "porter",
+    "GITNEXUS_FTS_CJK_SEGMENTATION": "none",
+    "GITNEXUS_COMMUNITY_ENGINE": "graphology",
+    "GITNEXUS_STREAM_GRAPH_EMIT": "1",
+    "GITNEXUS_LBUG_EXTENSION_INSTALL": "load-only",
+}
+
+
+def read_secret(name: str) -> str | None:
+    try:
+        lines = SECRETS_FILE.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return None
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[7:].lstrip()
+        key, separator, value = line.partition("=")
+        if separator and key.strip() == name:
+            value = value.strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+                value = value[1:-1]
+            return value
+    return None
+
+def command_args(argv: list[str]) -> list[str]:
+    if os.environ.get("GITNEXUS_ANALYZE_COMPAT") == "1":
+        sys.argv[0] = "gitnexus-analyze"
+    if Path(sys.argv[0]).name == "gitnexus-analyze":
+        repo = "."
+        remaining = list(argv)
+        if remaining and not remaining[0].startswith("-"):
+            repo = remaining.pop(0)
+        args = ["analyze", str(Path(repo).expanduser().resolve())]
+        args.extend(remaining)
+        if not any(arg == "--embeddings" or arg.startswith("--embeddings=") for arg in args):
+            args.extend(["--embeddings", "0"])
+        if "--index-only" not in args:
+            args.append("--index-only")
+        if not any(arg == "--workers" or arg.startswith("--workers=") for arg in args):
+            args.extend(["--workers", "4"])
+        if not any(arg == "--max-file-size" or arg.startswith("--max-file-size=") for arg in args):
+            args.extend(["--max-file-size", "512"])
+        if not any(arg == "--embedding-batch-size" or arg.startswith("--embedding-batch-size=") for arg in args):
+            args.extend(["--embedding-batch-size", "32"])
+        if not any(arg == "--embedding-sub-batch-size" or arg.startswith("--embedding-sub-batch-size=") for arg in args):
+            args.extend(["--embedding-sub-batch-size", "32"])
+        return args
+    return argv
+
+
+def forward_group(process: subprocess.Popen[bytes], signum: int) -> None:
+    try:
+        os.killpg(process.pid, signum)
+    except ProcessLookupError:
+        return
+
+
+def run_child(args: list[str], env: dict[str, str]) -> int:
+    process = subprocess.Popen(
+        [NODE, str(REAL_GITNEXUS), *args],
+        env=env,
+        start_new_session=True,
+    )
+    forced_kill: threading.Timer | None = None
+
+    def handle_signal(signum: int, _frame: object) -> None:
+        nonlocal forced_kill
+        forward_group(process, signum)
+        if forced_kill is None:
+            forced_kill = threading.Timer(30, forward_group, args=(process, signal.SIGKILL))
+            forced_kill.daemon = True
+            forced_kill.start()
+
+    previous = {
+        signum: signal.signal(signum, handle_signal)
+        for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+    }
+    try:
+        return process.wait()
+    finally:
+        if forced_kill is not None:
+            forced_kill.cancel()
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+        if process.poll() is None:
+            forward_group(process, signal.SIGKILL)
+            process.wait()
+
+
+def main() -> int:
+    args = command_args(sys.argv[1:])
+    if not args:
+        args = ["--help"]
+    command = next((arg for arg in args if not arg.startswith("-")), "")
+    env = os.environ.copy()
+    env.update(DEFAULT_ENV)
+    if command == "mcp":
+        env["GITNEXUS_MCP_READ_ONLY"] = "1"
+    api_key = env.get("OPENROUTER_API_KEY") or read_secret("OPENROUTER_API_KEY")
+    if api_key:
+        env["GITNEXUS_EMBEDDING_API_KEY"] = api_key
+
+    LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+    if command not in WRITER_COMMANDS:
+        return run_child(args, env)
+
+    with LOCK_FILE.open("a+b") as lock:
+        print(f"Waiting for GitNexus writer lock: {LOCK_FILE}", flush=True)
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        return run_child(args, env)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

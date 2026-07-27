@@ -1,0 +1,9 @@
+#!/bin/sh
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+TARGET=${GITNEXUS_BIN_DIR:-/opt/homebrew/bin}
+mkdir -p "$TARGET"
+ln -sfn "$ROOT/tools/gitnexus-dispatcher" "$TARGET/gitnexus"
+ln -sfn "$ROOT/tools/gitnexus-dispatcher" "$TARGET/gitnexus-analyze"
+printf 'GitNexus dispatcher installed in %s\n' "$TARGET"
