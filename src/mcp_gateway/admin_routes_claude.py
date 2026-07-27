@@ -53,8 +53,17 @@ def claude_routes(  # noqa: PLR0915 - nested route handlers stay cohesive
         deps = deps_factory()
         return await admin_cli.run_cli(deps.subprocess_run, argv, deps.cli_timeout)
 
+    def _invalidate_registrations_cache() -> None:
+        """Drop the cached ``claude mcp list`` output after a successful
+        mutation, so the next non-fresh registrations GET re-runs the CLI."""
+        deps = deps_factory()
+        deps.cache["output"] = None
+        deps.cache["ts"] = 0.0
+
     async def _run_cli(argv: list[str], redact: str | None = None) -> JSONResponse:
         rc, stdout, stderr = await _cli_raw(argv)
+        if rc == 0:
+            _invalidate_registrations_cache()
 
         def _hide(value: str) -> str:
             return value.replace(redact, "***") if redact else value
@@ -94,7 +103,11 @@ def claude_routes(  # noqa: PLR0915 - nested route handlers stay cohesive
         url = f"http://{cfg.host}:{cfg.port}/{name}/mcp"
         deps = deps_factory()
         try:
-            token = cl.expand_env(cfg.bearer_token) if cfg.bearer_token else None
+            token = (
+                cl.expand_env_required(cfg.bearer_token, "bearer_token")
+                if cfg.bearer_token
+                else None
+            )
             argv = deps.command("add", name, url=url, scope=scope, bearer_token=token)
         except cl.ConfigError as exc:
             return deps.error(str(exc))
@@ -151,7 +164,11 @@ def claude_routes(  # noqa: PLR0915 - nested route handlers stay cohesive
             return missing
         deps = deps_factory()
         try:
-            token = cl.expand_env(cfg.bearer_token) if cfg.bearer_token else None
+            token = (
+                cl.expand_env_required(cfg.bearer_token, "bearer_token")
+                if cfg.bearer_token
+                else None
+            )
         except cl.ConfigError as exc:
             return deps.error(str(exc))
 
@@ -177,17 +194,23 @@ def claude_routes(  # noqa: PLR0915 - nested route handlers stay cohesive
                     {"backend": backend.name, "ok": False, "error": str(exc)}
                 )
                 continue
-            await _cli_raw(remove_argv)
+            remove_rc, _remove_out, remove_err = await _cli_raw(remove_argv)
             rc, _output, error = await _cli_raw(add_argv)
-            results.append(
-                {
-                    "backend": backend.name,
-                    "ok": rc == 0,
-                    "exit": rc,
-                    "stderr": _hide(error),
-                }
-            )
+            entry = {
+                "backend": backend.name,
+                "ok": rc == 0,
+                "exit": rc,
+                "stderr": _hide(error),
+            }
+            if remove_rc != 0 and rc != 0:
+                # Remove errors are intentionally tolerated (idempotent
+                # remove-then-add), but when the add ALSO fails the remove
+                # diagnostic is the likely root cause — don't lose it.
+                entry["remove_error"] = _hide(remove_err)
+            results.append(entry)
         ok_count = sum(1 for result in results if result["ok"])
+        if ok_count:
+            _invalidate_registrations_cache()
         return JSONResponse(
             {
                 "ok": all(result["ok"] for result in results),

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from mcp_gateway import admin, claude_client, codex_client
+import anyio
+
+from mcp_gateway import admin, admin_cli, claude_client, codex_client
 
 
 def test_admin_facade_reexports_client_registration_policy():
@@ -33,3 +35,17 @@ def test_codex_cli_path_accepts_injected_environment(tmp_path):
         which=lambda _name: None,
         environ={"CODEX_CLI_PATH": str(binary)},
     ) == str(binary)
+
+
+def test_run_cli_converts_non_utf8_child_output_to_error_tuple():
+    """A child emitting non-UTF-8 bytes makes subprocess.run(text=True) raise
+    UnicodeDecodeError — run_cli's "never raise" contract must convert it to
+    the ``(-1, "", error)`` shape instead of escaping as a 500."""
+
+    def fake_run(*_args, **_kwargs):
+        raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+
+    rc, stdout, stderr = anyio.run(admin_cli.run_cli, fake_run, ["claude"], 5.0)
+    assert rc == -1
+    assert stdout == ""
+    assert "UnicodeDecodeError" in stderr

@@ -56,6 +56,13 @@ DEFAULT_BASELINE_MAX_AGE = 86_400
 # gateway-to-client response pages.
 DOWNSTREAM_TOOLS_PAGE_SIZE = 50
 
+# Names a backend can never take: each backend mounts at ``/<name>`` and the
+# unmount path strips routes by path-string equality, so a backend named after
+# a built-in route would shadow it — and removing that backend would strip the
+# built-in route itself. "health"/"ready" are also BearerAuthMiddleware
+# exemptions, so a same-named backend would serve without auth.
+RESERVED_BACKEND_NAMES = frozenset({"virtual", "admin", "health", "ready"})
+
 
 class ConfigError(RuntimeError):
     """Raised for any malformed or unresolvable configuration."""
@@ -133,6 +140,23 @@ def expand_env(value: str) -> str:
         )
 
     return _ENV_PATTERN.sub(_sub, value)
+
+
+def expand_env_required(value: str, what: str) -> str:
+    """Expand *value* like :func:`expand_env`, then reject an empty result.
+
+    A configured auth value (e.g. ``bearer_token = "${VAR}"``) whose variable
+    exists but is EMPTY must fail loudly: an empty expansion is otherwise
+    indistinguishable from "no token configured" downstream and would silently
+    disable authentication.
+    """
+    expanded = expand_env(value)
+    if not expanded:
+        raise ConfigError(
+            f"{what} is configured but expands to an empty string — refusing "
+            "to run with authentication silently disabled"
+        )
+    return expanded
 
 
 # ---------------------------------------------------------------------------
@@ -897,12 +921,18 @@ class GatewayConfig(BaseModel, extra="forbid"):
         dupes = {n for n in names if names.count(n) > 1}
         if dupes:
             raise ConfigError(f"duplicate backend name(s): {sorted(dupes)}")
-        if "virtual" in names:
-            raise ConfigError("backend name 'virtual' is reserved for Virtual Tools")
+        reserved = sorted(RESERVED_BACKEND_NAMES.intersection(names))
+        if reserved:
+            raise ConfigError(
+                f"backend name(s) {reserved} are reserved (built-in routes: "
+                "/virtual, /admin, /health, /ready)"
+            )
         backend_ids = [b.id for b in self.backends if b.id is not None]
         duplicate_ids = {value for value in backend_ids if backend_ids.count(value) > 1}
         if duplicate_ids:
             raise ConfigError(f"duplicate backend id(s): {sorted(duplicate_ids)}")
+        if self.bearer_token == "":
+            raise ConfigError("bearer_token must not be empty")
         if self.bearer_token is not None and self.oauth is not None:
             raise ConfigError(
                 "bearer_token and oauth are mutually exclusive; choose one "

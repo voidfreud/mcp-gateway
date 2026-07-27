@@ -62,6 +62,16 @@ def test_needs_json_empty_body_is_400():
     assert r.status_code == 400
 
 
+@pytest.mark.parametrize("body", [b"[1, 2]", b'"str"', b"42", b"true", b"null"])
+def test_needs_json_non_object_body_is_400(body):
+    # Syntactically valid JSON that isn't an object must not reach the handler —
+    # payload["backend"] / payload.get() on a list/str/int would 500.
+    client = TestClient(_echo_app())
+    r = client.post("/admin/api/echo", content=body)
+    assert r.status_code == 400
+    assert r.json()["ok"] is False
+
+
 # ---------------------------------------------------------------------------
 # #49 — admin request-body size cap → 413
 # ---------------------------------------------------------------------------
@@ -188,6 +198,54 @@ def test_build_app_missing_bearer_env_fails_loudly(tmp_path, monkeypatch):
         }
     )
     with pytest.raises(cl.ConfigError):
+        server._build_app(
+            cfg,
+            structlog.get_logger("test"),
+            {},
+            {},
+            {},
+            config_path=str(tmp_path / "config.toml"),
+        )
+
+
+def test_build_app_empty_expanded_bearer_env_fails_loudly(tmp_path, monkeypatch):
+    # a ${ENV} bearer_token whose var IS set but empty must also raise at build
+    # time — an empty token would otherwise disable auth silently (the
+    # middleware treats a falsy token as passthrough).
+    monkeypatch.setenv("EMPTY_GW_TOKEN", "")
+    cfg = cl.GatewayConfig.model_validate(
+        {
+            "bearer_token": "${EMPTY_GW_TOKEN}",
+            "backends": [{"name": "b", "transport": "stdio", "command": "/bin/x"}],
+        }
+    )
+    with pytest.raises(cl.ConfigError, match="expands to an empty string"):
+        server._build_app(
+            cfg,
+            structlog.get_logger("test"),
+            {},
+            {},
+            {},
+            config_path=str(tmp_path / "config.toml"),
+        )
+
+
+def test_build_app_empty_expanded_oauth_admin_token_fails_loudly(tmp_path, monkeypatch):
+    # the OAuth profile's admin_bearer_token guards /admin/api — same rule.
+    monkeypatch.setenv("EMPTY_GW_TOKEN", "")
+    cfg = cl.GatewayConfig.model_validate(
+        {
+            "oauth": {
+                "public_base_url": "http://127.0.0.1:9100",
+                "authorization_servers": ["http://127.0.0.1:9999"],
+                "issuer": "http://127.0.0.1:9999",
+                "jwks_uri": "http://127.0.0.1:9999/jwks",
+                "admin_bearer_token": "${EMPTY_GW_TOKEN}",
+            },
+            "backends": [{"name": "b", "transport": "stdio", "command": "/bin/x"}],
+        }
+    )
+    with pytest.raises(cl.ConfigError, match="expands to an empty string"):
         server._build_app(
             cfg,
             structlog.get_logger("test"),
@@ -850,6 +908,23 @@ def test_backend_name_virtual_is_explicitly_rejected_on_add_and_rename(tmp_path)
     added = client.post(
         "/admin/api/backend",
         json={"name": "virtual", "transport": "stdio", "command": "/bin/x"},
+    )
+    assert added.status_code == 400
+    assert "reserved" in added.json()["error"]
+    assert [item.name for item in cl.load(_cfg_path(tmp_path)).backends] == ["b"]
+
+
+@pytest.mark.parametrize("reserved", ["admin", "health", "ready"])
+def test_backend_name_builtin_route_is_rejected_on_add_and_rename(tmp_path, reserved):
+    # Same hazard as 'virtual': these names shadow built-in routes (/admin UI,
+    # /health + /ready liveness — the latter two also bearer-auth exempt).
+    client = TestClient(_admin_app(tmp_path))
+    renamed = client.post("/admin/api/backend/b/rename", json={"value": reserved})
+    assert renamed.status_code == 400
+    assert "reserved" in renamed.json()["error"]
+    added = client.post(
+        "/admin/api/backend",
+        json={"name": reserved, "transport": "stdio", "command": "/bin/x"},
     )
     assert added.status_code == 400
     assert "reserved" in added.json()["error"]
@@ -2803,3 +2878,194 @@ def test_rp_override_endpoints_reject_unknown_backend(tmp_path):
         json={"backend": "ghost", "prompt_original": "p", "override": {}},
     )
     assert r.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# Audit hardening — instructions type guard, reset/import 400s, empty-expanded
+# bearer tokens, registration-cache invalidation, reregister diagnostics
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("bad", [123, True, [1], {"x": 1}])
+def test_put_instructions_rejects_non_string_value(tmp_path, bad):
+    # a non-string value must 400 at the boundary, not AttributeError on
+    # .encode("utf-8") downstream -> 500
+    r = TestClient(_admin_app(tmp_path)).put(
+        "/admin/api/instructions", json={"backend": "b", "value": bad}
+    )
+    assert r.status_code == 400
+    assert "string or null" in r.json()["error"]
+
+
+def test_put_instructions_null_still_clears(tmp_path):
+    client = TestClient(_admin_app(tmp_path))
+    r = client.put("/admin/api/instructions", json={"backend": "b", "value": "tuned"})
+    assert r.status_code == 200
+    assert cl.load(_cfg_path(tmp_path)).backends[0].instructions == "tuned"
+    r = client.put("/admin/api/instructions", json={"backend": "b", "value": None})
+    assert r.status_code == 200
+    assert cl.load(_cfg_path(tmp_path)).backends[0].instructions is None
+
+
+@pytest.mark.parametrize(
+    "route",
+    ["/admin/api/reset", "/admin/api/resource-reset", "/admin/api/prompt-reset"],
+)
+def test_reset_routes_missing_fields_are_400(tmp_path, route):
+    # bare payload["backend"] / payload["tool_original"] lookups must be a
+    # clean 400, not a KeyError -> 500 (the put_* siblings already catch it).
+    r = TestClient(_admin_app(tmp_path)).post(route, json={})
+    assert r.status_code == 400
+    assert r.json()["ok"] is False
+
+
+@pytest.mark.parametrize("settings", ["foo", [1], 42])
+def test_post_import_rejects_non_object_settings(tmp_path, settings):
+    # a truthy non-dict "settings" value must 400, not AttributeError on
+    # bundle.get("kind") -> 500
+    r = TestClient(_admin_app(tmp_path)).post(
+        "/admin/api/import", json={"settings": settings}
+    )
+    assert r.status_code == 400
+    assert r.json()["ok"] is False
+
+
+def test_post_import_valid_bundle_still_applies(tmp_path):
+    r = TestClient(_admin_app(tmp_path)).post(
+        "/admin/api/import",
+        json={"settings": {"backends": {"b": {"instructions": "tuned"}}}},
+    )
+    assert r.status_code == 200
+    assert r.json()["ok"] is True
+    assert cl.load(_cfg_path(tmp_path)).backends[0].instructions == "tuned"
+
+
+def test_register_backend_rejects_empty_expanded_bearer_token(tmp_path, monkeypatch):
+    # the hot-reload path must surface the misconfiguration as a 400, never
+    # run `claude mcp add` with auth silently disabled.
+    monkeypatch.setattr(admin.shutil, "which", lambda _n: "/usr/bin/claude")
+    monkeypatch.setenv("EMPTY_GW_TOKEN", "")
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        admin.subprocess, "run", lambda argv, **kw: calls.append(argv) or _FakeProc()
+    )
+    app = _reregister_app(
+        tmp_path,
+        {
+            "bearer_token": "${EMPTY_GW_TOKEN}",
+            "backends": [{"name": "on1", "transport": "stdio", "command": "/bin/x"}],
+        },
+    )
+    r = TestClient(app).post("/admin/api/backend/on1/register", json={})
+    assert r.status_code == 400
+    assert "empty string" in r.json()["error"]
+    assert calls == []
+
+
+def test_reregister_all_rejects_empty_expanded_bearer_token(tmp_path, monkeypatch):
+    monkeypatch.setattr(admin.shutil, "which", lambda _n: "/usr/bin/claude")
+    monkeypatch.setenv("EMPTY_GW_TOKEN", "")
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        admin.subprocess, "run", lambda argv, **kw: calls.append(argv) or _FakeProc()
+    )
+    app = _reregister_app(
+        tmp_path,
+        {
+            "bearer_token": "${EMPTY_GW_TOKEN}",
+            "backends": [{"name": "on1", "transport": "stdio", "command": "/bin/x"}],
+        },
+    )
+    r = TestClient(app).post("/admin/api/cc-reregister-all", json={})
+    assert r.status_code == 400
+    assert "empty string" in r.json()["error"]
+    assert calls == []
+
+
+def test_claude_register_and_deregister_invalidate_registrations_cache(
+    tmp_path, monkeypatch
+):
+    # a successful mutation must bust the cached `claude mcp list` output, so
+    # the next non-fresh registrations GET re-runs the CLI.
+    calls = []
+    _fake_claude_cli(monkeypatch, calls, stdout="gateway-b: (HTTP) - ✓ Connected\n")
+    client = TestClient(_admin_app(tmp_path))
+    client.get("/admin/api/cc-registrations")  # cold -> runs the CLI
+    client.get("/admin/api/cc-registrations")  # within TTL -> cached
+    lists = [c for c in calls if c == ["claude", "mcp", "list"]]
+    assert len(lists) == 1
+    r = client.post("/admin/api/backend/b/register", json={})
+    assert r.json()["ok"] is True
+    client.get("/admin/api/cc-registrations")  # register busted the cache
+    lists = [c for c in calls if c == ["claude", "mcp", "list"]]
+    assert len(lists) == 2
+    r = client.post("/admin/api/backend/b/deregister", json={})
+    assert r.json()["ok"] is True
+    client.get("/admin/api/cc-registrations")  # deregister busted the cache
+    lists = [c for c in calls if c == ["claude", "mcp", "list"]]
+    assert len(lists) == 3
+
+
+def test_codex_register_invalidates_registrations_cache(tmp_path, monkeypatch):
+    calls = []
+    output = json.dumps([{"name": "gateway-b", "enabled": True}])
+    _fake_codex_cli(monkeypatch, calls, stdout=output)
+    client = TestClient(_admin_app(tmp_path))
+    client.get("/admin/api/codex-registrations")  # cold -> runs the CLI
+    client.get("/admin/api/codex-registrations")  # cached
+    lists = [c for c in calls if c[1:3] == ["mcp", "list"]]
+    assert len(lists) == 1
+    r = client.post("/admin/api/backend/b/codex/register", json={})
+    assert r.json()["ok"] is True
+    client.get("/admin/api/codex-registrations")  # register busted the cache
+    lists = [c for c in calls if c[1:3] == ["mcp", "list"]]
+    assert len(lists) == 2
+
+
+def test_reregister_all_reports_remove_error_when_remove_and_add_fail(
+    tmp_path, monkeypatch
+):
+    # remove errors are intentionally tolerated (idempotent remove-then-add),
+    # but when the add ALSO fails the remove diagnostic is kept as root cause.
+    monkeypatch.setattr(admin.shutil, "which", lambda _n: "/usr/bin/claude")
+
+    def fake_run(argv, **_kw):
+        if "remove" in argv:
+            return _FakeProc(returncode=1, stderr="remove exploded")
+        return _FakeProc(returncode=1, stderr="add exploded")
+
+    monkeypatch.setattr(admin.subprocess, "run", fake_run)
+    app = _reregister_app(
+        tmp_path,
+        {"backends": [{"name": "on1", "transport": "stdio", "command": "/bin/x"}]},
+    )
+    r = TestClient(app).post("/admin/api/cc-reregister-all", json={})
+    assert r.status_code == 200
+    (entry,) = r.json()["backends"]
+    assert entry["ok"] is False
+    assert entry["stderr"] == "add exploded"
+    assert entry["remove_error"] == "remove exploded"
+
+
+def test_reregister_all_tolerates_remove_failure_when_add_succeeds(
+    tmp_path, monkeypatch
+):
+    # remove failing is normal on a first registration — no remove_error field
+    # when the add succeeds (success-path response shape unchanged).
+    monkeypatch.setattr(admin.shutil, "which", lambda _n: "/usr/bin/claude")
+
+    def fake_run(argv, **_kw):
+        if "remove" in argv:
+            return _FakeProc(returncode=1, stderr="not registered")
+        return _FakeProc()
+
+    monkeypatch.setattr(admin.subprocess, "run", fake_run)
+    app = _reregister_app(
+        tmp_path,
+        {"backends": [{"name": "on1", "transport": "stdio", "command": "/bin/x"}]},
+    )
+    r = TestClient(app).post("/admin/api/cc-reregister-all", json={})
+    assert r.status_code == 200
+    (entry,) = r.json()["backends"]
+    assert entry["ok"] is True
+    assert "remove_error" not in entry

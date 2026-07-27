@@ -89,8 +89,9 @@ bearer_token = "${MCP_GATEWAY_TOKEN}"
 
 Supply the value through the environment or the gateway secrets file (see
 [Secrets handling](#secrets-handling)). The gateway resolves it **once** at
-startup; if the variable is missing, startup fails loudly rather than running
-unprotected.
+startup; if the variable is missing — or set but **empty** — startup fails
+loudly rather than running unprotected. An explicitly empty `bearer_token` is
+also rejected. The same rule applies to `oauth.admin_bearer_token`.
 
 **What it protects.** With a token set, every backend MCP endpoint requires
 `Authorization: Bearer <token>` — anything else gets a `401`. Crucially, **the

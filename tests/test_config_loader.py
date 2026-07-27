@@ -36,7 +36,7 @@ free_text = st.text(
 def gw_config_dict(draw) -> dict:
     names = draw(
         st.lists(
-            ident.filter(lambda name: name != "virtual"),
+            ident.filter(lambda name: name not in cl.RESERVED_BACKEND_NAMES),
             min_size=1,
             max_size=4,
             unique=True,
@@ -212,6 +212,19 @@ def test_expand_env_secrets_not_leaked_to_environ(monkeypatch, tmp_path):
     monkeypatch.delenv("LEAK_TOK", raising=False)
     assert cl.expand_env("${LEAK_TOK}") == "hush"
     assert "LEAK_TOK" not in os.environ
+
+
+def test_expand_env_required_returns_expanded_value(monkeypatch):
+    monkeypatch.setenv("REQ_TOK", "secret123")
+    assert cl.expand_env_required("${REQ_TOK}", "bearer_token") == "secret123"
+
+
+def test_expand_env_required_rejects_empty_expansion(monkeypatch):
+    # A configured-but-empty ${VAR} must fail loudly: downstream an empty
+    # token is indistinguishable from "no token" and auth is silently off.
+    monkeypatch.setenv("EMPTY_TOK", "")
+    with pytest.raises(cl.ConfigError, match="expands to an empty string"):
+        cl.expand_env_required("${EMPTY_TOK}", "bearer_token")
 
 
 def test_load_secrets_reloads_on_mtime_change(monkeypatch, tmp_path):
@@ -802,6 +815,27 @@ def test_backend_name_rejects_unsafe(bad):
         cl.Backend.model_validate(
             {"name": bad, "transport": "stdio", "command": "/bin/x"}
         )
+
+
+@pytest.mark.parametrize("reserved", ["virtual", "admin", "health", "ready"])
+def test_backend_name_reserved_is_rejected(reserved):
+    # Backends mount at /<name> and unmount by path-string equality: a backend
+    # named after a built-in route would shadow it, and removing that backend
+    # would strip the built-in route itself. /health and /ready are also
+    # bearer-auth exemptions, so a same-named backend would serve without auth.
+    with pytest.raises(cl.ConfigError, match="reserved"):
+        cl.GatewayConfig.model_validate(
+            {
+                "backends": [
+                    {"name": reserved, "transport": "stdio", "command": "/bin/x"}
+                ]
+            }
+        )
+
+
+def test_empty_bearer_token_is_rejected_before_nonloopback_guard():
+    with pytest.raises(cl.ConfigError, match="bearer_token must not be empty"):
+        cl.GatewayConfig.model_validate({"host": "0.0.0.0", "bearer_token": ""})
 
 
 def test_auth_fields_roundtrip_toml(monkeypatch):

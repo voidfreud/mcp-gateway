@@ -15,7 +15,9 @@ async def run_cli(
 
     A failed spawn or timeout is represented as ``(-1, "", error)`` so the
     caller can return a normal Admin response rather than breaking the event
-    loop or leaking a traceback into the dashboard.
+    loop or leaking a traceback into the dashboard. ``ValueError`` covers the
+    ``UnicodeDecodeError`` ``text=True`` raises when the child emits non-UTF-8
+    bytes.
     """
     try:
         result = await asyncio.to_thread(
@@ -27,5 +29,5 @@ async def run_cli(
             check=False,
         )
         return result.returncode, result.stdout, result.stderr
-    except (subprocess.SubprocessError, OSError) as exc:
+    except (subprocess.SubprocessError, OSError, ValueError) as exc:
         return -1, "", f"{type(exc).__name__}: {exc}"

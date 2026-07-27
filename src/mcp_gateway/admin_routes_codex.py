@@ -55,6 +55,13 @@ def codex_routes(  # noqa: PLR0915 - grouped registration endpoints share one po
         deps = deps_factory()
         return await admin_cli.run_cli(deps.subprocess_run, argv, deps.cli_timeout)
 
+    def _invalidate_registrations_cache() -> None:
+        """Drop the cached ``codex mcp list`` output after a successful
+        mutation, so the next non-fresh registrations GET re-runs the CLI."""
+        deps = deps_factory()
+        deps.cache["output"] = None
+        deps.cache["ts"] = 0.0
+
     def _binary() -> str | JSONResponse:
         deps = deps_factory()
         binary = deps.cli_path()
@@ -80,6 +87,8 @@ def codex_routes(  # noqa: PLR0915 - grouped registration endpoints share one po
         argv[0] = binary
         ctx.log.info("codex_registration_changed", backend=name, action="add")
         rc, stdout, stderr = await _cli_raw(argv)
+        if rc == 0:
+            _invalidate_registrations_cache()
         return JSONResponse(
             {
                 "ok": rc == 0,
@@ -116,6 +125,8 @@ def codex_routes(  # noqa: PLR0915 - grouped registration endpoints share one po
         argv[0] = binary
         ctx.log.info("codex_registration_changed", backend=name, action="remove")
         rc, stdout, stderr = await _cli_raw(argv)
+        if rc == 0:
+            _invalidate_registrations_cache()
         return JSONResponse(
             {
                 "ok": rc == 0,
