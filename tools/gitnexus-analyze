@@ -18,10 +18,9 @@ LOCK_FILE = Path.home() / ".gitnexus/analyze-global.lock"
 DEFAULT_ENV = {
     "GITNEXUS_EMBEDDING_URL": "https://openrouter.ai/api/v1",
     "GITNEXUS_EMBEDDING_MODEL": "qwen/qwen3-embedding-8b",
-    "GITNEXUS_EMBEDDING_DIMS": "4096",
-    "GITNEXUS_EMBEDDING_REQUEST_DIMS": "omit",
-    "GITNEXUS_EMBEDDING_BATCH_SIZE": "8",
-    "GITNEXUS_EMBEDDING_SUB_BATCH_SIZE": "8",
+    "GITNEXUS_EMBEDDING_DIMS": "2048",
+    "GITNEXUS_EMBEDDING_BATCH_SIZE": "32",
+    "GITNEXUS_EMBEDDING_SUB_BATCH_SIZE": "32",
     "GITNEXUS_EMBEDDING_MAX_ATTEMPTS": "5",
     "GITNEXUS_EMBEDDING_RETRY_CAP_MS": "30000",
     "GITNEXUS_EMBEDDING_MIN_INTERVAL_MS": "250",
@@ -91,9 +90,9 @@ def main() -> int:
         "--max-file-size",
         "512",
         "--embedding-batch-size",
-        "8",
+        "32",
         "--embedding-sub-batch-size",
-        "8",
+        "32",
     ]
     if args.name:
         command.extend(["--name", args.name])
