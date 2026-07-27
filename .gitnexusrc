@@ -1,0 +1,7 @@
+{
+  "indexOnly": true,
+  "name": "mcp-gateway",
+  "embeddings": true,
+  "workers": 4,
+  "maxFileSize": 512
+}

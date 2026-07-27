@@ -1,0 +1,54 @@
+# Documentation
+**/docs/
+**/doc/
+**/site/
+*.md
+*.mdx
+!README.md
+
+# Dependencies and vendored code
+**/node_modules/
+**/vendor/
+**/third_party/
+**/Pods/
+**/.venv/
+**/venv/
+
+# Generated and build output
+**/dist/
+**/build/
+**/out/
+**/target/
+**/coverage/
+**/.next/
+**/.nuxt/
+**/.cache/
+**/generated/
+**/__generated__/
+*.generated.*
+*.min.js
+*.min.css
+*.map
+
+# Media, archives, and compiled artifacts
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.webp
+*.svg
+*.ico
+*.pdf
+*.zip
+*.tar
+*.gz
+*.7z
+*.wasm
+*.dylib
+*.so
+*.dll
+*.a
+*.o
+*.class
+*.jar
+*.bin
