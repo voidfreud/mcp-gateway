@@ -77,10 +77,13 @@ def settings_routes(  # noqa: PLR0915
         """Clear all overrides for one tool (revert to the backend default)."""
         payload = await request.json()
         cfg = ctx.load()
-        b = next((x for x in cfg.backends if x.name == payload["backend"]), None)
-        if b is None:
-            return deps().error("unknown backend")
-        b.tools = [t for t in b.tools if t.original != payload["tool_original"]]
+        try:
+            b = next((x for x in cfg.backends if x.name == payload["backend"]), None)
+            if b is None:
+                return deps().error("unknown backend")
+            b.tools = [t for t in b.tools if t.original != payload["tool_original"]]
+        except (cl.ConfigError, KeyError) as exc:
+            return deps().error(str(exc))
         ctx.commit(cfg, payload["backend"])
         ctx.log.info(
             "tool_override_reset",
@@ -104,10 +107,13 @@ def settings_routes(  # noqa: PLR0915
         """#15: clear all overrides for one resource (revert to default)."""
         payload = await request.json()
         cfg = ctx.load()
-        b = next((x for x in cfg.backends if x.name == payload["backend"]), None)
-        if b is None:
-            return deps().error("unknown backend")
-        b.resources = [r for r in b.resources if r.uri != payload["uri"]]
+        try:
+            b = next((x for x in cfg.backends if x.name == payload["backend"]), None)
+            if b is None:
+                return deps().error("unknown backend")
+            b.resources = [r for r in b.resources if r.uri != payload["uri"]]
+        except (cl.ConfigError, KeyError) as exc:
+            return deps().error(str(exc))
         ctx.commit(cfg, payload["backend"])
         return JSONResponse({"ok": True})
 
@@ -126,10 +132,15 @@ def settings_routes(  # noqa: PLR0915
         """#15: clear all overrides for one prompt (revert to default)."""
         payload = await request.json()
         cfg = ctx.load()
-        b = next((x for x in cfg.backends if x.name == payload["backend"]), None)
-        if b is None:
-            return deps().error("unknown backend")
-        b.prompts = [p for p in b.prompts if p.original != payload["prompt_original"]]
+        try:
+            b = next((x for x in cfg.backends if x.name == payload["backend"]), None)
+            if b is None:
+                return deps().error("unknown backend")
+            b.prompts = [
+                p for p in b.prompts if p.original != payload["prompt_original"]
+            ]
+        except (cl.ConfigError, KeyError) as exc:
+            return deps().error(str(exc))
         ctx.commit(cfg, payload["backend"])
         return JSONResponse({"ok": True})
 
@@ -186,6 +197,8 @@ def settings_routes(  # noqa: PLR0915
         fresh cfg; persist and hot-reload only if EVERY item passes."""
         payload = await request.json()
         bundle = payload.get("settings") or payload
+        if not isinstance(bundle, dict):
+            return deps().error("settings must be a JSON object")
         mode = payload.get("mode", "merge")
         cfg = ctx.load()
         affected, errors = deps().import_settings(cfg, bundle, mode)

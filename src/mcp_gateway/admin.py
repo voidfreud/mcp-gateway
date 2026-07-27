@@ -926,7 +926,13 @@ def _override_vs_default(value, default) -> str | None:
 
     Empty -> inherit. Equal to the default -> inherit (keeps config.toml minimal,
     so a field prefilled with its default and left unchanged stores nothing).
+    A non-string, non-None value is rejected (400) instead of crashing the
+    UTF-8 encode / pydantic write downstream (500).
     """
+    if value is not None and not isinstance(value, str):
+        raise cl.ConfigError(
+            f"override value must be a string or null (got {type(value).__name__})"
+        )
     v = _clean(value)
     if v is None:
         return None
@@ -1698,7 +1704,9 @@ def codex_cli_path() -> str | None:
 
 def _needs_json(handler):
     """Wrap a body-reading route so a missing/malformed JSON body returns 400
-    instead of an unhandled ``JSONDecodeError`` → 500 + traceback (issue #48).
+    instead of an unhandled ``JSONDecodeError`` → 500 + traceback (issue #48),
+    and a syntactically valid but non-object body (``[1]``, ``"x"``, ``42``)
+    returns 400 instead of a ``TypeError``/``AttributeError`` in the handler.
 
     Starlette caches the parsed body on the request object, so the wrapped
     handler's own ``await request.json()`` reuses this parse at no extra cost.
@@ -1706,10 +1714,15 @@ def _needs_json(handler):
 
     async def guarded(request: Request):
         try:
-            await request.json()
+            body = await request.json()
         except (json.JSONDecodeError, ValueError):
             return JSONResponse(
                 {"ok": False, "error": "malformed or missing JSON body"},
+                status_code=400,
+            )
+        if not isinstance(body, dict):
+            return JSONResponse(
+                {"ok": False, "error": "JSON body must be an object"},
                 status_code=400,
             )
         return await handler(request)

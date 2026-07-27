@@ -734,14 +734,18 @@ def _build_app(  # noqa: PLR0913, PLR0915 — composition root; takes what it wi
     oauth_runtime = oauth.OAuthRuntime(cfg.oauth) if cfg.oauth is not None else None
     if cfg.oauth is not None:
         bearer_token = (
-            config_loader.expand_env(cfg.oauth.admin_bearer_token)
+            config_loader.expand_env_required(
+                cfg.oauth.admin_bearer_token, "oauth.admin_bearer_token"
+            )
             if cfg.oauth.admin_bearer_token
             else None
         )
         bearer_prefixes = ("/admin/api",)
     else:
         bearer_token = (
-            config_loader.expand_env(cfg.bearer_token) if cfg.bearer_token else None
+            config_loader.expand_env_required(cfg.bearer_token, "bearer_token")
+            if cfg.bearer_token
+            else None
         )
         bearer_prefixes = None
     # Populated in the lifespan; the admin closes over both (by reference) so its

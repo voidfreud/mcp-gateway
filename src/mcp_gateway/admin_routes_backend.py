@@ -174,8 +174,8 @@ def backend_routes(  # noqa: PLR0915
                 f"invalid backend name {new_name!r}: use only letters, digits, "
                 "'_' or '-' (max 64 chars)"
             )
-        if new_name == deps().virtual_route:
-            return deps().error("backend name 'virtual' is reserved for Virtual Tools")
+        if new_name in cl.RESERVED_BACKEND_NAMES:
+            return deps().error(f"backend name {new_name!r} is reserved")
         cfg = ctx.load()
         old_backend = next((x for x in cfg.backends if x.name == name), None)
         if old_backend is None:
@@ -257,8 +257,8 @@ def backend_routes(  # noqa: PLR0915
     ):
         """Import, introspect, persist, and hot-add a new backend."""
         payload = await request.json()
-        if payload.get("name") == deps().virtual_route:
-            return deps().error("backend name 'virtual' is reserved for Virtual Tools")
+        if payload.get("name") in cl.RESERVED_BACKEND_NAMES:
+            return deps().error(f"backend name {payload.get('name')!r} is reserved")
         if any(b.name == payload.get("name") for b in ctx.load().backends):
             return JSONResponse(
                 {"ok": False, "error": "backend name already exists"}, status_code=400

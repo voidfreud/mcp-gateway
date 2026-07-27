@@ -122,6 +122,22 @@ def test_set_instructions_cap_counts_utf8_bytes_not_chars(defaults_dir):
         admin.set_instructions(_single_cfg(), "b", at_cap + "\U0001f928")
 
 
+@pytest.mark.parametrize("bad", [123, 1.5, True, ["x"], {"x": 1}])
+def test_set_instructions_rejects_non_string_value(defaults_dir, bad):
+    # A non-string value must be a clean ConfigError (-> 400), not an
+    # AttributeError on .encode() downstream (-> 500).
+    with pytest.raises(cl.ConfigError, match="string or null"):
+        admin.set_instructions(_single_cfg(), "b", bad)
+
+
+def test_set_instructions_none_clears(defaults_dir):
+    cfg = _single_cfg()
+    admin.set_instructions(cfg, "b", "tuned")
+    assert cfg.backends[0].instructions == "tuned"
+    admin.set_instructions(cfg, "b", None)  # null = the intended "clear" path
+    assert cfg.backends[0].instructions is None
+
+
 # --- #81 FastMCP private-attr tripwire -------------------------------------
 
 
