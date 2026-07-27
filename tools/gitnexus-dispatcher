@@ -71,6 +71,23 @@ def read_secret(name: str) -> str | None:
             return value
     return None
 
+def with_analyze_defaults(args: list[str]) -> list[str]:
+    result = list(args)
+    if not any(arg == "--embeddings" or arg.startswith("--embeddings=") for arg in result):
+        result.extend(["--embeddings", "0"])
+    if "--index-only" not in result:
+        result.append("--index-only")
+    if not any(arg == "--workers" or arg.startswith("--workers=") for arg in result):
+        result.extend(["--workers", "4"])
+    if not any(arg == "--max-file-size" or arg.startswith("--max-file-size=") for arg in result):
+        result.extend(["--max-file-size", "512"])
+    if not any(arg == "--embedding-batch-size" or arg.startswith("--embedding-batch-size=") for arg in result):
+        result.extend(["--embedding-batch-size", "32"])
+    if not any(arg == "--embedding-sub-batch-size" or arg.startswith("--embedding-sub-batch-size=") for arg in result):
+        result.extend(["--embedding-sub-batch-size", "32"])
+    return result
+
+
 def command_args(argv: list[str]) -> list[str]:
     if os.environ.get("GITNEXUS_ANALYZE_COMPAT") == "1":
         sys.argv[0] = "gitnexus-analyze"
@@ -79,21 +96,9 @@ def command_args(argv: list[str]) -> list[str]:
         remaining = list(argv)
         if remaining and not remaining[0].startswith("-"):
             repo = remaining.pop(0)
-        args = ["analyze", str(Path(repo).expanduser().resolve())]
-        args.extend(remaining)
-        if not any(arg == "--embeddings" or arg.startswith("--embeddings=") for arg in args):
-            args.extend(["--embeddings", "0"])
-        if "--index-only" not in args:
-            args.append("--index-only")
-        if not any(arg == "--workers" or arg.startswith("--workers=") for arg in args):
-            args.extend(["--workers", "4"])
-        if not any(arg == "--max-file-size" or arg.startswith("--max-file-size=") for arg in args):
-            args.extend(["--max-file-size", "512"])
-        if not any(arg == "--embedding-batch-size" or arg.startswith("--embedding-batch-size=") for arg in args):
-            args.extend(["--embedding-batch-size", "32"])
-        if not any(arg == "--embedding-sub-batch-size" or arg.startswith("--embedding-sub-batch-size=") for arg in args):
-            args.extend(["--embedding-sub-batch-size", "32"])
-        return args
+        return with_analyze_defaults(["analyze", str(Path(repo).expanduser().resolve()), *remaining])
+    if argv and argv[0] == "analyze":
+        return with_analyze_defaults(argv)
     return argv
 
 
