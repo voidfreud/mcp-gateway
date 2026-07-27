@@ -32,14 +32,6 @@ WRITER_COMMANDS = {
     "wiki",
 }
 DEFAULT_ENV = {
-    "GITNEXUS_EMBEDDING_URL": "https://openrouter.ai/api/v1",
-    "GITNEXUS_EMBEDDING_MODEL": "qwen/qwen3-embedding-8b",
-    "GITNEXUS_EMBEDDING_DIMS": "2048",
-    "GITNEXUS_EMBEDDING_BATCH_SIZE": "32",
-    "GITNEXUS_EMBEDDING_SUB_BATCH_SIZE": "32",
-    "GITNEXUS_EMBEDDING_MAX_ATTEMPTS": "5",
-    "GITNEXUS_EMBEDDING_RETRY_CAP_MS": "30000",
-    "GITNEXUS_EMBEDDING_MIN_INTERVAL_MS": "250",
     "GITNEXUS_WORKER_POOL_SIZE": "4",
     "GITNEXUS_PARSE_CHUNK_CONCURRENCY": "1",
     "GITNEXUS_INDEX_LOCK_TIMEOUT_MS": "1800000",
@@ -49,6 +41,16 @@ DEFAULT_ENV = {
     "GITNEXUS_COMMUNITY_ENGINE": "graphology",
     "GITNEXUS_STREAM_GRAPH_EMIT": "1",
     "GITNEXUS_LBUG_EXTENSION_INSTALL": "load-only",
+}
+EMBEDDING_ENV = {
+    "GITNEXUS_EMBEDDING_URL": "https://openrouter.ai/api/v1",
+    "GITNEXUS_EMBEDDING_MODEL": "qwen/qwen3-embedding-8b",
+    "GITNEXUS_EMBEDDING_DIMS": "2048",
+    "GITNEXUS_EMBEDDING_BATCH_SIZE": "32",
+    "GITNEXUS_EMBEDDING_SUB_BATCH_SIZE": "32",
+    "GITNEXUS_EMBEDDING_MAX_ATTEMPTS": "5",
+    "GITNEXUS_EMBEDDING_RETRY_CAP_MS": "30000",
+    "GITNEXUS_EMBEDDING_MIN_INTERVAL_MS": "250",
 }
 
 
@@ -142,11 +144,20 @@ def main() -> int:
     command = next((arg for arg in args if not arg.startswith("-")), "")
     env = os.environ.copy()
     env.update(DEFAULT_ENV)
+    embedding_requested = command == "analyze" and any(
+        arg == "--embeddings" or arg.startswith("--embeddings=") for arg in args
+    )
+    if embedding_requested:
+        env.update(EMBEDDING_ENV)
+        api_key = env.get("OPENROUTER_API_KEY") or read_secret("OPENROUTER_API_KEY")
+        if api_key:
+            env["GITNEXUS_EMBEDDING_API_KEY"] = api_key
+    else:
+        for key in tuple(env):
+            if key.startswith("GITNEXUS_EMBEDDING_"):
+                env.pop(key)
     if command == "mcp":
         env["GITNEXUS_MCP_READ_ONLY"] = "1"
-    api_key = env.get("OPENROUTER_API_KEY") or read_secret("OPENROUTER_API_KEY")
-    if api_key:
-        env["GITNEXUS_EMBEDDING_API_KEY"] = api_key
 
     LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
     if command not in WRITER_COMMANDS:
