@@ -833,6 +833,11 @@ def test_backend_name_reserved_is_rejected(reserved):
         )
 
 
+def test_empty_bearer_token_is_rejected_before_nonloopback_guard():
+    with pytest.raises(cl.ConfigError, match="bearer_token must not be empty"):
+        cl.GatewayConfig.model_validate({"host": "0.0.0.0", "bearer_token": ""})
+
+
 def test_auth_fields_roundtrip_toml(monkeypatch):
     cfg = cl.GatewayConfig.model_validate(
         {

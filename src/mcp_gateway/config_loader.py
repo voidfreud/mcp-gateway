@@ -931,6 +931,8 @@ class GatewayConfig(BaseModel, extra="forbid"):
         duplicate_ids = {value for value in backend_ids if backend_ids.count(value) > 1}
         if duplicate_ids:
             raise ConfigError(f"duplicate backend id(s): {sorted(duplicate_ids)}")
+        if self.bearer_token == "":
+            raise ConfigError("bearer_token must not be empty")
         if self.bearer_token is not None and self.oauth is not None:
             raise ConfigError(
                 "bearer_token and oauth are mutually exclusive; choose one "
