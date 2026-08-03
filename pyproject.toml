@@ -56,7 +56,7 @@ dev = [
     "jsonschema>=4.26.0",
     "pip-audit==2.9.0",
     "pytest>=9.1.1",
-    "ruff==0.15.22",
+    "ruff==0.16.1",
     # Advisory only until the tracked type-debt Issue is resolved.  Keep the
     # baseline reproducible without adding suppressions or source exclusions.
     "ty==0.0.61",
