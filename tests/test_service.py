@@ -319,6 +319,7 @@ def test_first_run_decline_is_prompted_once_then_runs_foreground(tmp_path, monke
     paths = _paths(tmp_path)
     starts: list[bool] = []
     monkeypatch.setattr(service, "service_paths", lambda: paths)
+    monkeypatch.setattr(service.sys, "platform", "darwin")
     monkeypatch.setattr(cli, "_run_foreground", lambda: starts.append(True))
     first_output = TTY()
 
