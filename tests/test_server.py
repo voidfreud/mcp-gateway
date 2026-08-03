@@ -125,6 +125,8 @@ def _bearer_app(token):
             Route("/b/mcp", ping, methods=["GET"]),
             Route("/health", ping, methods=["GET"]),
             Route("/ready", ping, methods=["GET"]),
+            Route("/health-check/mcp", ping, methods=["GET"]),
+            Route("/ready-api/mcp", ping, methods=["GET"]),
             Route("/admin/api/state", ping, methods=["GET"]),
             Route("/admin/api/run", ping, methods=["POST"]),
             Route("/admin", ping, methods=["GET", "POST"]),
@@ -172,6 +174,8 @@ def test_bearer_exempts_health_ready_and_admin_page_only():
         assert client.get(path).status_code == 200, path
     assert client.get("/admin/api/state").status_code == 401
     assert client.post("/admin/api/run").status_code == 401
+    for path in ("/health-check/mcp", "/ready-api/mcp"):
+        assert client.get(path).status_code == 401, path
     assert (
         client.get(
             "/admin/api/state", headers={"Authorization": "Bearer sekret"}

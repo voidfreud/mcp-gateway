@@ -422,7 +422,7 @@ class BearerAuthMiddleware:
     body plus the ``WWW-Authenticate: Bearer`` challenge.
     """
 
-    EXEMPT_PREFIXES = ("/health", "/ready")
+    EXEMPT_PATHS = frozenset(("/health", "/ready"))
 
     def __init__(
         self,
@@ -440,7 +440,7 @@ class BearerAuthMiddleware:
         if (
             self._expected is None  # no token configured -> zero overhead
             or scope["type"] != "http"
-            or path.startswith(self.EXEMPT_PREFIXES)
+            or path in self.EXEMPT_PATHS
             # the UI shell only — it carries no data and prompts for the token
             or (path == "/admin" and scope.get("method") == "GET")
             or (
