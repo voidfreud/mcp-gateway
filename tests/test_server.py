@@ -2067,6 +2067,22 @@ def test_admin_html_import_registers_by_backend_name():
     assert "await registerCodex(r.backend);" in text
 
 
+def test_admin_html_has_update_check_contract():
+    text = (REPO_ROOT / "src" / "mcp_gateway" / "admin.html").read_text(
+        encoding="utf-8"
+    )
+    assert "const updateAvailable = update.available === true;" in text
+    assert "const updateBadge = updateAvailable" in text
+    assert "Update ${esc(latestVersion)} available" in text
+    assert "<code>mcp-gateway update</code>" in text
+    assert "It sends the installed version in the User-Agent" in text
+    assert "offline failures are tolerated" in text
+    assert "updates are never applied automatically" in text
+    assert "STATE.update_check === true ? 'checked' : ''" in text
+    assert "${STATE.update_check === true ? 'On' : 'Off'}" in text
+    assert "update_check: $('#set_update_check').checked === true" in text
+
+
 def test_admin_html_has_first_class_virtual_tools_surface():
     text = (REPO_ROOT / "src" / "mcp_gateway" / "admin.html").read_text(
         encoding="utf-8"
@@ -2442,6 +2458,7 @@ def test_settings_get_returns_current(tmp_path, monkeypatch):
         "log_level": "INFO",
         "log_max_bytes": 5 * 1024 * 1024,
         "log_backup_count": 5,
+        "update_check": True,
     }
 
 
@@ -2543,6 +2560,144 @@ def test_build_state_surfaces_gateway_settings(tmp_path):
     st = admin.build_state(cfg)
     assert st["bearer_token"] == "${TOK}"  # the ${ENV} REF, never resolved
     assert st["introspect_interval"] == 30
+
+
+# ---------------------------------------------------------------------------
+# #A8 — update-check toggle: state shape, settings API, lifespan monitor wiring
+# ---------------------------------------------------------------------------
+
+
+_STATUS = {
+    "current_version": "1.2.3",
+    "latest_version": "1.2.4",
+    "available": True,
+    "checked_at": "2026-08-03T00:00:00+00:00",
+    "error": None,
+}
+
+
+def test_build_state_surfaces_update_check_and_status(tmp_path, monkeypatch):
+    monkeypatch.setattr(admin.updates, "current_status", lambda: _STATUS)
+    cfg = cl.GatewayConfig.model_validate(
+        {
+            "update_check": False,
+            "backends": [{"name": "b", "transport": "stdio", "command": "/bin/x"}],
+        }
+    )
+    st = admin.build_state(cfg)
+    assert st["update_check"] is False
+    # the EXACT shared status mapping — no paths, credentials, or internals
+    assert st["update"] == _STATUS
+    assert set(_STATUS) == {
+        "current_version",
+        "latest_version",
+        "available",
+        "checked_at",
+        "error",
+    }
+
+
+def test_state_endpoint_includes_update_mapping(tmp_path, monkeypatch):
+    monkeypatch.setattr(admin.updates, "current_status", lambda: _STATUS)
+    j = TestClient(_admin_app(tmp_path)).get("/admin/api/state").json()
+    assert j["update_check"] is True  # default on
+    assert j["update"] == _STATUS
+
+
+def test_settings_get_returns_update_check(tmp_path, monkeypatch):
+    monkeypatch.setattr(admin, "under_launchd", lambda: False)
+    j = TestClient(_admin_app(tmp_path)).get("/admin/api/settings").json()
+    assert j["update_check"] is True
+
+
+def test_settings_put_update_check_persists(tmp_path, monkeypatch):
+    monkeypatch.setattr(admin, "under_launchd", lambda: False)
+    client = TestClient(_admin_app(tmp_path))
+    r = client.put("/admin/api/settings", json={"update_check": False})
+    assert r.status_code == 200
+    cfg = cl.load(_cfg_path(tmp_path))
+    assert cfg.update_check is False
+    # readable back through GET, and the TOML carries the explicit opt-out
+    assert client.get("/admin/api/settings").json()["update_check"] is False
+    assert "update_check = false" in Path(_cfg_path(tmp_path)).read_text()
+
+
+@pytest.mark.parametrize("bad", [0, 1, "false", "yes", None, [], {}])
+def test_settings_put_rejects_non_boolean_update_check(tmp_path, bad):
+    r = TestClient(_admin_app(tmp_path)).put(
+        "/admin/api/settings", json={"update_check": bad}
+    )
+    assert r.status_code == 400
+    assert "update_check" in r.json()["error"]
+
+
+def test_settings_put_update_check_dev_reports_no_restart(tmp_path, monkeypatch):
+    monkeypatch.setattr(admin, "under_launchd", lambda: False)
+    r = TestClient(_admin_app(tmp_path)).put(
+        "/admin/api/settings", json={"update_check": False}
+    )
+    assert r.json()["reloaded"] == "dev-no-restart"
+
+
+def test_settings_put_update_check_managed_reports_restarting(tmp_path, monkeypatch):
+    monkeypatch.setattr(admin, "under_launchd", lambda: True)
+    calls = []
+    monkeypatch.setattr(admin, "restart_daemon", lambda log: calls.append(1))
+    r = TestClient(_admin_app(tmp_path)).put(
+        "/admin/api/settings", json={"update_check": False}
+    )
+    assert r.json()["reloaded"] == "restarting"
+    assert calls == [1]
+
+
+async def _monitor_stub(log, calls):
+    calls.append(1)
+    await anyio.sleep(3600)
+
+
+def test_update_check_disabled_starts_no_monitor(tmp_path, monkeypatch):
+    # opt-out must mean ZERO monitor execution: no task, no network call
+    calls = []
+    monkeypatch.setattr(
+        server.updates, "monitor", lambda log: _monitor_stub(log, calls)
+    )
+    cfg = cl.GatewayConfig.model_validate({"update_check": False, "backends": []})
+    cl.save(cfg, str(tmp_path / "config.toml"))
+    app = server._build_app(
+        cfg,
+        structlog.get_logger("test"),
+        {},
+        {},
+        {},
+        config_path=str(tmp_path / "config.toml"),
+    )
+    with TestClient(app) as client:
+        assert client.get("/health").status_code == 200
+    assert calls == []
+
+
+def test_update_check_enabled_starts_exactly_one_monitor(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        server.updates, "monitor", lambda log: _monitor_stub(log, calls)
+    )
+    # the sleeping stub only ends via the shutdown-grace cancellation; shrink
+    # the grace so the test exits fast (no backends need real unwind time)
+    monkeypatch.setattr(server, "SHUTDOWN_GRACE", 0.2)
+    cfg = cl.GatewayConfig.model_validate({})  # update_check defaults True
+    cl.save(cfg, str(tmp_path / "config.toml"))
+    app = server._build_app(
+        cfg,
+        structlog.get_logger("test"),
+        {},
+        {},
+        {},
+        config_path=str(tmp_path / "config.toml"),
+    )
+    with TestClient(app) as client:
+        assert client.get("/health").status_code == 200
+    # exactly one monitor task ran for this lifespan, and shutdown cancelled it
+    assert calls == [1]
 
 
 # ---------------------------------------------------------------------------

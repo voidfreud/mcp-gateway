@@ -26,6 +26,9 @@ log_file = "~/.local/state/mcp-gateway/gateway.log"
 #                           # 86400 (24h); 0 = refresh on every mount. The
 #                           # event-driven refreshes (tools/list_changed,
 #                           # admin page load, Re-inspect) are never gated.
+# update_check = true       # check PyPI at startup and daily for a newer stable
+#                           # release; offline-tolerant and never auto-applies.
+#                           # Set false for zero update-check network requests.
 
 # Optional defense-in-depth (#26): require this bearer token on every backend
 # MCP endpoint AND the admin API (/health, /ready and the bare GET /admin page

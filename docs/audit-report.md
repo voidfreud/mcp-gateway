@@ -48,18 +48,22 @@ Priority-ordered hardening plan derived from the compliance audit (#322–#358) 
 
 **Decision:** Option A is accepted in [ADR-0010](decisions/0010-resident-launchagent.md). It preserves the existing shared endpoint/admin model and low first-call latency. Option B remains the documented zero-residency alternative if measured operating cost later outweighs those benefits; Option C remains a product-boundary change. The update implication is explicit: resident mode requires a controlled restart and health/readiness verification after a binary swap.
 
-**A8 — Update story: ship, apply, roll back (blocked on a working release lane):**
+**A8 — Update story: ship, apply, roll back ([#254](https://github.com/voidfreud/mcp-gateway/issues/254)) — implemented
+2026-08-03; first public publish awaits one-time PyPI Trusted Publisher registration:**
 
 | # | Requirement | Ref | Acceptance |
 |---|-------------|-----|------------|
-| 1 | **Auth-free distribution** — publish wheels to PyPI (or a private index with no interactive auth); `gh auth login` + `gh release download` becomes fallback-only for private artifacts. New-user install/upgrade = `uv tool install` / `uv tool upgrade`, zero auth ceremony. | #166 (release PR stuck); Release.3/4 | Fresh user installs and upgrades with no gh/auth step |
-| 2 | **`mcp-gateway update` command** — check latest → `uv tool install --reinstall <latest>` → re-render plist if the template version changed (A7 req 2) → `launchctl kickstart -k` → wait /health + /ready → report old→new version. Generalizes the existing `just update` to the uv layout. | A7 req 2; justfile update | One command upgrades a running daemon and verifies it |
-| 3 | **Notify, don't auto-apply** — daemon checks latest on startup + daily (single lightweight GET, offline-tolerant); admin UI badge + log line; `update_check` config toggle for privacy/offline. No silent self-update. | README network-behavior note | Badge + one-command apply; toggle works offline |
-| 4 | **Boring rollback** — versions are immutable wheels: `uv tool install mcp-gateway==<prev>` + restart. Updates never touch config/state (binary swap only); existing backups + boot-time recovery cover config-side regressions. | backups (#172), recovery path | Documented one-command rollback path |
-| 5 | **New-user narrative documented** — install → daily badge → `mcp-gateway update` → rollback → uninstall order, spelled out in README + first-run message ("later: run `mcp-gateway update`"). | README | Flow described end to end |
-| 6 | **Availability-model interaction** — socket activation (Option B) eliminates the restart step entirely: upgrade = binary swap, next connect runs the new code. Recorded as an input to the mandatory A7 decision. | A7 decision block | Decision rationale mentions update implications |
+| 1 | **[IMPLEMENTED] Auth-free distribution** — the public distribution is `mcp-local-gateway`; the command/import remain `mcp-gateway` / `mcp_gateway`. Tagged releases publish the verified wheel and sdist through OIDC; private checksummed GitHub artifacts are fallback-only. | Release.3/4 | Package metadata, clean-wheel install receipt, pinned publish job, and GitHub `pypi` environment verified; pending publisher must be registered before first publish |
+| 2 | **[DONE] `mcp-gateway update` command** — resolves/validates a stable PyPI version, installs that exact version with `uv`, verifies the shim, restarts an existing resident service through the application-owned lifecycle, and requires health/readiness. | A7 req 2; justfile update | Focused success, no-op, unpublished-refusal, resident-restart, and CLI contracts green |
+| 3 | **[DONE] Notify, don't auto-apply** — one immediate/daily bounded request, offline-tolerant status/logging, conditional Admin badge, and strict `update_check` opt-out. | README network-behavior note | Disabled lifespan starts zero monitors; enabled starts one; Admin/config/UI contracts green |
+| 4 | **[DONE] Deterministic rollback** — activation failure reinstalls/verifies the old exact PyPI version and restarts the previous resident service; `update --version X.Y.Z` is the deliberate rollback path. Package changes never touch user config/state. | backups (#172), recovery path | Failure-path package/service rollback contract green |
+| 5 | **[DONE] New-user narrative documented** — auth-free install, resident setup, update notice, one-command apply, exact rollback, uninstall, privacy, and fallback artifacts are covered by the owning guides. | README | README + installation/operations/releases/security/config/Admin/API docs updated |
+| 6 | **[DONE] Availability-model interaction** — ADR-0010 chooses the resident daemon and records controlled restart plus readiness verification after binary swaps. | A7 decision block | Decision rationale and implementation agree |
 
-**Sequencing notes:** A8 is blocked on the release lane (#166) and the distribution choice — implementation order: fix release lane → PyPI publish step in release-please.yml → `update` command → notify/badge → docs.
+**Operational prerequisite:** create the pending PyPI Trusted Publisher for
+`voidfreud/mcp-gateway`, workflow `release-please.yml`, environment `pypi`, and
+project `mcp-local-gateway`; then the next Release Please tag performs the first
+public publish without a stored token.
 
 **Sequencing notes:** A0 first (one line, unblocks every fresh install). A1+A2 next (your own bugs, no fixture work, ~a day); A3 is the largest chunk and should drive fixing the SDK-inherited error-code/timeout violations; A4–A5 land as regression locks while A3's red items get fixed; A7 (self-install) is independent — it absorbs A0's fix at the source and is a natural follow-up once the daemon lifecycle is stable. Do **not** run conformance scenarios for capabilities the gateway deliberately does not advertise (false failures → gate noise), and do **not** build a custom protocol test framework — the official suite is the framework, everything else is targeted nets.
 

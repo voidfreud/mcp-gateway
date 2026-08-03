@@ -12,7 +12,7 @@ from mcp_gateway.metadata import gateway_version
 USAGE = """usage: mcp-gateway [--version | --foreground |
                    --install-service [--restart] |
                    --uninstall-service [--keep-data | --purge-data] |
-                   --service-status]"""
+                   --service-status | update [--version X.Y.Z]]"""
 
 
 def _answer(prompt: str, *, stdin: TextIO, stdout: TextIO) -> str:
@@ -91,6 +91,24 @@ def _uninstall(args: list[str], *, stdin: TextIO, stdout: TextIO) -> None:
         stdout.write("service was already absent\n")
 
 
+def _update(args: list[str], *, stdout: TextIO) -> None:
+    if args == ["update"]:
+        version = None
+    elif len(args) == 3 and args[:2] == ["update", "--version"]:
+        version = args[2]
+    else:
+        raise SystemExit(2)
+    result = service.update_application(version)
+    if not result.changed:
+        stdout.write(f"mcp-gateway {result.installed_version} is already installed\n")
+        return
+    stdout.write(
+        f"updated mcp-gateway {result.previous_version} -> {result.installed_version}\n"
+    )
+    if result.service_restarted:
+        stdout.write("resident service restarted and health/readiness verified\n")
+
+
 def _dispatch_explicit(args: list[str], *, stdin: TextIO, stdout: TextIO) -> bool:
     if args and args[0] == "--install-service":
         if args not in (["--install-service"], ["--install-service", "--restart"]):
@@ -109,6 +127,9 @@ def _dispatch_explicit(args: list[str], *, stdin: TextIO, stdout: TextIO) -> boo
                 "service status is available only for the macOS resident service"
             )
         _print_status(service.resource_status(), stdout=stdout)
+        return True
+    if args and args[0] == "update":
+        _update(args, stdout=stdout)
         return True
     if args == ["--foreground"]:
         service.refresh_installed_service()

@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "mcp-gateway"
+name = "mcp-local-gateway"
 version = "1.1.0"
 description = "Independent MCP gateway with per-backend proxy and virtual-tool endpoints"
 readme = "README.md"
@@ -14,11 +14,11 @@ license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "voidfreud" }]
 keywords = ["mcp", "proxy", "fastmcp", "claude-code", "gateway"]
-# Distribution is uv/uvx straight from the GitHub repo (by choice, 2026-07-12);
-# the classifier below blocks an accidental PyPI upload — the name is taken
-# there anyway.
+# The PyPI distribution name is mcp-local-gateway (the mcp-gateway name is
+# taken there). The import package and console command stay mcp_gateway /
+# mcp-gateway. No blocker classifier: tagged releases publish to PyPI via
+# Trusted Publishing.
 classifiers = [
-    "Private :: Do Not Upload",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Topic :: Software Development :: Libraries",

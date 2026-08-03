@@ -1,8 +1,9 @@
 # Releases
 
-This is the canonical release process for mcp-gateway. Releases are GitHub
-Releases for this private repository; mcp-gateway is never published to PyPI.
-For the verification tiers and the redacted local release receipt, see
+This is the canonical release process for mcp-gateway. Every release publishes
+the `mcp-local-gateway` distribution to public PyPI through OIDC Trusted
+Publishing and retains checksummed artifacts in this private repository's
+GitHub Release. For verification tiers and the redacted local receipt, see
 [testing and verification](testing.md).
 
 ## Version policy
@@ -34,12 +35,16 @@ bootstrap expectation, not a version to set by hand.
    bump for ordinary changes.
 3. A human reviews that release pull request and its required CI, then
    squash-merges it.
-4. Release Please creates the `vX.Y.Z` tag and its GitHub Release.
-   The release workflow rebuilds and verifies the wheel and source archive,
-   uploads them with `SHA256SUMS`, and uploads an SBOM when one is produced.
+4. Release Please creates the `vX.Y.Z` tag and GitHub Release. The release
+   workflow rebuilds and verifies one wheel plus one source archive, uploads
+   them with `SHA256SUMS` and an SBOM when available, then publishes exactly
+   those wheel/source artifacts to PyPI through short-lived OIDC.
 
-No PyPI publishing occurs. The tracked workflow is the authority for the exact
-assets and checks.
+The `mcp-local-gateway` distribution exposes the unchanged `mcp-gateway`
+command and `mcp_gateway` import. There is no long-lived PyPI API token in
+GitHub; the pinned publisher action receives `id-token: write` only in its
+dedicated `pypi` environment job. Manual artifact-repair dispatches never
+publish to PyPI.
 
 ## Release verification evidence
 
@@ -84,6 +89,26 @@ This guide describes the required setup; it does not claim that the repository
 settings are already configured. Confirm them in GitHub before relying on a
 release run.
 
+### PyPI Trusted Publisher
+
+Create the public PyPI project `mcp-local-gateway` with a pending Trusted
+Publisher before the first release. In the PyPI publishing form, use:
+
+| Field | Value |
+| --- | --- |
+| PyPI project | `mcp-local-gateway` |
+| GitHub owner | `voidfreud` |
+| Repository | `mcp-gateway` |
+| Workflow | `release-please.yml` |
+| Environment | `pypi` |
+
+The repository must also have a GitHub Actions environment named `pypi`.
+Environment reviewers are optional; add them if releases require an explicit
+human deployment approval. Do not configure a `PYPI_TOKEN` secret. After the
+first successful OIDC publication converts the pending publisher into the live
+project, verify the project name, release files, hashes, metadata, and Trusted
+Publisher association on PyPI.
+
 GitHub's repository-level **Immutable Releases** setting is a separate GitHub
 policy. The workflow neither enables nor verifies it. Enable and verify that
 setting in GitHub if platform-enforced release immutability is required; do not
@@ -105,40 +130,55 @@ releases, and do not use the artifact-repair workflow for a missing release
 trigger.
 
 After a tag and GitHub Release exist, never retag, delete, or rewrite normal
-release history. For an artifact-upload failure only, use the documented manual
-`workflow_dispatch` repair path. It checks the existing published release at
-the selected tag and SHA, verifies the rebuilt checksums, skips byte-identical
-assets, uploads only missing approved asset names, and fails rather than
-overwriting a byte-mismatched or unexpected existing asset. For any code,
-metadata, or release-note correction, ship a new corrective SemVer release
-instead. If a Release Please label becomes stale, close the obsolete release
-pull request or remove the stale release label and let the automation propose
-the current release again; investigate workflow logs and repository setup before
-manually editing release files.
+release history. For a GitHub artifact-upload failure only, use the documented
+manual `workflow_dispatch` repair path. It checks the existing published release
+at the selected tag and SHA, verifies rebuilt checksums, skips byte-identical
+assets, uploads only missing approved names, and fails rather than overwriting a
+byte-mismatched or unexpected asset.
+
+The repair dispatch deliberately does not publish to PyPI. If the initial PyPI
+job failed before upload, correct its environment/Trusted Publisher setup and
+rerun that failed workflow job. For code, metadata, release-note, or already
+published package corrections, ship a new corrective SemVer release. If a
+Release Please label becomes stale, close the obsolete release pull request or
+remove the stale release label and let automation propose the current release;
+investigate workflow logs and repository setup before manually editing release
+files.
 
 Attestation, provenance, and broader security policy are tracked in Issue
 [#201](https://github.com/voidfreud/mcp-gateway/issues/201). Final release
 acceptance is tracked in Issue
 [#212](https://github.com/voidfreud/mcp-gateway/issues/212).
 
-## Installing a private release
+## Installing a release
 
-Use a GitHub account authorized for this private repository, then download a
-specific release and verify it before installing its wheel:
+The normal path needs no GitHub account or repository access:
+
+```bash
+uv tool install mcp-local-gateway
+mcp-gateway --version
+```
+
+For an exact update or rollback after installation:
+
+```bash
+mcp-gateway update --version X.Y.Z
+```
+
+The private GitHub Release remains a verifiable fallback. Use an authorized
+GitHub account, download the chosen release, and verify every asset:
 
 ```bash
 gh auth login
 gh release download vX.Y.Z --repo voidfreud/mcp-gateway --dir mcp-gateway-vX.Y.Z
 cd mcp-gateway-vX.Y.Z
 shasum -a 256 -c SHA256SUMS
-uv tool install --reinstall ./mcp_gateway-*.whl
+uv tool install --reinstall ./*.whl
 mcp-gateway --version
 ```
 
-Replace `vX.Y.Z` with the latest GitHub Release tag after reviewing its notes.
-On systems without `shasum`, use an equivalent SHA-256 checker. This is the
-stable installation path. A tag-pinned Git install is only a developer
-convenience, not a release artifact:
+On systems without `shasum`, use an equivalent SHA-256 checker. A tag-pinned Git
+install is a developer convenience, not a release artifact:
 
 ```bash
 uv tool install "git+https://github.com/voidfreud/mcp-gateway@vX.Y.Z"

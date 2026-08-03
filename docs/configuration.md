@@ -29,6 +29,7 @@ log_file = "~/.local/state/mcp-gateway/gateway.log"
 # log_backup_count = 5
 # introspect_interval = 0
 # baseline_max_age = 86400
+# update_check = true
 # bearer_token = "${MCP_GATEWAY_TOKEN}"
 
 # Remote OAuth resource-server mode (mutually exclusive with bearer_token):
@@ -82,6 +83,7 @@ diff-vs-default model (see below).
 | `log_backup_count` | integer | `5` | Number of rotated files retained in addition to the active file (1–100). |
 | `introspect_interval` | integer (seconds) | `0` (off) | How often to re-scan every backend's tool list on a timer. `0` means off, which is the recommended default — the gateway already refreshes on reconnect, on a backend's own change notification, and on admin page load. Set an interval only for a long-lived remote backend that silently swaps its tools. |
 | `baseline_max_age` | integer (seconds) | `86400` (24 h) | How long a captured baseline counts as fresh for the **post-mount** refresh: at boot (or remount) a backend whose stored baseline is younger than this is not re-introspected, sparing slow stdio backends a second cold start per boot. `0` disables the gate (re-capture on every mount). Only the mount-time trigger is gated — a backend's own change notification, an admin page load, and the manual Re-inspect button always refresh. |
+| `update_check` | boolean | `true` | Check the fixed public PyPI project once at startup and every 24 hours. The check sends the installed gateway version in its User-Agent, has a 10-second timeout, tolerates offline/error responses, and never applies an update. Set `false` for zero update-check network requests; the Admin UI exposes the same toggle. |
 | `bearer_token` | string or unset | unset | Optional access token. When set (as a `${ENV}` reference), every backend endpoint **and** the admin API require `Authorization: Bearer <token>`. See [security.md](security.md#the-optional-bearer-token). |
 | `oauth` | table or unset | unset | JWT resource-server profile for standard remote OAuth. Mutually exclusive with `bearer_token`; protects each backend and `/virtual/mcp` independently. See [OAuth resource-server mode](#oauth-resource-server-mode). |
 | `backends` | list | empty | One `[[backends]]` block per backend. An empty configuration is valid: the Admin UI remains available to add or import backends, and `/virtual/mcp` remains mounted with an empty catalog. No backend MCP endpoint is available until a backend is configured and mounted. |
