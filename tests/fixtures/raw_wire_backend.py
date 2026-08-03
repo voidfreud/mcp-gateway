@@ -10,10 +10,13 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import anyio
 import uvicorn
 from fastmcp import FastMCP
 from starlette.applications import Starlette
-from starlette.routing import Mount
+from starlette.requests import Request
+from starlette.responses import PlainTextResponse
+from starlette.routing import Mount, Route
 
 
 def _write_ready(path: Path, *, name: str, port: int) -> None:
@@ -24,9 +27,25 @@ def _write_ready(path: Path, *, name: str, port: int) -> None:
     )
 
 
-def build_app(name: str, event_file: Path) -> Starlette:
-    """Expose three stable tools whose responses identify their backend."""
+def build_app(name: str, event_file: Path, *, hang_initialize: bool) -> Starlette:
+    """Expose deterministic tools/prompts, or an initialization black hole."""
     event_file.parent.mkdir(parents=True, exist_ok=True)
+
+    async def health(_request: Request) -> PlainTextResponse:
+        return PlainTextResponse("ok")
+
+    if hang_initialize:
+
+        async def hang(_request: Request) -> None:
+            await anyio.sleep_forever()
+
+        return Starlette(
+            routes=[
+                Route("/health", health),
+                Route("/mcp", hang, methods=["POST"]),
+            ]
+        )
+
     mcp = FastMCP(name=f"raw-wire-fixture-{name}")
 
     def record(tool: str, **fields: object) -> None:
@@ -52,6 +71,22 @@ def build_app(name: str, event_file: Path) -> Starlette:
         record("fail")
         raise ValueError(f"{name} forced failure")
 
+    @mcp.tool
+    async def hang() -> str:
+        """Never return, so the gateway's backend request deadline is observable."""
+        record("hang")
+        await anyio.sleep_forever()
+
+    @mcp.prompt
+    def required_prompt(text: str) -> str:
+        """Return a prompt that requires one argument."""
+        return f"{name}:{text}"
+
+    @mcp.prompt
+    def broken_prompt() -> str:
+        """Raise an exception for JSON-RPC error-code coverage."""
+        raise RuntimeError(f"{name} prompt failure")
+
     mcp_app = mcp.http_app(path="/mcp")
 
     @asynccontextmanager
@@ -59,7 +94,10 @@ def build_app(name: str, event_file: Path) -> Starlette:
         async with mcp_app.lifespan(mcp_app):
             yield
 
-    return Starlette(routes=[Mount("/", app=mcp_app)], lifespan=lifespan)
+    return Starlette(
+        routes=[Route("/health", health), Mount("/", app=mcp_app)],
+        lifespan=lifespan,
+    )
 
 
 def main() -> None:
@@ -68,10 +106,15 @@ def main() -> None:
     parser.add_argument("--port", required=True, type=int)
     parser.add_argument("--ready-file", required=True, type=Path)
     parser.add_argument("--event-file", required=True, type=Path)
+    parser.add_argument("--hang-initialize", action="store_true")
     args = parser.parse_args()
     _write_ready(args.ready_file, name=args.name, port=args.port)
     uvicorn.run(
-        build_app(args.name, args.event_file),
+        build_app(
+            args.name,
+            args.event_file,
+            hang_initialize=args.hang_initialize,
+        ),
         host="127.0.0.1",
         port=args.port,
         log_level="warning",

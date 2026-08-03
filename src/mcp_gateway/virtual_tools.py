@@ -23,6 +23,7 @@ from fastmcp.tools import Tool, ToolResult
 from mcp.types import TextContent
 from pydantic import PrivateAttr
 
+from mcp_gateway import __version__
 from mcp_gateway import config_loader as cl
 
 VIRTUAL_ROUTE = "virtual"
@@ -713,6 +714,8 @@ def build_virtual_server(  # noqa: PLR0913 - explicit lifecycle and auth depende
 ) -> FastMCP:
     server = FastMCP(
         name="mcp-gateway-virtual",
+        version=__version__,
+        dereference_schemas=False,
         list_page_size=cl.DOWNSTREAM_TOOLS_PAGE_SIZE,
         auth=auth,
     )

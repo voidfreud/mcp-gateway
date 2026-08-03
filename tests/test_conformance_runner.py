@@ -47,3 +47,34 @@ def test_node_fixture_pins_the_conformance_package_with_integrity() -> None:
     )
     assert installed["version"] == "0.1.16"
     assert installed["integrity"].startswith("sha512-")
+
+
+def test_official_runner_documents_every_server_scenario() -> None:
+    runner = _runner_module()
+    official = set(runner.OFFICIAL_SERVER_SCENARIOS)
+    applicable = set(runner.SCENARIOS)
+    skipped = set(runner.SKIPPED_SCENARIOS)
+
+    assert len(official) == 32
+    assert applicable.isdisjoint(skipped)
+    assert applicable | skipped == official
+    assert all(runner.SKIPPED_SCENARIOS.values())
+    assert {
+        "tools-call-image",
+        "tools-call-audio",
+        "tools-call-embedded-resource",
+        "tools-call-mixed-content",
+        "json-schema-2020-12",
+        "server-sse-multiple-streams",
+        "prompts-get-with-image",
+        "dns-rebinding-protection",
+    } <= applicable
+
+
+def test_official_runner_exercises_the_persistent_proxy(tmp_path: Path) -> None:
+    runner = _runner_module()
+    config_path = tmp_path / "config.toml"
+
+    runner._write_config(config_path, port=9010, log_file=tmp_path / "gateway.jsonl")
+
+    assert "stateless = false" in config_path.read_text(encoding="utf-8")

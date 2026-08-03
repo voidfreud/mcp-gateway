@@ -41,45 +41,55 @@ jobs:
         with:
           enable-cache: true
           cache-dependency-glob: uv.lock
-      - name: Resolve newest FastMCP in an isolated environment
+      - name: Resolve newest FastMCP in an isolated checkout
         id: candidate
         run: |
           candidate_dir="$(mktemp -d)"
           receipt="${RUNNER_TEMP}/fastmcp-compat-receipt.txt"
           printf 'status=resolving\n' > "$receipt"
-          cp pyproject.toml uv.lock README.md "$candidate_dir/"
-          python - "$candidate_dir/pyproject.toml" <<'PY'
+          git clone --quiet --no-hardlinks "$GITHUB_WORKSPACE" "$candidate_dir"
+          pin="$(python - "$candidate_dir/pyproject.toml" <<'PY'
           from pathlib import Path
           import sys
+          import tomllib
 
           path = Path(sys.argv[1])
-          text = path.read_text()
-          text = text.replace('"fastmcp==3.4.4"', '"fastmcp>=3.4.4"', 1)
-          path.write_text(text)
+          dependencies = tomllib.loads(path.read_text())["project"]["dependencies"]
+          dependency = next(item for item in dependencies if item.startswith("fastmcp=="))
+          print(dependency.removeprefix("fastmcp=="))
           PY
-          uv lock --project "$candidate_dir" --upgrade-package fastmcp
-          uv sync --project "$candidate_dir" --all-groups --no-install-project
+          )"
+          uv sync --project "$candidate_dir" --locked --all-groups
+          uv pip install --python "$candidate_dir/.venv/bin/python" \
+            --upgrade "fastmcp>=$pin"
           version="$("$candidate_dir/.venv/bin/python" -c 'from importlib.metadata import version; print(version("fastmcp"))')"
-          echo "dir=$candidate_dir" >> "$GITHUB_OUTPUT"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          printf 'candidate_fastmcp=%s\n' "$version" > "$receipt"
-          echo "Resolved FastMCP $version"
+          {
+            echo "dir=$candidate_dir"
+            echo "pin=$pin"
+            echo "version=$version"
+          } >> "$GITHUB_OUTPUT"
+          printf 'pinned_fastmcp=%s\ncandidate_fastmcp=%s\n' "$pin" "$version" > "$receipt"
+          echo "Resolved FastMCP $version (project pin: $pin)"
       - name: Skip when the pin is still newest
-        if: steps.candidate.outputs.version == '3.4.4'
+        if: steps.candidate.outputs.version == steps.candidate.outputs.pin
         run: |
           echo "decision=skipped-current-pin-is-newest" >> "$RUNNER_TEMP/fastmcp-compat-receipt.txt"
           echo "No newer FastMCP release; canary skipped."
       - name: Run full compatibility gate against candidate
-        if: steps.candidate.outputs.version != '3.4.4'
+        if: steps.candidate.outputs.version != steps.candidate.outputs.pin
         env:
           CANDIDATE_DIR: ${{ steps.candidate.outputs.dir }}
-          PYTHONPATH: ${{ github.workspace }}/src:${{ github.workspace }}
         run: |
-          echo "decision=running-full-compatibility-gate" >> "$RUNNER_TEMP/fastmcp-compat-receipt.txt"
-          "$CANDIDATE_DIR/.venv/bin/python" -m pytest -q tests
-          "$CANDIDATE_DIR/.venv/bin/python" -c \
+          receipt="$RUNNER_TEMP/fastmcp-compat-receipt.txt"
+          echo "decision=running-full-compatibility-gate" >> "$receipt"
+          trap 'status=$?; if [ "$status" -ne 0 ]; then echo "result=failed" >> "$receipt"; fi; exit "$status"' EXIT
+          cd "$CANDIDATE_DIR"
+          export PATH="$CANDIDATE_DIR/.venv/bin:$PATH"
+          python -m pytest -q tests
+          python tests/live/run_mcp_wire.py
+          python -c \
             "import mcp_gateway.server, mcp_gateway.admin, mcp_gateway.config_loader; print('candidate imports OK')"
-          echo "result=passed" >> "$RUNNER_TEMP/fastmcp-compat-receipt.txt"
+          echo "result=passed" >> "$receipt"
       - name: Publish compatibility receipt
         if: always()
         # actions/upload-artifact v4.6.2

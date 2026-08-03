@@ -34,11 +34,10 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   output envelope and preserve each member's upstream `_meta` inside that
   member record under the existing strict serialized-result budget.
 
-- Exact-pin FastMCP 3.4.4 and add explicit compatibility tripwires for every
-  private runtime seam used by proxy hot reload, capability suppression, and
-  virtual-tool catalog replacement. CI and releases now install strictly from
-  the lock; a separate daily canary runs the full gate against the newest
-  FastMCP without weakening the production pin.
+- **FastMCP compatibility canary** — keep production exact-pinned at 3.4.4
+  while a daily isolated checkout upgrades only FastMCP, then exercises the
+  complete unit/property suite, public raw-wire contracts, and import smoke
+  using the candidate environment and its installed console entry point.
 
 - **Truthful Virtual Tools capabilities** — `/virtual/mcp` now advertises
   `tools.listChanged=false` (along with resources/prompts) because its Admin
@@ -168,6 +167,26 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   non-loopback bind without `bearer_token` set, so the gateway can never start
   exposed and unauthenticated. Documented in security.md ("Binding beyond
   loopback").
+
+### Fixed
+
+- **MCP protocol compliance hardening** — reject live prompt-name collisions,
+  preserve JSON Schema 2020-12 definitions through transforms, advertise
+  endpoint-accurate initialize identity/capabilities, preserve request context
+  across stateless proxy sessions, and return standard JSON-RPC prompt errors.
+  The CI conformance gate now exercises all 24 applicable official server
+  scenarios, while raw-wire receipts pin current and legacy initialization,
+  auth/origin precedence, session termination, and transport errors.
+
+- **Bounded backend I/O** — each backend now has validated, persisted
+  `init_timeout` and `request_timeout` settings (30s/300s by default), so a
+  hung handshake degrades only that endpoint and a stuck forwarded call cannot
+  retain a request forever.
+
+- **Fresh-install and bearer-route hardening** — the checkout installer creates
+  its LaunchAgent log directory before bootstrap, and health/readiness auth
+  exemptions now match complete path segments instead of attacker-controlled
+  prefixes.
 
 ### Documentation
 

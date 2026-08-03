@@ -21,17 +21,28 @@ import os
 import sys
 import time
 from contextlib import AsyncExitStack, asynccontextmanager
+from datetime import timedelta
 from pathlib import Path
+from types import MethodType
 
 import anyio
 import httpx
 import structlog
 import uvicorn
-from fastmcp import Client
 from fastmcp.client.messages import MessageHandler
 from fastmcp.server import create_proxy
+from fastmcp.server.dependencies import get_context
 from fastmcp.server.middleware import Middleware, MiddlewareContext
-from mcp.server.lowlevel.server import NotificationOptions
+from fastmcp.server.middleware.error_handling import ErrorHandlingMiddleware
+from fastmcp.server.providers.proxy import FastMCPProxy, StatefulProxyClient
+from mcp import McpError
+from mcp.server.lowlevel.server import (
+    NotificationOptions,
+)
+from mcp.server.lowlevel.server import (
+    Server as MCPLowLevelServer,
+)
+from mcp.types import ErrorData
 from starlette.applications import Starlette
 from starlette.middleware import Middleware as StarletteMiddleware
 from starlette.requests import Request
@@ -46,6 +57,91 @@ from mcp_gateway import (
     runtime,
     virtual_tools,
 )
+
+
+class _GatewayProxyClient(StatefulProxyClient):
+    """Relay request-scoped progress safely through a shared upstream session."""
+
+    async def call_tool_mcp(
+        self,
+        name: str,
+        arguments: dict,
+        progress_handler=None,
+        timeout=None,
+        meta=None,
+    ):
+        if progress_handler is None:
+            request_context = get_context().request_context
+            progress_token = (
+                request_context.meta.progressToken
+                if request_context is not None and request_context.meta is not None
+                else None
+            )
+
+            async def forward_progress(progress, total, message) -> None:
+                if request_context is not None and progress_token is not None:
+                    await request_context.session.send_progress_notification(
+                        progress_token=progress_token,
+                        progress=progress,
+                        total=total,
+                        message=message,
+                        related_request_id=request_context.request_id,
+                    )
+
+            progress_handler = forward_progress
+        return await super().call_tool_mcp(
+            name,
+            arguments,
+            progress_handler=progress_handler,
+            timeout=timeout,
+            meta=meta,
+        )
+
+
+class _RequestScopedProxyClient(_GatewayProxyClient):
+    """Restore callbacks while preserving per-operation sessions."""
+
+    async def __aexit__(self, exc_type, exc_value, traceback) -> None:
+        await self._disconnect()
+
+
+class GatewayErrorMiddleware(ErrorHandlingMiddleware):
+    """Normalize gateway-owned MCP failures to JSON-RPC's standard codes."""
+
+    async def on_get_prompt(self, context, call_next):
+        """Reject unknown prompts and missing required arguments as invalid params."""
+        fastmcp_context = context.fastmcp_context
+        if fastmcp_context is not None:
+            request = context.message
+            prompt = await fastmcp_context.fastmcp.get_prompt(request.name)
+            if prompt is None:
+                raise McpError(
+                    ErrorData(code=-32602, message=f"Unknown prompt: {request.name!r}")
+                )
+            required = {
+                argument.name
+                for argument in prompt.arguments or ()
+                if argument.required
+            }
+            missing = required - set(request.arguments or ())
+            if missing:
+                raise McpError(
+                    ErrorData(
+                        code=-32602,
+                        message=f"Missing required prompt arguments: {sorted(missing)}",
+                    )
+                )
+        return await call_next(context)
+
+    def _transform_error(self, error, context):
+        # FastMCP 3.4.x can relay an upstream provider exception as code 0.
+        # Code 0 is not a JSON-RPC server error; invalid prompt inputs were
+        # rejected above, so any remaining provider failure is internal.
+        if isinstance(error, McpError) and error.error.code == 0:
+            return McpError(
+                ErrorData(code=-32603, message=f"Internal error: {error.error.message}")
+            )
+        return super()._transform_error(error, context)
 
 
 def default_config_path() -> str:
@@ -593,6 +689,29 @@ def _suppress_list_changed(proxy) -> None:
     )
 
 
+def _set_gateway_capabilities(server, *, tools_only: bool = False) -> None:
+    """Advertise only MCP features implemented by this gateway endpoint."""
+    low_level = server._mcp_server
+
+    def get_capabilities(self, notification_options, _experimental_capabilities):
+        capabilities = MCPLowLevelServer.get_capabilities(
+            self, notification_options, {}
+        )
+        updates = {"experimental": None}
+        if tools_only:
+            updates.update(
+                {
+                    "prompts": None,
+                    "resources": None,
+                    "logging": None,
+                    "completions": None,
+                }
+            )
+        return capabilities.model_copy(update=updates)
+
+    low_level.get_capabilities = MethodType(get_capabilities, low_level)
+
+
 async def _health(_request: Request) -> PlainTextResponse:
     # Body starts with "ok" so existing liveness checks still pass; the version
     # tail lets you confirm which build answered (#57). The resolved code path
@@ -642,23 +761,47 @@ async def _mount_backend(  # noqa: PLR0913 — the mount needs the full lifespan
         proxy_settings = {
             "name": name,
             "list_page_size": config_loader.DOWNSTREAM_TOOLS_PAGE_SIZE,
+            "version": admin.gateway_version(),
+            "dereference_schemas": False,
         }
         if auth_provider is not None:
             proxy_settings["auth"] = auth_provider
         if not b.stateless:
             # Warm: one connected client reused for every call (issues #8/#9).
-            client = await stack.enter_async_context(
-                Client(
-                    config_loader.to_proxy_config_one(b),
-                    message_handler=message_handler,
-                )
+            # The proxy client restores downstream callback context, and binds
+            # progress to each call so later sessions cannot inherit a stale
+            # destination.
+            client = _GatewayProxyClient(
+                config_loader.to_proxy_config_one(b),
+                timeout=timedelta(seconds=b.request_timeout),
+                init_timeout=b.init_timeout,
             )
+            await client.__aenter__()
+            # StatefulProxyClient.__aexit__ is intentionally a no-op. Mirror
+            # FastMCP's own connected-client lifecycle: disconnect first (LIFO),
+            # then close the underlying transport.
+            stack.push_async_callback(client.transport.close)
+            stack.push_async_callback(client._disconnect, force=True)
             proxy = create_proxy(client, **proxy_settings)
         else:
-            proxy = create_proxy(config_loader.to_proxy_config_one(b), **proxy_settings)
+            # Build a new transport as well as a new client per operation.
+            # Client.new() shares its transport, whose receive loop retains the
+            # first downstream session's callback context.
+            target = config_loader.to_proxy_config_one(b)
+            request_timeout = timedelta(seconds=b.request_timeout)
+            proxy = FastMCPProxy(
+                client_factory=lambda: _RequestScopedProxyClient(
+                    target,
+                    timeout=request_timeout,
+                    init_timeout=b.init_timeout,
+                ),
+                **proxy_settings,
+            )
 
         _suppress_list_changed(proxy)  # #90
+        _set_gateway_capabilities(proxy)
         proxy.add_middleware(CallLogMiddleware(log, b.name, on_session_death))
+        proxy.add_middleware(GatewayErrorMiddleware())
         transforms, index = config_loader.build_transforms(
             cfg, b, all_tools, captured_meta
         )
@@ -863,11 +1006,13 @@ def _build_app(  # noqa: PLR0913, PLR0915 — composition root; takes what it wi
                             hooks.setdefault("virtual_status", {}),
                             auth=virtual_auth,
                         )
+                        server.add_middleware(GatewayErrorMiddleware())
                         # Virtual Tools hot-swap their provider map from Admin
                         # routes but cannot yet broadcast to every connected
                         # downstream session. Keep the negotiated capability
                         # truthful until a server-wide session registry exists.
                         _suppress_list_changed(server)
+                        _set_gateway_capabilities(server, tools_only=True)
                         sub = server.http_app(path="/mcp")
                         await stack.enter_async_context(sub.lifespan(sub))
                         app.router.routes.append(

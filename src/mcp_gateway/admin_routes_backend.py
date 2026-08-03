@@ -276,6 +276,12 @@ def backend_routes(  # noqa: PLR0915
                 auth=deps().clean(payload.get("auth")),
                 headers_helper=deps().clean(payload.get("headers_helper")),
                 stateless=bool(payload.get("stateless", False)),
+                init_timeout=payload.get(
+                    "init_timeout", cl.DEFAULT_BACKEND_INIT_TIMEOUT
+                ),
+                request_timeout=payload.get(
+                    "request_timeout", cl.DEFAULT_BACKEND_REQUEST_TIMEOUT
+                ),
             )
         except Exception as exc:  # noqa: BLE001 (pydantic/validation)
             return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)

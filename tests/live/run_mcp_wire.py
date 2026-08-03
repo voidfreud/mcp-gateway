@@ -24,10 +24,11 @@ from typing import Any
 import httpx
 from mcp.types import LATEST_PROTOCOL_VERSION
 
+from mcp_gateway import __version__
 from mcp_gateway import config_loader as cl
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-FIXTURES = ("alpha", "beta")
+FIXTURES = ("alpha", "beta", "blackhole")
 TOKEN = "raw-wire-test-token"
 LAST_SCRATCH: list[Path | None] = [None]
 
@@ -186,6 +187,30 @@ def _initialize(
     return session_id, message["result"]
 
 
+def _assert_initialize_metadata(
+    result: dict[str, Any], endpoint_name: str, *, tools_only: bool
+) -> None:
+    expected_info = {"name": endpoint_name, "version": __version__}
+    if result.get("serverInfo") != expected_info:
+        raise ContractFailure(
+            f"{endpoint_name} reported wrong serverInfo: {result.get('serverInfo')!r}"
+        )
+    expected_capabilities = {"tools": {"listChanged": False}}
+    if not tools_only:
+        expected_capabilities.update(
+            {
+                "logging": {},
+                "prompts": {"listChanged": False},
+                "resources": {"subscribe": False, "listChanged": False},
+            }
+        )
+    if result.get("capabilities") != expected_capabilities:
+        raise ContractFailure(
+            f"{endpoint_name} advertised unexpected capabilities: "
+            f"{result.get('capabilities')!r}"
+        )
+
+
 def _initialized(
     client: httpx.Client, url: str, session_id: str, protocol_version: str
 ) -> None:
@@ -229,6 +254,33 @@ def _rpc(
     return message
 
 
+def _assert_rpc_error(
+    client: httpx.Client,
+    url: str,
+    session_id: str,
+    protocol_version: str,
+    request_id: int,
+    method: str,
+    params: dict[str, Any],
+    expected_code: int,
+) -> None:
+    message = _rpc(
+        client,
+        url,
+        request_id,
+        method,
+        params,
+        session_id,
+        protocol_version,
+    )
+    code = (message.get("error") or {}).get("code")
+    if code != expected_code:
+        raise ContractFailure(
+            f"{method} returned JSON-RPC code {code}, expected {expected_code}: "
+            f"{message!r}"
+        )
+
+
 def _write_config(path: Path, port: int, fixture_ports: dict[str, int]) -> None:
     cfg = cl.GatewayConfig(
         host="127.0.0.1",
@@ -243,6 +295,7 @@ def _write_config(path: Path, port: int, fixture_ports: dict[str, int]) -> None:
                 transport="http",
                 url=f"http://127.0.0.1:{fixture_ports['alpha']}/mcp",
                 stateless=False,
+                request_timeout=0.25,
             ),
             cl.Backend(
                 id="raw-wire-beta",
@@ -250,6 +303,15 @@ def _write_config(path: Path, port: int, fixture_ports: dict[str, int]) -> None:
                 transport="http",
                 url=f"http://127.0.0.1:{fixture_ports['beta']}/mcp",
                 stateless=True,
+            ),
+            cl.Backend(
+                id="raw-wire-blackhole",
+                name="blackhole",
+                transport="http",
+                url=f"http://127.0.0.1:{fixture_ports['blackhole']}/mcp",
+                stateless=False,
+                init_timeout=0.25,
+                request_timeout=0.25,
             ),
         ],
         virtual_tools=[
@@ -269,6 +331,26 @@ def _write_config(path: Path, port: int, fixture_ports: dict[str, int]) -> None:
         ],
     )
     cl.save(cfg, str(path))
+    # Keep startup baseline capture from masking the mount-handshake timeout
+    # under test with its separate capture timeout.
+    defaults_dir = path.parent / "home/.local/state/mcp-gateway/defaults"
+    defaults_dir.mkdir(parents=True, exist_ok=True)
+    (defaults_dir / "blackhole.json").write_text(
+        json.dumps(
+            {
+                "backend": "blackhole",
+                "captured_at": time.time(),
+                "instructions": None,
+                "server_info": None,
+                "capabilities": None,
+                "tools": [],
+                "resources": [],
+                "resource_templates": [],
+                "prompts": [],
+            }
+        ),
+        encoding="utf-8",
+    )
 
 
 def _assert_catalog(
@@ -341,6 +423,32 @@ def _assert_application_error(
         )
 
 
+def _assert_request_timeout(
+    client: httpx.Client,
+    url: str,
+    session_id: str,
+    protocol_version: str,
+    request_id: int,
+) -> None:
+    started = time.monotonic()
+    message = _rpc(
+        client,
+        url,
+        request_id,
+        "tools/call",
+        {"name": "hang", "arguments": {}},
+        session_id,
+        protocol_version,
+    )
+    elapsed = time.monotonic() - started
+    result = message.get("result") or {}
+    if result.get("isError") is not True or not (0.15 <= elapsed < 3):
+        raise ContractFailure(
+            "hung backend call did not honor its request timeout: "
+            f"elapsed={elapsed:.3f}s result={result!r}"
+        )
+
+
 def _assert_transport_errors(client: httpx.Client, endpoint: str) -> None:
     malformed = client.post(
         endpoint,
@@ -393,19 +501,22 @@ def run(keep: bool) -> Path:  # noqa: PLR0915 - one coherent black-box receipt
     try:
         fixture_ports = {name: _free_port() for name in FIXTURES}
         for name in FIXTURES:
+            command = [
+                sys.executable,
+                str(REPO_ROOT / "tests/fixtures/raw_wire_backend.py"),
+                "--name",
+                name,
+                "--port",
+                str(fixture_ports[name]),
+                "--ready-file",
+                str(scratch / "fixtures" / f"{name}.ready.json"),
+                "--event-file",
+                str(scratch / "fixtures" / f"{name}.jsonl"),
+            ]
+            if name == "blackhole":
+                command.append("--hang-initialize")
             process = _spawn(
-                [
-                    sys.executable,
-                    str(REPO_ROOT / "tests/fixtures/raw_wire_backend.py"),
-                    "--name",
-                    name,
-                    "--port",
-                    str(fixture_ports[name]),
-                    "--ready-file",
-                    str(scratch / "fixtures" / f"{name}.ready.json"),
-                    "--event-file",
-                    str(scratch / "fixtures" / f"{name}.jsonl"),
-                ],
+                command,
                 environment,
                 scratch / "processes" / name,
             )
@@ -413,6 +524,13 @@ def run(keep: bool) -> Path:  # noqa: PLR0915 - one coherent black-box receipt
             _wait_for(
                 lambda n=name: (scratch / "fixtures" / f"{n}.ready.json").is_file(),
                 f"{name} fixture",
+            )
+            _wait_for(
+                lambda p=fixture_ports[name]: (
+                    httpx.get(f"http://127.0.0.1:{p}/health", timeout=0.5).status_code
+                    == 200
+                ),
+                f"{name} fixture HTTP listener",
             )
 
         gateway_port = _free_port()
@@ -429,9 +547,29 @@ def run(keep: bool) -> Path:  # noqa: PLR0915 - one coherent black-box receipt
                 lambda: client.get(f"{base}/health").status_code == 200,
                 "gateway health",
             )
+
+            def expected_gateway_state() -> bool:
+                response = client.get(f"{base}/ready")
+                if response.status_code != 503:
+                    return False
+                state = response.json()
+                return state.get("mounted") == ["alpha", "beta"] and state.get(
+                    "missing"
+                ) == ["blackhole"]
+
+            _wait_for(expected_gateway_state, "gateway degraded readiness")
             _wait_for(
-                lambda: client.get(f"{base}/ready").status_code == 200,
-                "gateway readiness",
+                lambda: (
+                    (scratch / "gateway.log").is_file()
+                    and '"event": "backend_mount_failed"'
+                    in (scratch / "gateway.log").read_text(encoding="utf-8")
+                    and '"backend": "blackhole"'
+                    in (scratch / "gateway.log").read_text(encoding="utf-8")
+                ),
+                "bounded blackhole initialization failure",
+            )
+            receipt["checks"].append(
+                "backend initialization timeout and degraded readiness"
             )
 
             alpha = f"{base}/alpha/mcp"
@@ -474,13 +612,9 @@ def run(keep: bool) -> Path:  # noqa: PLR0915 - one coherent black-box receipt
             )
             if alpha_init.get("protocolVersion") != LATEST_PROTOCOL_VERSION:
                 raise ContractFailure(f"latest protocol was not echoed: {alpha_init!r}")
-            if (
-                alpha_init.get("capabilities", {}).get("tools", {}).get("listChanged")
-                is not False
-            ):
-                raise ContractFailure(
-                    f"alpha advertised untruthful listChanged: {alpha_init!r}"
-                )
+            _assert_initialize_metadata(
+                alpha_init, "mcp-gateway-alpha", tools_only=False
+            )
             _initialized(client, alpha, alpha_session, LATEST_PROTOCOL_VERSION)
             _assert_catalog(
                 client,
@@ -488,7 +622,7 @@ def run(keep: bool) -> Path:  # noqa: PLR0915 - one coherent black-box receipt
                 alpha_session,
                 LATEST_PROTOCOL_VERSION,
                 2,
-                {"echo", "identity", "fail"},
+                {"echo", "identity", "fail", "hang"},
             )
             _assert_echo(
                 client,
@@ -502,14 +636,61 @@ def run(keep: bool) -> Path:  # noqa: PLR0915 - one coherent black-box receipt
             _assert_application_error(
                 client, alpha, alpha_session, LATEST_PROTOCOL_VERSION, 4
             )
+            _assert_request_timeout(
+                client, alpha, alpha_session, LATEST_PROTOCOL_VERSION, 5
+            )
+            receipt["checks"].append("backend tool-call request timeout")
             receipt["checks"].append(
                 "alpha raw initialize initialized list call and tool error"
             )
+            _assert_rpc_error(
+                client,
+                alpha,
+                alpha_session,
+                LATEST_PROTOCOL_VERSION,
+                6,
+                "prompts/get",
+                {"name": "does-not-exist", "arguments": {}},
+                -32602,
+            )
+            _assert_rpc_error(
+                client,
+                alpha,
+                alpha_session,
+                LATEST_PROTOCOL_VERSION,
+                7,
+                "prompts/get",
+                {"name": "required_prompt", "arguments": {}},
+                -32602,
+            )
+            _assert_rpc_error(
+                client,
+                alpha,
+                alpha_session,
+                LATEST_PROTOCOL_VERSION,
+                8,
+                "prompts/get",
+                {"name": "broken_prompt", "arguments": {}},
+                -32603,
+            )
+            receipt["checks"].append("standard prompt JSON-RPC error codes")
+
+            missing_session = _post(
+                client,
+                alpha,
+                {"jsonrpc": "2.0", "id": 9, "method": "tools/list", "params": {}},
+                protocol_version=LATEST_PROTOCOL_VERSION,
+            )
+            if missing_session.status_code != 400:
+                raise ContractFailure(
+                    "missing session id must be HTTP 400, got "
+                    f"{missing_session.status_code}"
+                )
 
             unknown = _post(
                 client,
                 alpha,
-                {"jsonrpc": "2.0", "id": 5, "method": "tools/list", "params": {}},
+                {"jsonrpc": "2.0", "id": 10, "method": "tools/list", "params": {}},
                 session_id="does-not-exist",
                 protocol_version=LATEST_PROTOCOL_VERSION,
             )
@@ -517,13 +698,39 @@ def run(keep: bool) -> Path:  # noqa: PLR0915 - one coherent black-box receipt
                 raise ContractFailure(
                     f"unknown session must be HTTP 404, got {unknown.status_code}"
                 )
-            receipt["checks"].append("session id retained and unknown session rejected")
+            terminated = client.delete(
+                alpha,
+                headers=_headers(
+                    session_id=alpha_session,
+                    protocol_version=LATEST_PROTOCOL_VERSION,
+                ),
+            )
+            if terminated.status_code != 200:
+                raise ContractFailure(
+                    f"session DELETE must be HTTP 200, got {terminated.status_code}"
+                )
+            after_delete = _post(
+                client,
+                alpha,
+                {"jsonrpc": "2.0", "id": 11, "method": "tools/list", "params": {}},
+                session_id=alpha_session,
+                protocol_version=LATEST_PROTOCOL_VERSION,
+            )
+            if after_delete.status_code != 404:
+                raise ContractFailure(
+                    "terminated session must be rejected with HTTP 404, got "
+                    f"{after_delete.status_code}"
+                )
+            receipt["checks"].append(
+                "missing invalid and deleted sessions follow HTTP contracts"
+            )
 
             beta_session, beta_init = _initialize(client, beta, 10, "2025-03-26")
             if beta_init.get("protocolVersion") != "2025-03-26":
                 raise ContractFailure(
                     f"legacy protocol did not negotiate exactly: {beta_init!r}"
                 )
+            _assert_initialize_metadata(beta_init, "mcp-gateway-beta", tools_only=False)
             _initialized(client, beta, beta_session, "2025-03-26")
             _assert_catalog(
                 client,
@@ -531,7 +738,7 @@ def run(keep: bool) -> Path:  # noqa: PLR0915 - one coherent black-box receipt
                 beta_session,
                 "2025-03-26",
                 11,
-                {"echo", "identity", "fail"},
+                {"echo", "identity", "fail", "hang"},
             )
             _assert_echo(
                 client, beta, beta_session, "2025-03-26", 12, "echo", "beta:hello"
@@ -543,13 +750,9 @@ def run(keep: bool) -> Path:  # noqa: PLR0915 - one coherent black-box receipt
             virtual_session, virtual_init = _initialize(
                 client, virtual, 20, LATEST_PROTOCOL_VERSION
             )
-            if (
-                virtual_init.get("capabilities", {}).get("tools", {}).get("listChanged")
-                is not False
-            ):
-                raise ContractFailure(
-                    f"virtual advertised untruthful listChanged: {virtual_init!r}"
-                )
+            _assert_initialize_metadata(
+                virtual_init, "mcp-gateway-virtual", tools_only=True
+            )
             _initialized(client, virtual, virtual_session, LATEST_PROTOCOL_VERSION)
             _assert_catalog(
                 client,

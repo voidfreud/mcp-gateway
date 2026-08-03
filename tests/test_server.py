@@ -1565,16 +1565,42 @@ def test_ready_reports_degraded_when_backend_unmounted(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_suppress_list_changed_clears_capability():
+def test_backend_initialize_metadata_matches_gateway_surface():
     from fastmcp.server import create_proxy
 
     b = cl.Backend(name="b", transport="stdio", command="/bin/x")
-    proxy = create_proxy(cl.to_proxy_config_one(b), name="mcp-gateway-b")
+    proxy = create_proxy(
+        cl.to_proxy_config_one(b),
+        name="mcp-gateway-b",
+        version=admin.gateway_version(),
+    )
     server._suppress_list_changed(proxy)
-    caps = proxy._mcp_server.create_initialization_options().capabilities
-    assert caps.tools.listChanged is False
-    assert caps.resources.listChanged is False
-    assert caps.prompts.listChanged is False
+    server._set_gateway_capabilities(proxy)
+    options = proxy._mcp_server.create_initialization_options()
+
+    assert options.server_name == "mcp-gateway-b"
+    assert options.server_version == admin.gateway_version()
+    assert options.capabilities.model_dump(exclude_none=True) == {
+        "logging": {},
+        "prompts": {"listChanged": False},
+        "resources": {"subscribe": False, "listChanged": False},
+        "tools": {"listChanged": False},
+    }
+
+
+def test_virtual_initialize_metadata_advertises_tools_only():
+    virtual = server.virtual_tools.build_virtual_server(
+        cl.GatewayConfig(), cl.GatewayConfig(), {}, structlog.get_logger("test")
+    )
+    server._suppress_list_changed(virtual)
+    server._set_gateway_capabilities(virtual, tools_only=True)
+    options = virtual._mcp_server.create_initialization_options()
+
+    assert options.server_name == "mcp-gateway-virtual"
+    assert options.server_version == admin.gateway_version()
+    assert options.capabilities.model_dump(exclude_none=True) == {
+        "tools": {"listChanged": False}
+    }
 
 
 def test_virtual_endpoint_applies_static_catalog_capabilities(tmp_path, monkeypatch):
