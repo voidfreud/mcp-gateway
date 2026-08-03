@@ -4,6 +4,55 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project aims to
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0](https://github.com/voidfreud/mcp-gateway/compare/v1.0.0...v1.1.0) (2026-08-03)
+
+
+### Features
+
+* add application-owned resident service lifecycle ([#253](https://github.com/voidfreud/mcp-gateway/issues/253)) ([31487b4](https://github.com/voidfreud/mcp-gateway/commit/31487b47bcc216a106d38e002c1020090c24dc57))
+* add asynchronous structured logging and dashboard visibility ([20c02f5](https://github.com/voidfreud/mcp-gateway/commit/20c02f5174f7e3346a2a67ba91e80a0a6c33b87f))
+* add first-class virtual tools ([#190](https://github.com/voidfreud/mcp-gateway/issues/190)) ([24180ba](https://github.com/voidfreud/mcp-gateway/commit/24180ba6553c056a3dd2bd65b04c69c88343d06c))
+* add guarded update workflow ([#195](https://github.com/voidfreud/mcp-gateway/issues/195)) ([bf85992](https://github.com/voidfreud/mcp-gateway/commit/bf85992405205f6779bd64c732b16e615bbac1b1))
+* add MCP client controls and live admin logs ([17b311f](https://github.com/voidfreud/mcp-gateway/commit/17b311f6f4c20263f1312ad12067ee06e47d18a5))
+* add standards-compliant OAuth resource mode ([#191](https://github.com/voidfreud/mcp-gateway/issues/191)) ([52a35d7](https://github.com/voidfreud/mcp-gateway/commit/52a35d7e67cd77d6675545f09f5c210823bd852e))
+* admin UI visual revamp — light+dark themes, grouped controls, iconography ([#170](https://github.com/voidfreud/mcp-gateway/issues/170)) ([#188](https://github.com/voidfreud/mcp-gateway/issues/188)) ([57d8dce](https://github.com/voidfreud/mcp-gateway/commit/57d8dce41156529bee33dd44382d3e00b955dced))
+* age-gate the post-mount baseline refresh ([#157](https://github.com/voidfreud/mcp-gateway/issues/157)) ([#186](https://github.com/voidfreud/mcp-gateway/issues/186)) ([eda8684](https://github.com/voidfreud/mcp-gateway/commit/eda86842c93ec38077f0076235a44925004f3a03))
+* guard non-loopback bind behind bearer_token ([#18](https://github.com/voidfreud/mcp-gateway/issues/18)) ([#178](https://github.com/voidfreud/mcp-gateway/issues/178)) ([48e3e76](https://github.com/voidfreud/mcp-gateway/commit/48e3e76987f74f752fae5a01c3df98fe49bbc1ce))
+* install.sh --uninstall — one-command removal, symmetric with install ([#184](https://github.com/voidfreud/mcp-gateway/issues/184)) ([21ac24e](https://github.com/voidfreud/mcp-gateway/commit/21ac24e623cc0a5029bdb79d1ea72864a3860c13)), closes [#171](https://github.com/voidfreud/mcp-gateway/issues/171)
+* log admin actions and lifecycle events ([074b29a](https://github.com/voidfreud/mcp-gateway/commit/074b29afd8ff88f482eaeb86c42b4fdd8ea15212))
+* modernize MCP tool design skill ([#224](https://github.com/voidfreud/mcp-gateway/issues/224)) ([25b94b8](https://github.com/voidfreud/mcp-gateway/commit/25b94b801349c6f0af2ff115bef06bea3964285e))
+* per-tool behavior hooks — validate and post-process ([#16](https://github.com/voidfreud/mcp-gateway/issues/16)) ([#177](https://github.com/voidfreud/mcp-gateway/issues/177)) ([c0d16f9](https://github.com/voidfreud/mcp-gateway/commit/c0d16f9190340262361ae96921808a7a4fd5aa0b))
+* per-tool output-cap lever (anthropic/maxResultSizeChars) ([#185](https://github.com/voidfreud/mcp-gateway/issues/185)) ([cbb4dc6](https://github.com/voidfreud/mcp-gateway/commit/cbb4dc6c31379cf7276a49278c38b96ae922bfdd)), closes [#162](https://github.com/voidfreud/mcp-gateway/issues/162)
+* register Virtual Tools in Codex ([#193](https://github.com/voidfreud/mcp-gateway/issues/193)) ([59d0771](https://github.com/voidfreud/mcp-gateway/commit/59d077135ea7e772a2ddb61a294a2c9b960ed05c))
+* resource and prompt text rewriting ([#174](https://github.com/voidfreud/mcp-gateway/issues/174)) ([98b60f7](https://github.com/voidfreud/mcp-gateway/commit/98b60f7f4c2aa1186a5cb387c8aeea49968f8320)), closes [#15](https://github.com/voidfreud/mcp-gateway/issues/15)
+
+
+### Bug Fixes
+
+* create installer state directory ([#248](https://github.com/voidfreud/mcp-gateway/issues/248)) ([2cd26bd](https://github.com/voidfreud/mcp-gateway/commit/2cd26bd18a527e58f54d77544180e14590106fcf))
+* enforce virtual schema contracts ([#251](https://github.com/voidfreud/mcp-gateway/issues/251)) ([257fb1c](https://github.com/voidfreud/mcp-gateway/commit/257fb1c97a4da6e415fa8e4cac1daf5add518fab))
+* harden admin auth and API against empty tokens and malformed input ([4cc6ec4](https://github.com/voidfreud/mcp-gateway/commit/4cc6ec40c9c15323b66470bcbd32134262e39b51))
+* harden audited MCP contracts ([#252](https://github.com/voidfreud/mcp-gateway/issues/252)) ([b398bd3](https://github.com/voidfreud/mcp-gateway/commit/b398bd317534fa6adbeb9a1c7e57a2a4fa574cf4))
+* make guarded update checks executable ([a4d45ca](https://github.com/voidfreud/mcp-gateway/commit/a4d45ca57a15848d81b68d6aad5b716af8ebeda7))
+* reject live prompt name collisions ([#250](https://github.com/voidfreud/mcp-gateway/issues/250)) ([c83303c](https://github.com/voidfreud/mcp-gateway/commit/c83303c9f0a665d8869cf1d1992b27113c06ca55))
+* restrict bearer auth exemptions ([#249](https://github.com/voidfreud/mcp-gateway/issues/249)) ([63d6587](https://github.com/voidfreud/mcp-gateway/commit/63d658700ff2ec04799c3d65e0e99e124f431a57))
+* retry daemon readiness after update ([5a437a3](https://github.com/voidfreud/mcp-gateway/commit/5a437a3e829e4ef98947a97aa491fa74d7cc1f22))
+* satisfy ruff formatting check ([6fa1fca](https://github.com/voidfreud/mcp-gateway/commit/6fa1fca964241329eb2b2c7b8e25b60608e08cea))
+
+
+### Documentation
+
+* add audit report with prioritized action plan ([#247](https://github.com/voidfreud/mcp-gateway/issues/247)) ([1f92d53](https://github.com/voidfreud/mcp-gateway/commit/1f92d538fe3a6e4790c198889de266ddccdeab87))
+* admin-guide names the real Export/Import buttons ([#169](https://github.com/voidfreud/mcp-gateway/issues/169)) ([015b81f](https://github.com/voidfreud/mcp-gateway/commit/015b81f198d166497c226bd15e9c5d06ab983971))
+* ADR-0004 — per-session isolation is the stateless lever, not a mode ([#172](https://github.com/voidfreud/mcp-gateway/issues/172)) ([572fad1](https://github.com/voidfreud/mcp-gateway/commit/572fad17983497c469eea888a76df18818722f77)), closes [#25](https://github.com/voidfreud/mcp-gateway/issues/25)
+* CLAUDE.md backlog reflects the cleared tracker ([#189](https://github.com/voidfreud/mcp-gateway/issues/189)) ([60aeb45](https://github.com/voidfreud/mcp-gateway/commit/60aeb45c2142c137222166e675a5dbefb5362b16))
+* CLAUDE.md backlog synced to the parked-set resolution ([#179](https://github.com/voidfreud/mcp-gateway/issues/179)) ([6428a10](https://github.com/voidfreud/mcp-gateway/commit/6428a1064268edf5461d6e148ab372e76398a590))
+* CLAUDE.md GitNexus rules use the gateway broadcast names ([#182](https://github.com/voidfreud/mcp-gateway/issues/182)) ([83cd7ba](https://github.com/voidfreud/mcp-gateway/commit/83cd7ba774413f563439c31724fae7581088d721))
+* cold-eval harness caveat — seats inherit the live session's MCP context ([#183](https://github.com/voidfreud/mcp-gateway/issues/183)) ([f1259a1](https://github.com/voidfreud/mcp-gateway/commit/f1259a1f6991ddf9d264034ecea490fa3109a2d1))
+* document suppressed release trigger recovery ([700e497](https://github.com/voidfreud/mcp-gateway/commit/700e4971e3c3792b5ef212813aa73454377cd8cf))
+* establish project operating manual ([#218](https://github.com/voidfreud/mcp-gateway/issues/218)) ([cbb0fe1](https://github.com/voidfreud/mcp-gateway/commit/cbb0fe1abc6e0f9eb61fd1b3711b6da988b3acda))
+* normalize decision governance ([b3fbe86](https://github.com/voidfreud/mcp-gateway/commit/b3fbe86b7d748af337c636da726b47796f0b86d6))
+
 ## [Unreleased]
 
 ### Changed
