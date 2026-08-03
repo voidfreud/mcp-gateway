@@ -1224,6 +1224,18 @@ async def test_list_prompts_rename_hide_and_arg_descriptions(rp_transform, rp_fi
 
 
 @pytest.mark.anyio
+async def test_list_prompts_rejects_collision_with_new_live_prompt(
+    rp_transform, rp_fixtures
+):
+    from fastmcp.prompts.base import Prompt
+
+    _, prompts = rp_fixtures
+    prompts.append(Prompt(name="better_p1"))
+    with pytest.raises(ValueError, match="prompt broadcast name"):
+        await rp_transform.list_prompts(prompts)
+
+
+@pytest.mark.anyio
 async def test_get_prompt_reverse_maps_renames(rp_transform, rp_fixtures):
     _, prompts = rp_fixtures
     lookup = {p.name: p for p in prompts}

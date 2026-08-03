@@ -20,6 +20,7 @@ class AdminContext(Protocol):
     def load(self) -> GatewayConfig: ...
 
     log: Any
+    lock: Any
 
     def commit(
         self,
@@ -29,6 +30,8 @@ class AdminContext(Protocol):
     ) -> None: ...
 
     def locked(self, handler: Callable[..., Any]) -> Callable[..., Any]: ...
+
+    async def live_prompt_names(self, name: str) -> set[str] | None: ...
 
 
 @dataclass(frozen=True)
@@ -120,12 +123,20 @@ def settings_routes(  # noqa: PLR0915
     async def put_prompt_override(request: Request):
         """#15: upsert one prompt's override (rename, text, args, enabled)."""
         payload = await request.json()
-        cfg = ctx.load()
         try:
-            deps().apply_prompt_override(cfg, payload["backend"], payload)
+            backend = payload["backend"]
+            override = payload.get("override", {})
+            live_names = (
+                await ctx.live_prompt_names(backend) if "name" in override else None
+            )
+            async with ctx.lock:
+                cfg = ctx.load()
+                deps().apply_prompt_override(
+                    cfg, backend, payload, live_prompt_names=live_names
+                )
+                ctx.commit(cfg, backend)
         except (cl.ConfigError, KeyError) as exc:
             return deps().error(str(exc))
-        ctx.commit(cfg, payload["backend"])
         return JSONResponse({"ok": True, "reloaded": "in-process"})
 
     async def reset_prompt(request: Request):
@@ -233,7 +244,7 @@ def settings_routes(  # noqa: PLR0915
         ),
         Route(
             "/admin/api/prompt-override",
-            deps().needs_json(ctx.locked(put_prompt_override)),
+            deps().needs_json(put_prompt_override),
             methods=["PUT"],
         ),
         Route(

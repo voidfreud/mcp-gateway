@@ -396,7 +396,7 @@ def test_under_launchd_false_in_test_process():
     assert admin.under_launchd() is False
 
 
-def _admin_app(tmp_path: Path) -> Starlette:
+def _admin_app(tmp_path: Path, proxies=None) -> Starlette:
     cfg = cl.GatewayConfig.model_validate(
         {"backends": [{"name": "b", "transport": "stdio", "command": "/bin/x"}]}
     )
@@ -405,7 +405,13 @@ def _admin_app(tmp_path: Path) -> Starlette:
     app = Starlette()
     # structlog logger: the app logs with kwargs (e.g. log.info("x", backend=...)),
     # which a stdlib logger rejects.
-    admin.register(app, str(path), structlog.get_logger("test"), {}, {})
+    admin.register(
+        app,
+        str(path),
+        structlog.get_logger("test"),
+        proxies if proxies is not None else {},
+        {},
+    )
     return app
 
 
@@ -2881,6 +2887,30 @@ def test_prompt_override_endpoint_roundtrip_and_validation(tmp_path):
     assert r.status_code == 200
     state = client.get("/admin/api/state").json()
     assert state["backends"][0]["prompts"][0]["name"] is None
+
+
+def test_prompt_override_rejects_collision_with_live_catalog(tmp_path):
+    from fastmcp.prompts.base import Prompt
+
+    class Provider:
+        async def list_prompts(self):
+            return [Prompt(name="p1"), Prompt(name="p2"), Prompt(name="new_live")]
+
+    class Proxy:
+        providers = [Provider()]
+
+    _seed_rp_defaults()
+    client = TestClient(_admin_app(tmp_path, {"b": Proxy()}))
+    response = client.put(
+        "/admin/api/prompt-override",
+        json={
+            "backend": "b",
+            "prompt_original": "p1",
+            "override": {"name": "new_live"},
+        },
+    )
+    assert response.status_code == 400
+    assert "already used by prompts" in response.json()["error"]
 
 
 def test_rp_override_endpoints_reject_unknown_backend(tmp_path):
