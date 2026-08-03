@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcp-local-gateway"
-version = "1.1.0"
+version = "1.2.0"
 description = "Independent MCP gateway with per-backend proxy and virtual-tool endpoints"
 readme = "README.md"
 # Python 3.12 and 3.13 are the supported runtime minors. Do not widen this
