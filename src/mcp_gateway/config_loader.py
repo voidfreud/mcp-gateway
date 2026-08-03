@@ -1380,12 +1380,26 @@ class ResourcePromptTransform(Transform):
         if not self._backend_enabled:
             return []
         out = []
+        broadcast: dict[str, str] = {}
         for p in prompts:
-            ov = self._prompts.get(p.name)
-            if ov is None:
-                out.append(p)
-            elif ov.enabled:
-                out.append(self._apply_prompt(p, ov))
+            original = p.name
+            if original is None:
+                raise ValueError("backend returned a prompt without a name")
+            ov = self._prompts.get(original)
+            transformed = p if ov is None else self._apply_prompt(p, ov)
+            if ov is not None and not ov.enabled:
+                continue
+            target = transformed.name
+            if target is None:
+                raise ValueError("prompt transform produced a prompt without a name")
+            previous = broadcast.get(target)
+            if previous is not None and previous != original:
+                raise ValueError(
+                    f"prompt broadcast name {target!r} is produced by "
+                    f"both {previous!r} and {original!r}"
+                )
+            broadcast[target] = original
+            out.append(transformed)
         return out
 
     async def get_prompt(self, name, call_next, *, version=None):

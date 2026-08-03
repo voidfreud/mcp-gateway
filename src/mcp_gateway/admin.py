@@ -1176,13 +1176,19 @@ def apply_resource_override(cfg: GatewayConfig, backend: str, payload: dict) -> 
         b.resources.append(new)
 
 
-def apply_prompt_override(cfg: GatewayConfig, backend: str, payload: dict) -> None:
-    """Upsert one prompt's override from a UI payload (#15) — the tool model
-    applied to prompts: diff-vs-default storage, #139 merge semantics for
-    absent keys, identifier + collision validation on renames, and a
-    transform dry-build so a save can never persist a config that fails the
-    next mount. Argument descriptions are rewritable; argument NAMES are not
-    (the args dict is forwarded to the backend verbatim)."""
+def apply_prompt_override(
+    cfg: GatewayConfig,
+    backend: str,
+    payload: dict,
+    *,
+    live_prompt_names: set[str] | None = None,
+) -> None:
+    """Upsert one prompt's override from a UI payload (#15).
+
+    ``live_prompt_names`` supplements captured defaults for rename collision
+    checks when the backend is mounted; runtime list transformation repeats the
+    invariant so a backend catalog change can never publish duplicate names.
+    """
     b = next((x for x in cfg.backends if x.name == backend), None)
     if b is None:
         raise cl.ConfigError(f"unknown backend {backend!r}")
@@ -1237,28 +1243,34 @@ def apply_prompt_override(cfg: GatewayConfig, backend: str, payload: dict) -> No
         enabled=enabled,
         args=args,
     )
-    # Broadcast-level collision check: an enabled prompt's effective name must
-    # be unique within the backend (Claude can't tell two apart otherwise).
-    if new.enabled:
-        eff_name = new.name or original
-        for dp in defaults.get("prompts", []):
-            other = dp["original"]
-            if other == original:
-                continue
-            other_ov = next((p for p in b.prompts if p.original == other), None)
-            if other_ov is not None and not other_ov.enabled:
-                continue
-            other_name = other_ov.name if (other_ov and other_ov.name) else other
-            if other_name == eff_name:
-                raise cl.ConfigError(
-                    f"broadcast name {eff_name!r} is already used by prompt "
-                    f"{other!r} in backend {backend!r} — names must be unique; "
-                    f"pick a different one"
-                )
     has_override = bool(new.name or title or description or not enabled or args)
     b.prompts = [p for p in b.prompts if p.original != original]
     if has_override:
         b.prompts.append(new)
+    known_originals = {
+        p["original"] for p in defaults.get("prompts", []) if "original" in p
+    }
+    if live_prompt_names is not None:
+        known_originals.update(live_prompt_names)
+    broadcast: dict[str, str] = {}
+    for candidate in sorted(known_originals):
+        candidate_override = next(
+            (p for p in b.prompts if p.original == candidate), None
+        )
+        if candidate_override is not None and not candidate_override.enabled:
+            continue
+        target = (
+            candidate_override.name
+            if candidate_override is not None and candidate_override.name
+            else candidate
+        )
+        if previous := broadcast.get(target):
+            raise cl.ConfigError(
+                f"broadcast name {target!r} is already used by prompts "
+                f"{previous!r} and {candidate!r} in backend {backend!r} — "
+                "pick a different one"
+            )
+        broadcast[target] = candidate
     _reject_transform_landmines(cfg, b)
 
 
@@ -1830,6 +1842,22 @@ class _AdminCtx:
 
     def load(self) -> GatewayConfig:
         return cl.load(self.config_path)
+
+    async def live_prompt_names(self, name: str) -> set[str] | None:
+        """Read untransformed prompt names from a mounted backend provider."""
+        proxy = self.backend_runtime.get_proxy(name)
+        if proxy is None:
+            return None
+        try:
+            async with asyncio.timeout(CAPTURE_TIMEOUT):
+                catalogs = await asyncio.gather(
+                    *(provider.list_prompts() for provider in proxy.providers)
+                )
+        except Exception as exc:
+            raise cl.ConfigError(
+                f"could not validate live prompts for backend {name!r}: {exc}"
+            ) from exc
+        return {prompt.name for catalog in catalogs for prompt in catalog}
 
     def commit(
         self,
