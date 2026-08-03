@@ -54,7 +54,7 @@ dev = [
     "httpx2>=2.5.0",
     "hypothesis>=6.155.7",
     "jsonschema>=4.26.0",
-    "pip-audit==2.9.0",
+    "pip-audit==2.10.1",
     "pytest>=9.1.1",
     "ruff==0.15.22",
     # Advisory only until the tracked type-debt Issue is resolved.  Keep the
