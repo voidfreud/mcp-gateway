@@ -7,6 +7,7 @@ import pytest
 import structlog
 from fastmcp import Client, FastMCP
 from fastmcp.tools import ToolResult
+from jsonschema import Draft202012Validator
 from mcp.types import ImageContent, TextContent
 from starlette.applications import Starlette
 from starlette.testclient import TestClient
@@ -84,6 +85,65 @@ def test_config_roundtrip_preserves_stable_bindings():
     reparsed = cl.GatewayConfig.model_validate(tomllib.loads(cl.dump_toml(cfg)))
     assert reparsed == cfg
     assert reparsed.virtual_tools[0].members[0].backend_id == "backend-a"
+
+
+def _tool_with_input(input_config: dict) -> cl.VirtualTool:
+    return cl.VirtualTool.model_validate(
+        {
+            "name": "schema_contract",
+            "description": "Exercise one public input schema.",
+            "inputs": [input_config],
+            "members": [{"backend_id": "backend-a", "tool_original": "search"}],
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    "input_config",
+    [
+        {"name": "value", "type": "string"},
+        {"name": "value", "type": "string", "required": False},
+        {"name": "value", "type": "string", "required": False, "default": "x"},
+        {"name": "value", "type": "integer", "required": False, "default": 2},
+        {"name": "value", "type": "number", "required": False, "default": 2.5},
+        {"name": "value", "type": "boolean", "required": False, "default": False},
+    ],
+)
+def test_virtual_input_schemas_validate_against_draft_2020_12(input_config):
+    tool = _tool_with_input(input_config)
+    schema = vt.input_schema(tool)
+    Draft202012Validator.check_schema(schema)
+    Draft202012Validator.check_schema(vt.VIRTUAL_OUTPUT_SCHEMA)
+
+    validator = Draft202012Validator(schema)
+    assert validator.is_valid({}) is not input_config.get("required", True)
+    assert not validator.is_valid({"value": None})
+    property_schema = schema["properties"]["value"]
+    if "default" in property_schema:
+        assert Draft202012Validator(property_schema).is_valid(
+            property_schema["default"]
+        )
+
+
+def test_optional_virtual_input_schema_matches_runtime_null_rejection():
+    tool = _tool_with_input({"name": "value", "type": "string", "required": False})
+    assert vt.input_schema(tool)["properties"]["value"] == {"type": "string"}
+    with pytest.raises(ValueError, match="must be string"):
+        vt._validate_arguments(tool, {"value": None})
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_non_finite_virtual_defaults_and_static_arguments_are_rejected(value):
+    with pytest.raises(cl.ConfigError, match="finite"):
+        cl.VirtualInput(name="value", type="number", required=False, default=value)
+    with pytest.raises(cl.ConfigError, match="finite"):
+        cl.ParamOverride(original="value", default=value)
+    with pytest.raises(cl.ConfigError, match="finite"):
+        cl.VirtualMember(
+            backend_id="backend-a",
+            tool_original="search",
+            static_args={"value": value},
+        )
 
 
 def test_backend_name_virtual_is_permanently_reserved():
