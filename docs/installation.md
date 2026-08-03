@@ -63,8 +63,10 @@ The script is safe to run repeatedly. Each run:
    your clone actually lives. The login service references only this symlink,
    never the clone's real path — so you can move the clone later and fix
    everything by re-running the script (see [Moving the repository](#moving-the-repository)).
-3. **Installs the login service.** It fills in your home directory in
-   `deploy/com.void.mcp-gateway.plist.template` and writes the result to
+3. **Installs the login service.** It creates
+   `~/.local/state/mcp-gateway` for the LaunchAgent's stdout and stderr logs,
+   fills in your home directory in `deploy/com.void.mcp-gateway.plist.template`,
+   and writes the result to
    `~/Library/LaunchAgents/com.void.mcp-gateway.plist`. (The template in the repo
    carries no personal paths, so it is safe to share.)
 4. **Starts the service.** It unloads any previous copy, loads the fresh one, and

@@ -1993,16 +1993,21 @@ def test_install_sh_is_executable_and_parses():
 # ---------------------------------------------------------------------------
 
 
-def _install_sh(args, home, loaded):
+def _install_sh(args, home, loaded, *, installable=False):
     """Run install.sh with a sandbox $HOME and a fake launchctl on PATH.
 
     `loaded` controls what the fake `launchctl print` reports, so the script's
     bootout branch is exercised deterministically without launchd (works in
-    Linux CI too, where launchctl does not exist)."""
+    Linux CI too, where launchctl does not exist). `installable` lets bootstrap
+    and kickstart succeed while print reports no previously loaded service.
+    """
     fake_bin = home / "fakebin"
     fake_bin.mkdir(exist_ok=True)
     lc = fake_bin / "launchctl"
-    lc.write_text("#!/bin/sh\nexit 0\n" if loaded else "#!/bin/sh\nexit 1\n")
+    if installable:
+        lc.write_text('#!/bin/sh\nif [ "$1" = "print" ]; then exit 1; fi\nexit 0\n')
+    else:
+        lc.write_text("#!/bin/sh\nexit 0\n" if loaded else "#!/bin/sh\nexit 1\n")
     lc.chmod(0o755)
     env = dict(os.environ)
     env["HOME"] = str(home)
@@ -2027,6 +2032,14 @@ def _fake_install(home):
     link = opt / "mcp-gateway"
     link.symlink_to(REPO_ROOT)
     return plist, link
+
+
+def test_fresh_install_creates_state_directory_before_launch(tmp_path):
+    state = tmp_path / ".local" / "state" / "mcp-gateway"
+    assert not state.exists()
+    proc = _install_sh([], tmp_path, loaded=False, installable=True)
+    assert proc.returncode == 0, proc.stderr
+    assert state.is_dir()
 
 
 def test_uninstall_dry_run_renders_actions_and_keeps_everything(tmp_path):
