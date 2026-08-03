@@ -5,6 +5,6 @@ instructions — while forwarding the real calls untouched."""
 from importlib.metadata import PackageNotFoundError, version
 
 try:
-    __version__ = version("mcp-gateway")
+    __version__ = version("mcp-local-gateway")
 except PackageNotFoundError:  # running from a checkout without install
     __version__ = "0.0.0.dev0"

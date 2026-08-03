@@ -935,6 +935,12 @@ class GatewayConfig(BaseModel, extra="forbid"):
     # mount, the pre-#157 behavior). Event-driven triggers — tools/
     # list_changed, admin page load, manual Re-inspect — are NEVER gated.
     baseline_max_age: int = Field(default=DEFAULT_BASELINE_MAX_AGE, ge=0)
+    # #A8: daily check against the PyPI release feed (opt-out). When enabled
+    # the lifespan runs exactly one update-check monitor and the Admin API
+    # surfaces the cached status; a change is read at boot, so it needs a
+    # daemon restart. strict=True keeps the toggle boolean-only — a TOML/JSON
+    # 1/"yes"/"on" can never silently coerce into True.
+    update_check: bool = Field(default=True, strict=True)
     # Optional bearer token required on every backend MCP endpoint (#26) —
     # defense-in-depth on the loopback bind. Store a ${ENV} ref, never the raw
     # value; the server resolves it ONCE at startup via expand_env (a missing
@@ -1698,6 +1704,8 @@ def to_raw(cfg: GatewayConfig) -> dict:  # noqa: PLR0915 — field-by-field TOML
         out["introspect_interval"] = cfg.introspect_interval
     if cfg.baseline_max_age != DEFAULT_BASELINE_MAX_AGE:  # persist non-default (#157)
         out["baseline_max_age"] = cfg.baseline_max_age
+    if not cfg.update_check:  # default True — only persist the opt-out (#A8)
+        out["update_check"] = False
     if cfg.bearer_token is not None:  # default None — only persist when set (#26)
         out["bearer_token"] = cfg.bearer_token
     if cfg.oauth is not None:

@@ -25,11 +25,12 @@ def _release_root(
     root = tmp_path / directory
     root.mkdir()
     (root / "pyproject.toml").write_text(
-        f'[project]\nname = "mcp-gateway"\nversion = "{version}"\n',
+        f'[project]\nname = "mcp-local-gateway"\nversion = "{version}"\n',
         encoding="utf-8",
     )
     (root / "uv.lock").write_text(
-        f'version = 1\n[[package]]\nname = "mcp-gateway"\nversion = "{version}"\n',
+        f'version = 1\n[[package]]\nname = "mcp-local-gateway"\n'
+        f'version = "{version}"\n',
         encoding="utf-8",
     )
     (root / "CHANGELOG.md").write_text(
@@ -46,13 +47,13 @@ def _write_wheel(
     requirements: tuple[str, ...] = (),
 ) -> Path:
     wheel_name, _, _ = contract.expected_artifact_names(version)
-    dist_info = f"mcp_gateway-{version}.dist-info"
+    dist_info = f"mcp_local_gateway-{version}.dist-info"
     with zipfile.ZipFile(output / wheel_name, "w") as archive:
         archive.writestr("mcp_gateway/__init__.py", "")
         archive.writestr("mcp_gateway/admin.html", "<html></html>")
         archive.writestr("mcp_gateway/config.default.toml", "[gateway]\n")
         metadata = (
-            "Metadata-Version: 2.4\nName: mcp-gateway\n"
+            "Metadata-Version: 2.4\nName: mcp-local-gateway\n"
             f"Version: {metadata_version or version}\n"
             + "".join(f"Requires-Dist: {requirement}\n" for requirement in requirements)
         )
@@ -81,13 +82,13 @@ def _write_sdist(
     requirements: tuple[str, ...] = (),
 ) -> Path:
     _, sdist_name, _ = contract.expected_artifact_names(version)
-    root = f"mcp_gateway-{version}"
+    root = f"mcp_local_gateway-{version}"
     entries = {
         ".gitignore": "*\n",
         "LICENSE": "MIT\n",
         "README.md": "# gateway\n",
         "pyproject.toml": "[project]\n",
-        "PKG-INFO": "Metadata-Version: 2.4\nName: mcp-gateway\n"
+        "PKG-INFO": "Metadata-Version: 2.4\nName: mcp-local-gateway\n"
         f"Version: {metadata_version or version}\n"
         + "".join(f"Requires-Dist: {requirement}\n" for requirement in requirements),
         "src/mcp_gateway/__init__.py": "",
@@ -178,7 +179,7 @@ def test_version_contract_requires_project_lock_changelog_and_tag_to_agree(
     assert contract.validate_versions(root, "v1.0.0") == VERSION
 
     (root / "uv.lock").write_text(
-        'version = 1\n[[package]]\nname = "mcp-gateway"\nversion = "1.0.1"\n',
+        'version = 1\n[[package]]\nname = "mcp-local-gateway"\nversion = "1.0.1"\n',
         encoding="utf-8",
     )
     with pytest.raises(contract.ContractError, match="disagree"):
@@ -197,7 +198,7 @@ def test_version_contract_rejects_nonstable_and_nonunique_workspace_versions(
 
     root = _release_root(tmp_path, directory="unique-lock-root")
     with (root / "uv.lock").open("a", encoding="utf-8") as lock:
-        lock.write('[[package]]\nname = "mcp-gateway"\nversion = "1.0.0"\n')
+        lock.write('[[package]]\nname = "mcp-local-gateway"\nversion = "1.0.0"\n')
     with pytest.raises(contract.ContractError, match="exactly one"):
         contract.validate_versions(root)
 
@@ -283,7 +284,7 @@ def test_clean_install_receipt_is_offline_no_deps_and_checks_metadata(
 ) -> None:
     root = _release_root(tmp_path)
     (root / "pyproject.toml").write_text(
-        '[project]\nname = "mcp-gateway"\nversion = "1.0.0"\n'
+        '[project]\nname = "mcp-local-gateway"\nversion = "1.0.0"\n'
         'dependencies = ["fastmcp==3.4.4"]\n',
         encoding="utf-8",
     )
@@ -337,7 +338,7 @@ def test_clean_install_receipt_rejects_missing_or_drifted_runtime_metadata(
 ) -> None:
     root = _release_root(tmp_path)
     (root / "pyproject.toml").write_text(
-        '[project]\nname = "mcp-gateway"\nversion = "1.0.0"\n'
+        '[project]\nname = "mcp-local-gateway"\nversion = "1.0.0"\n'
         'dependencies = ["fastmcp==3.4.4"]\n',
         encoding="utf-8",
     )
@@ -353,7 +354,7 @@ def test_wheel_and_sdist_requirements_must_match_project_metadata(
 ) -> None:
     root = _release_root(tmp_path)
     (root / "pyproject.toml").write_text(
-        '[project]\nname = "mcp-gateway"\nversion = "1.0.0"\n'
+        '[project]\nname = "mcp-local-gateway"\nversion = "1.0.0"\n'
         'dependencies = ["fastmcp==3.4.4"]\n',
         encoding="utf-8",
     )
@@ -385,7 +386,7 @@ def test_sbom_export_requires_supported_uv_and_validates_output(
 
     monkeypatch.setattr(contract, "_run_checked", fake_run)
     sbom = contract.export_sbom(output, VERSION, root=tmp_path, uv="uv")
-    assert sbom.name == "mcp_gateway-1.0.0.cdx.json"
+    assert sbom.name == "mcp_local_gateway-1.0.0.cdx.json"
 
     monkeypatch.setattr(
         contract,
@@ -424,9 +425,9 @@ def test_build_contract_has_one_offline_build_and_writes_release_assets(
     artifacts = contract.build_release(root, "dist", "v1.0.0")
     assert [command[1] for command in calls].count("build") == 1
     assert [asset.name for asset in artifacts.publishable] == [
-        "mcp_gateway-1.0.0-py3-none-any.whl",
-        "mcp_gateway-1.0.0.cdx.json",
-        "mcp_gateway-1.0.0.tar.gz",
+        "mcp_local_gateway-1.0.0-py3-none-any.whl",
+        "mcp_local_gateway-1.0.0.cdx.json",
+        "mcp_local_gateway-1.0.0.tar.gz",
     ]
     assert artifacts.checksums.read_text(encoding="utf-8")
 

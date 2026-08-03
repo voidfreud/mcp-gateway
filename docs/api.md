@@ -50,7 +50,7 @@ of this — but it is here when you want it.
 | Method | Path | Body | Response |
 |--------|------|------|----------|
 | GET | `/admin` | — | The admin UI page (HTML). |
-| GET | `/admin/api/state` | — | Full UI state: every backend, its captured default tools/params, and your overrides. Each tool also carries its behavior-hook specs read-only — `validate`, `post_process` (`module:function` or `null`) and `hook_error` (`null` when absent/loading fine, else the current load failure). Hooks are hand-authored in `config.toml`, not writable via the API; `PUT /admin/api/override` preserves them. |
+| GET | `/admin/api/state` | — | Full UI state: gateway version/update-check status plus every backend, its captured default tools/params, and overrides. `update` is a five-field snapshot (`current_version`, `latest_version`, `available`, `checked_at`, `error`) and this route performs no network I/O. Each tool also carries its behavior-hook specs read-only — `validate`, `post_process` (`module:function` or `null`) and `hook_error` (`null` when absent/loading fine, else the current load failure). Hooks are hand-authored in `config.toml`, not writable via the API; `PUT /admin/api/override` preserves them. |
 | GET | `/admin/api/export` | — (query `?full=true` adds captured defaults) | The complete stored settings bundle as JSON — every override, instruction, pin, and display name. Behavior hooks are excluded (machine-local code references); merge-mode imports preserve stored hooks, replace-mode imports clear them with the rest of the backend's overrides. |
 
 ## Settings (text overrides)
@@ -80,7 +80,7 @@ of this — but it is here when you want it.
 | POST | `/admin/api/enabled` | `{value: bool}` | Master switch: enable/disable every backend, mounting or unmounting each. `{ok, reloaded: "in-process"}`. |
 | POST | `/admin/api/backend/{name}/pin` | `{value: bool}` | Toggle per-backend eager loading (pin all its tools). `{ok, reloaded: "in-process"}`. |
 | POST | `/admin/api/backend/{name}/stateless` | `{value: bool}` | Session strategy: `false` = warm (one persistent connection, auto-repaired if it dies), `true` = fresh session per call. Saves and recycles the backend live — no restart. `{ok, reloaded: "recycled", stateless}`. |
-| GET | `/admin/api/settings` | — | The gateway-wide settings: `{bearer_token, introspect_interval, log_level, log_max_bytes, log_backup_count}`. `bearer_token` is the stored `${ENV_VAR}` reference, never a resolved secret. OAuth deployments additionally return read-only `auth_mode` and public `oauth` metadata. |
+| GET | `/admin/api/settings` | — | The gateway-wide settings: `{bearer_token, introspect_interval, update_check, log_level, log_max_bytes, log_backup_count}`. `bearer_token` is the stored `${ENV_VAR}` reference, never a resolved secret. OAuth deployments additionally return read-only `auth_mode` and public `oauth` metadata. |
 | PUT | `/admin/api/settings` | Any subset of the settings keys below. | Validates and persists boot-time settings. A launchd-managed daemon is asked to restart (`reloaded: "restarting"`); a foreground/development process returns `"dev-no-restart"`, leaving the saved values for its next real restart. In OAuth mode, changing `bearer_token` is rejected. |
 
 ### Gateway settings payload
@@ -91,14 +91,15 @@ of this — but it is here when you want it.
 |-----|-----------|------------------------|
 | `bearer_token` | string or `null` | Optional static-bearer token reference. Use one `${ENV_VAR}` reference; `""` or `null` clears it. Raw secrets are rejected. This key cannot change while `[oauth]` is configured. |
 | `introspect_interval` | integer | Seconds between scheduled backend re-inspection sweeps; `0` disables the scheduled sweep. Must be `0` or greater. Event-driven refresh remains available when it is `0`. |
+| `update_check` | boolean | Enables one startup-and-daily fixed-endpoint PyPI version check. Must be a JSON boolean; `false` disables the monitor after restart. The check never applies updates. |
 | `log_level` | string | Structured-log verbosity: `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL` (normalized to uppercase). |
 | `log_max_bytes` | integer | Maximum size of the active log before rotation, from `65536` to `1073741824` bytes. |
 | `log_backup_count` | integer | Number of rotated log files to retain, from `1` to `100`. |
 
-The Gateway page currently writes `bearer_token`, `introspect_interval`, and
-`log_level`. It displays the two retention values read-only; set
+The Gateway page writes `bearer_token`, `introspect_interval`, `update_check`,
+and `log_level`. It displays the two retention values read-only; set
 `log_max_bytes` and `log_backup_count` through this API or
-[configuration.md](configuration.md). All five values take effect after the
+[configuration.md](configuration.md). All six values take effect after the
 managed restart, or after the next real restart in foreground/development mode.
 
 ## Claude Code registration

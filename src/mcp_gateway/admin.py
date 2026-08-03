@@ -42,6 +42,7 @@ from mcp_gateway import (
     codex_client,
     logging_setup,
     runtime,
+    updates,
 )
 from mcp_gateway import config_loader as cl
 from mcp_gateway import hooks as hooks_mod
@@ -810,6 +811,11 @@ def build_state(cfg: GatewayConfig) -> dict:
         "log_level": cfg.log_level,
         "log_max_bytes": cfg.log_max_bytes,
         "log_backup_count": cfg.log_backup_count,
+        "update_check": cfg.update_check,
+        # #A8: the shared update-check status mapping — the exact process-global
+        # cache (current/latest version, availability, check time, error). No
+        # paths, credentials, or internals ever cross this boundary.
+        "update": updates.current_status(),
         "auth_mode": (
             "oauth_jwt"
             if cfg.oauth is not None
@@ -1975,11 +1981,11 @@ _ENV_REF_RE = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}")
 
 
 def _gateway_settings_routes(ctx: _AdminCtx) -> list[Route]:
-    """#155: read/write the two gateway-wide, boot-time settings — the bearer
-    token (${ENV} ref) and the introspect interval. Both are resolved/read only
-    at startup (token via expand_env in _build_app; interval when the lifespan's
-    #43 sweep is wired), so a change needs a daemon restart to take effect —
-    the PUT returns restart semantics."""
+    """Read/write gateway-wide boot-time settings.
+
+    Values are loaded once by the server lifespan, so persisted changes use the
+    existing managed-restart semantics.
+    """
 
     async def get_settings(_request: Request):
         cfg = ctx.load()
@@ -1990,6 +1996,7 @@ def _gateway_settings_routes(ctx: _AdminCtx) -> list[Route]:
             "log_level": cfg.log_level,
             "log_max_bytes": cfg.log_max_bytes,
             "log_backup_count": cfg.log_backup_count,
+            "update_check": cfg.update_check,
         }
         if cfg.oauth is not None:
             payload.update(
@@ -2056,6 +2063,13 @@ def _gateway_settings_routes(ctx: _AdminCtx) -> list[Route]:
             if isinstance(value, bool) or not isinstance(value, int):
                 return _err("log_backup_count must be an integer between 1 and 100")
             cfg.log_backup_count = value
+        if "update_check" in payload:
+            value = payload.get("update_check")
+            # JSON strings/integers/null must never be coerced — the privacy
+            # toggle is strict (#A8).
+            if not isinstance(value, bool):
+                return _err("update_check must be a boolean")
+            cfg.update_check = value
         try:
             cfg = cl.GatewayConfig.model_validate(cl.to_raw(cfg))
         except (cl.ConfigError, ValueError) as exc:

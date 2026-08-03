@@ -55,6 +55,7 @@ from mcp_gateway import (
     logging_setup,
     oauth,
     runtime,
+    updates,
     virtual_tools,
 )
 
@@ -1101,6 +1102,8 @@ def _build_app(  # noqa: PLR0913, PLR0915 — composition root; takes what it wi
             tg.start_soon(recycle_worker)  # #161: warm-session recycle consumer
             if refresher.interval > 0:
                 tg.start_soon(refresher.interval_loop)
+            if cfg.update_check:  # #A8: one daily update-check monitor (opt-out)
+                tg.start_soon(updates.monitor, log)
             tg.start_soon(virtual_runner)
             # #61: start every backend's runner CONCURRENTLY and don't block
             # readiness on any of them — boot ≈ the slowest backend instead of

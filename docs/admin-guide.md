@@ -271,6 +271,10 @@ only; a duplicate description still has to be fixed by hand.)
 
 The **⚙ Gateway** item collects gateway-wide settings and information:
 
+- **Version and update status.** The header shows the running gateway version.
+  When the daily PyPI check finds a newer stable release, an amber badge shows
+  the version and the explicit `mcp-gateway update` command; it never applies
+  the update.
 - **Stats and context footprint.** A read-only overview of every backend
   endpoint and how much of the Admin/UI's 2,048 UTF-8-byte server-instructions
   budget it uses. Direct TOML values are not schema-capped; other clients may
@@ -285,14 +289,14 @@ The **⚙ Gateway** item collects gateway-wide settings and information:
   import — only the text overrides move.
 - **Auto-uniquify toggle.** The name-collision escape hatch described under
   [Collision handling](#collision-handling).
-- **Gateway settings.** The UI edits three boot-time settings: the **bearer
-  token reference** (an `${ENV_VAR}` name, never the secret itself — see
+- **Gateway settings.** The UI edits four boot-time settings: the **bearer token
+  reference** (an `${ENV_VAR}` name, never the secret itself — see
   [security.md](security.md)), the **scheduled re-scan interval** (`0` = off),
-  and **log verbosity**. It displays log retention read-only; set
-  `log_max_bytes` and `log_backup_count` in `config.toml` or through the
-  [admin API](api.md#gateway-settings-payload). Saving asks a launchd-managed
-  daemon to restart. In foreground/development mode it saves the values and
-  reports that they apply on the next real restart.
+  the **Daily update checks** privacy toggle, and **log verbosity**. It displays
+  log retention read-only; set `log_max_bytes` and `log_backup_count` in
+  `config.toml` or through the [admin API](api.md#gateway-settings-payload).
+  Saving asks a launchd-managed daemon to restart. In foreground/development
+  mode it saves the values and reports that they apply on the next real restart.
   Changing the token invalidates existing client registrations until they carry
   the new value; the UI offers **Re-register all** for Claude Code immediately
   afterward.

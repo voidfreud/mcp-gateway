@@ -34,64 +34,46 @@ behavior.
 
 ## Start here
 
-Prerequisites:
-
-- [`uv`](https://docs.astral.sh/uv/) to install and run the foreground package.
-- [`just`](https://just.systems/) only for the repository's check and macOS
-  deployment recipes, including `just update`.
-- The [GitHub CLI](https://cli.github.com/) authenticated as an account that can
-  read this private repository, to download a release asset.
-
-For a portable, stable foreground run on any platform, download a tagged GitHub
-Release and verify it before installing its wheel:
+Install the public PyPI distribution with [`uv`](https://docs.astral.sh/uv/):
 
 ```bash
-gh auth login
-gh release download vX.Y.Z --repo voidfreud/mcp-gateway --dir mcp-gateway-vX.Y.Z
-cd mcp-gateway-vX.Y.Z
-shasum -a 256 -c SHA256SUMS
-uv tool install --reinstall ./mcp_gateway-*.whl
+uv tool install mcp-local-gateway
 mcp-gateway
 ```
 
-Replace `vX.Y.Z` with the release tag you chose. The [installation guide](docs/installation.md)
-has the complete private-release procedure, including verification and the
-separate checkout workflow for development. The gateway selects its
-configuration in this order: `MCP_GATEWAY_CONFIG`, an existing `./config.toml`,
-then `~/.config/mcp-gateway/config.toml`. It seeds the selected missing path
-from the packaged default, so a fresh installation normally creates the
-home-path file. The bundled DeepWiki and Context7 examples are stateless proxies
-once running, but a freshly seeded default configuration with no
-captured-default state is not network-silent: before the app mounts its
-endpoints, startup connects to both public services to capture each backend's
-baseline metadata and tool list. Complete captured defaults are normally reused
-on later starts. That initial capture is separate from ordinary proxy use; tool
-calls can also make backend requests. Replace or remove those entries before
-starting the gateway if those outbound connections are not appropriate for your
-environment. Stop the foreground process with Ctrl-C.
+The distribution is named `mcp-local-gateway` because the unrelated
+`mcp-gateway` name was already occupied on PyPI. The command and Python package
+remain `mcp-gateway` and `mcp_gateway`.
+Existing `uv` tool installs of v1.1.0 or earlier need the one-time
+[renamed-distribution migration](docs/installation.md#upgrading-from-v110-or-earlier).
 
-For a macOS login service, clone the repository and install it:
+
+On macOS, the first interactive run offers to install the resident LaunchAgent;
+accepting is the entire service setup. On Linux and Windows, or with
+`mcp-gateway --foreground`, it runs in the current terminal. The application
+owns macOS service install, upgrade, status, and removal:
 
 ```bash
-gh auth login
-gh auth setup-git
-git clone https://github.com/voidfreud/mcp-gateway
-cd mcp-gateway
-./install.sh
+mcp-gateway --service-status
+mcp-gateway --uninstall-service
 ```
 
-The compatibility script installs a stable `uv` tool, then the application
-atomically installs and verifies its own LaunchAgent. It does not leave the
-service tied to the checkout path. Preview with `./install.sh --dry-run`; use
-`mcp-gateway --foreground` to run without the service and
-`mcp-gateway --service-status` to inspect resident gateway/backend resources.
-For exact install, migration, update, and removal behavior, read
-[the installation guide](docs/installation.md).
-
 Open <http://127.0.0.1:9100/admin> to import or edit backends. If the relevant
-client CLI is installed, the admin UI provides verified registration controls for
-both Claude Code and Codex; otherwise register the backend endpoint manually in
-your MCP client. See [the admin guide](docs/admin-guide.md).
+client CLI is installed, the Admin UI can register independent endpoints in
+Claude Code and Codex; otherwise register `/<backend>/mcp` manually.
+
+A fresh run normally creates `~/.config/mcp-gateway/config.toml`. The bundled
+DeepWiki and Context7 examples make outbound requests while capturing their
+initial catalogs and when tools are called. The gateway also makes one
+lightweight PyPI version request at startup and daily; it never auto-applies an
+update, tolerates offline failure, and exposes an `update_check` toggle in
+Gateway settings. Remove the sample backends and disable that toggle before
+starting if the environment must be network-silent.
+
+The [installation guide](docs/installation.md) covers the verified private
+GitHub Release fallback, checkout development, configuration selection, and
+complete service lifecycle. See the [Admin guide](docs/admin-guide.md) for
+client registration.
 
 ## Running and updating
 
@@ -104,19 +86,24 @@ curl -s http://127.0.0.1:9100/health
 curl -s http://127.0.0.1:9100/ready
 ```
 
-For a macOS checkout installation only, `just update` is a guarded, stateful,
-readiness-dependent deployment command. Run it from a clean `main` checkout
-after changes have merged: it fast-forwards `origin/main`, synchronizes the
-locked environment, reinstalls/reloads the LaunchAgent, and waits for both
-endpoints. It preserves the configuration and runtime state, but briefly
-interrupts MCP sessions.
+For a normal installation, one command checks PyPI, installs the exact published
+version, restarts the resident service when present, and requires `/health` plus
+`/ready` before reporting success:
 
 ```bash
-just update
+mcp-gateway update
 ```
 
-It is not a general upgrade command for a release-asset installation; install a
-new verified wheel from the next GitHub Release instead.
+Use the same path with an exact prior version for deterministic rollback:
+
+```bash
+mcp-gateway update --version X.Y.Z
+```
+
+An activation failure automatically attempts to reinstall and restart the old
+version. Config, logs, backups, and captured state are never part of the package
+swap. Contributors deploying a checkout can continue to use guarded
+`just update` from a clean `main` branch.
 
 ## What you can change
 
@@ -142,8 +129,8 @@ only suitable for an equivalent unprotected test instance.
 
 - [Installation](docs/installation.md) — foreground and macOS service paths,
   upgrades, moves, and uninstalling.
-- [Releases](docs/releases.md) — versioning, automation, and private release
-  installation.
+- [Releases](docs/releases.md) — versioning, PyPI publishing, and verified
+  fallback artifacts.
 - [Admin guide](docs/admin-guide.md) — editing, registration, and Virtual Tools.
 - [Configuration reference](docs/configuration.md) — `config.toml`, backends,
   secrets, and behavior hooks.

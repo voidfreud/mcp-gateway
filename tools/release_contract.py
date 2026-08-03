@@ -27,7 +27,11 @@ from email.parser import BytesParser
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-PACKAGE_NAME = "mcp-gateway"
+PACKAGE_NAME = "mcp-local-gateway"
+# PEP 503/427 normalized distribution stem used by wheel, sdist, dist-info,
+# and CycloneDX filenames. The import package (PACKAGE_PATH) keeps its own
+# underscore name; the console command keeps its hyphenated script name.
+DISTRIBUTION_NAME = "mcp_local_gateway"
 PACKAGE_PATH = "mcp_gateway"
 SEMVER_RE = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
 CHANGELOG_HEADING_RE = re.compile(
@@ -232,9 +236,9 @@ def expected_artifact_names(version: str) -> tuple[str, str, str]:
     """Return wheel, sdist, and CycloneDX SBOM filenames for ``version``."""
     _require_stable_semver(version, "release version")
     return (
-        f"{PACKAGE_PATH}-{version}-py3-none-any.whl",
-        f"{PACKAGE_PATH}-{version}.tar.gz",
-        f"{PACKAGE_PATH}-{version}.cdx.json",
+        f"{DISTRIBUTION_NAME}-{version}-py3-none-any.whl",
+        f"{DISTRIBUTION_NAME}-{version}.tar.gz",
+        f"{DISTRIBUTION_NAME}-{version}.cdx.json",
     )
 
 
@@ -271,7 +275,7 @@ def _project_requirements(root: Path) -> tuple[str, ...]:
 
 def _wheel_requirements(wheel: Path, version: str) -> tuple[str, ...]:
     """Read the declared runtime requirements from a built wheel's metadata."""
-    metadata_path = f"{PACKAGE_PATH}-{version}.dist-info/METADATA"
+    metadata_path = f"{DISTRIBUTION_NAME}-{version}.dist-info/METADATA"
     try:
         with zipfile.ZipFile(wheel) as archive:
             content = archive.read(metadata_path)
@@ -293,7 +297,7 @@ def _wheel_requirements(wheel: Path, version: str) -> tuple[str, ...]:
 
 def _sdist_requirements(sdist: Path, version: str) -> tuple[str, ...]:
     """Read the declared runtime requirements from a built sdist's PKG-INFO."""
-    metadata_path = f"{PACKAGE_PATH}-{version}/PKG-INFO"
+    metadata_path = f"{DISTRIBUTION_NAME}-{version}/PKG-INFO"
     try:
         with tarfile.open(sdist) as archive:
             extracted = archive.extractfile(metadata_path)
@@ -332,7 +336,7 @@ def validate_runtime_metadata(
 
 
 def _validate_wheel(path: Path, version: str) -> None:
-    dist_info = f"{PACKAGE_PATH}-{version}.dist-info/"
+    dist_info = f"{DISTRIBUTION_NAME}-{version}.dist-info/"
     required = {
         f"{PACKAGE_PATH}/admin.html",
         f"{PACKAGE_PATH}/config.default.toml",
@@ -371,7 +375,7 @@ def _validate_wheel(path: Path, version: str) -> None:
 
 
 def _validate_sdist(path: Path, version: str) -> None:
-    root = f"{PACKAGE_PATH}-{version}/"
+    root = f"{DISTRIBUTION_NAME}-{version}/"
     allowed_top_level = {
         ".gitignore",
         "LICENSE",
@@ -482,7 +486,7 @@ def verify_clean_install(wheel: Path, version: str, *, root: Path, uv: str) -> N
                 "-c",
                 "import configparser, json; "
                 "from importlib.metadata import distribution; "
-                "text = distribution('mcp-gateway').read_text("
+                "text = distribution('mcp-local-gateway').read_text("
                 "'entry_points.txt') or ''; "
                 "parser = configparser.ConfigParser(); parser.read_string(text); "
                 "print(json.dumps({section: sorted(parser[section].items()) "

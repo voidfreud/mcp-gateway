@@ -29,6 +29,28 @@ Only bind to an interface you trust end-to-end (a tailnet, not a café LAN, and
 never the public internet without TLS). Remember a static Admin token is a
 shared secret: every host you give it to can do everything the gateway can.
 
+### Outbound requests and update checks
+
+Loopback limits who can call the gateway; it does not block the gateway's own
+outbound connections. Configured HTTP backends, local stdio backends, tool
+hooks, and tool calls can all reach services with the daemon user's network
+access. The starter config includes DeepWiki and Context7 and contacts them for
+initial metadata capture.
+
+By default the daemon also sends one HTTPS GET to the fixed public
+`mcp-local-gateway` PyPI JSON endpoint at startup and every 24 hours. Its
+User-Agent includes the installed gateway version; the response is size- and
+time-bounded, failures do not affect availability, and no update is applied
+automatically. Set top-level `update_check = false` (or turn off **Daily update
+checks** in Gateway settings) to eliminate those requests.
+
+The explicit `mcp-gateway update` command also fixes its package source to
+public PyPI and ignores ambient `uv`/`pip` index, find-links, constraint, and
+override settings. HTTPS proxy and custom certificate environment settings
+remain available; use the verified private-release fallback when public PyPI is
+not reachable.
+
+
 ## Standard OAuth resource-server mode
 
 For a remote deployment, use `[oauth]` rather than putting a static bearer token

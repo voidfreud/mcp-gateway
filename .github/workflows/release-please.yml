@@ -284,14 +284,14 @@ jobs:
           }
 
           shopt -s nullglob
-          wheels=("dist/mcp_gateway-${version}-"*.whl)
-          sdists=("dist/mcp_gateway-${version}.tar.gz")
+          wheels=("dist/mcp_local_gateway-${version}-"*.whl)
+          sdists=("dist/mcp_local_gateway-${version}.tar.gz")
           (( ${#wheels[@]} == 1 )) || { echo "::error::expected one wheel"; exit 1; }
           (( ${#sdists[@]} == 1 )) || { echo "::error::expected one source archive"; exit 1; }
           [[ -f dist/SHA256SUMS ]] || { echo "::error::missing SHA256SUMS"; exit 1; }
 
           artifacts=("${wheels[0]}" "${sdists[0]}" "dist/SHA256SUMS")
-          sbom="dist/mcp_gateway-${version}.cdx.json"
+          sbom="dist/mcp_local_gateway-${version}.cdx.json"
           [[ -f "$sbom" ]] && artifacts+=("$sbom")
 
           for file in dist/*; do
@@ -362,3 +362,65 @@ jobs:
           # Release Please already created this release. A repair is additive:
           # it uploads only missing allowed files and never replaces an asset.
           gh release upload "$RELEASE_TAG" "${missing[@]}"
+
+      - name: Upload the verified wheel and sdist for PyPI publishing
+        # Only a Release Please-created tag may publish. A dispatch is a
+        # bounded artifact repair and leaves the GitHub Release as the only
+        # distribution channel for that run.
+        if: needs.release-please.outputs.release_created == 'true'
+        # actions/upload-artifact v4.6.2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pypi-package
+          path: |
+            dist/mcp_local_gateway-*.whl
+            dist/mcp_local_gateway-*.tar.gz
+          if-no-files-found: error
+          # GitHub permits workflow reruns for 30 days; keep the immutable
+          # publish payload for that entire OIDC/environment-repair window.
+          retention-days: 30
+
+  publish-pypi:
+    name: Publish to PyPI via Trusted Publishing
+    needs: [release-please, release-artifacts]
+    # Only a Release Please-created tag publishes. A workflow_dispatch is a
+    # bounded artifact repair and must never reach PyPI.
+    if: needs.release-please.outputs.release_created == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # The OIDC audience for Trusted Publishing is scoped to this environment
+    # on the PyPI project; no API token is ever stored in the repository.
+    environment: pypi
+    permissions:
+      id-token: write # Needed for PyPI Trusted Publishing's OIDC exchange.
+    steps:
+      - name: Download the verified wheel and sdist
+        # actions/download-artifact v4.3.0
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: pypi-package
+          path: dist
+
+      - name: Confirm exactly one wheel and one sdist are staged
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          wheels=(dist/mcp_local_gateway-*.whl)
+          sdists=(dist/mcp_local_gateway-*.tar.gz)
+          (( ${#wheels[@]} == 1 )) || { echo "::error::expected exactly one wheel to publish"; exit 1; }
+          (( ${#sdists[@]} == 1 )) || { echo "::error::expected exactly one sdist to publish"; exit 1; }
+          unexpected=()
+          for file in dist/*; do
+            case "$file" in
+              dist/mcp_local_gateway-*.whl|dist/mcp_local_gateway-*.tar.gz) ;;
+              *) unexpected+=("$file") ;;
+            esac
+          done
+          (( ${#unexpected[@]} == 0 )) || { printf '::error::unexpected publish file: %s\n' "${unexpected[*]}"; exit 1; }
+
+      - name: Publish the verified wheel and sdist to PyPI
+        # pypa/gh-action-pypi-publish v1.14.2
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33
+        with:
+          packages-dir: dist

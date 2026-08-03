@@ -59,15 +59,23 @@ machine's absolute footprint as a universal ceiling.
 
 ### Updating the login service
 
-After a change is merged to GitHub, use `just update` from a clean checkout on
-`main`. This guarded checkout deployment fast-forwards source, installs the
-checkout as the stable tool, performs one controlled service restart, and
-requires `/health` plus `/ready` before reporting success. It does not overwrite
-config or runtime state. See [installation.md](installation.md#upgrading-path-a).
+For a public package installation:
 
-The update command refuses dirty worktrees and feature branches. It is stateful
-and may briefly drop active MCP sessions, after which clients can reconnect. Do
-not use it for a foreground release-wheel installation.
+```bash
+mcp-gateway update
+```
+
+The command resolves and installs an exact PyPI version, verifies the new shim,
+then uses that new code for one controlled service restart and requires both
+`/health` and `/ready`. An activation failure triggers an automatic attempt to
+reinstall and restart the old exact version. Use
+`mcp-gateway update --version X.Y.Z` for deliberate rollback. No package swap
+touches config or runtime state.
+
+For a checkout deployment, `just update` remains the guarded equivalent from a
+clean `main` branch. It refuses dirty worktrees and feature branches,
+fast-forwards source, installs the checkout, and performs the same verified
+restart.
 
 ## Health and readiness
 
@@ -95,21 +103,20 @@ are `missing`. HTTP status is `200` when everything is ready and `503` when an
 enabled backend has not mounted — so a monitor can tell "up" from "up but
 degraded".
 
-### The daemon is running from an old clone (a ghost process)
+### The daemon is running an old version
 
-The login service references your clone through a stable symlink, so a repo move
-is handled by re-running `./install.sh`. But if a leftover process from an old
-clone is still running, it can keep `/health` green while the installed service
-points elsewhere. To catch it, compare the path in `/health` against where your
-clone actually lives:
+Compare the installed command with the live health response:
 
 ```bash
+mcp-gateway --version
 curl -s http://127.0.0.1:9100/health
 ```
 
-If the path is not your current clone, you are talking to a ghost. Re-run
-`./install.sh` from the correct location (it unloads the old job and starts the
-right one).
+The package version and the version reported by `/health` should match. A normal
+`mcp-gateway update` verifies this after its controlled restart. If a manually
+installed package was swapped without restarting, run
+`mcp-gateway --install-service --restart`; if the path still names a legacy
+checkout, running `./install.sh` once migrates that installation.
 
 ## Logs
 
@@ -219,7 +226,7 @@ credentialed or remote deployment for live verification.
 | Symptom | Likely cause | What to do |
 |---------|--------------|------------|
 | `/health` doesn't respond at all | Daemon not running | `launchctl print gui/$(id -u)/com.void.mcp-gateway` for status; `launchctl kickstart -k …` to (re)start. Check `gateway.log` and `err.log`. |
-| `/health` green but from the wrong path | Ghost process from an old/moved clone | Re-run `./install.sh` from the current clone location. |
+| `/health` reports an older version than `mcp-gateway --version` | Package was replaced without restarting the resident process | Run `mcp-gateway --install-service --restart`; normal `mcp-gateway update` performs and verifies this automatically. |
 | `/ready` returns 503; a backend shows red in the UI | An enabled backend failed to connect or mount | Check that backend's URL/command and its secret; use **Re-inspect** in the UI, or read the error on its status dot. Other backends keep working. |
 | Every call to the gateway returns 401 | A bearer token is set but the caller is not sending it | Use the matching Claude Code or Codex registration flow described in [security.md](security.md), or provide the token to the admin UI when prompted. |
 | A client still shows the old tool name/description after an edit | The session has not re-listed the backend's tools yet | Reconnect the MCP server, start a new session, or trigger a tool use. Text edits are live in the gateway immediately, but a connected session can cache the old broadcast. |

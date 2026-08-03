@@ -1033,6 +1033,55 @@ def test_introspect_interval_rejects_negative():
         )
 
 
+# --- #A8: update-check toggle -------------------------------------------------
+
+
+def test_update_check_default_true_and_omitted():
+    cfg = cl.GatewayConfig.model_validate(
+        {"backends": [{"name": "b", "transport": "stdio", "command": "/bin/x"}]}
+    )
+    assert cfg.update_check is True
+    assert "update_check" not in cl.to_raw(cfg)  # default True -> minimal TOML
+
+
+def test_update_check_false_survives_toml_roundtrip():
+    cfg = cl.GatewayConfig.model_validate(
+        {
+            "update_check": False,
+            "backends": [{"name": "b", "transport": "stdio", "command": "/bin/x"}],
+        }
+    )
+    raw = cl.to_raw(cfg)
+    assert raw["update_check"] is False  # the opt-out is serialized explicitly
+    reparsed = cl.GatewayConfig.model_validate(tomllib.loads(cl.dump_toml(cfg)))
+    assert reparsed.update_check is False
+    assert "update_check = false" in cl.dump_toml(cfg)
+
+
+def test_update_check_omitted_when_true_after_save_load(tmp_path):
+    # an explicit true must NOT round-trip into a persisted opt-out line
+    cfg = cl.GatewayConfig.model_validate(
+        {"backends": [{"name": "b", "transport": "stdio", "command": "/bin/x"}]}
+    )
+    cl.save(cfg, str(tmp_path / "config.toml"))
+    reloaded = cl.load(tmp_path / "config.toml")
+    assert reloaded.update_check is True
+    assert "update_check" not in (tmp_path / "config.toml").read_text()
+
+
+@pytest.mark.parametrize("bad", [1, 0, "yes", "false", "on", None])
+def test_update_check_rejects_non_bool(bad):
+    import pydantic
+
+    with pytest.raises((cl.ConfigError, pydantic.ValidationError)):
+        cl.GatewayConfig.model_validate(
+            {
+                "update_check": bad,
+                "backends": [{"name": "b", "transport": "stdio", "command": "/bin/x"}],
+            }
+        )
+
+
 # --- structured logging knobs ------------------------------------------------
 
 

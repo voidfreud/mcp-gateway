@@ -26,11 +26,38 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TextIO
 
+from mcp_gateway import updates
+
 LABEL = "com.void.mcp-gateway"
 TEMPLATE_VERSION = "1"
 DEFAULT_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
 LAUNCHCTL = "/bin/launchctl"
 PS = "/bin/ps"
+PYPI_SIMPLE_URL = "https://pypi.org/simple"
+MAX_HEALTH_RESPONSE_BYTES = 4096
+_UNTRUSTED_UV_ENV = frozenset(
+    {
+        "PIP_CONSTRAINT",
+        "PIP_EXTRA_INDEX_URL",
+        "PIP_FIND_LINKS",
+        "PIP_INDEX_URL",
+        "PIP_NO_INDEX",
+        "UV_BUILD_CONSTRAINT",
+        "UV_CONFIG_FILE",
+        "UV_CONSTRAINT",
+        "UV_DEFAULT_INDEX",
+        "UV_EXCLUDE",
+        "UV_EXTRA_INDEX_URL",
+        "UV_FIND_LINKS",
+        "UV_INDEX",
+        "UV_INDEX_STRATEGY",
+        "UV_INDEX_URL",
+        "UV_INSECURE_HOST",
+        "UV_KEYRING_PROVIDER",
+        "UV_NO_INDEX",
+        "UV_OVERRIDE",
+    }
+)
 
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 Sleeper = Callable[[float], None]
@@ -115,6 +142,16 @@ class UninstallResult:
     unloaded: bool
     removed: tuple[Path, ...]
     purged_data: bool
+
+
+@dataclass(frozen=True)
+class UpdateResult:
+    """Observable result of one verified package replacement."""
+
+    previous_version: str
+    installed_version: str
+    changed: bool
+    service_restarted: bool
 
 
 @dataclass(frozen=True)
@@ -311,9 +348,14 @@ def installed_template_version(paths: ServicePaths | None = None) -> str | None:
     return _stored_environment(actual).get("MCP_GATEWAY_SERVICE_TEMPLATE_VERSION")
 
 
-def _run(runner: Runner, argv: list[str]) -> subprocess.CompletedProcess[str]:
+def _run(
+    runner: Runner, argv: list[str], *, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
+    kwargs: dict[str, Any] = {"check": False, "capture_output": True, "text": True}
+    if env is not None:
+        kwargs["env"] = env
     try:
-        return runner(argv, check=False, capture_output=True, text=True)
+        return runner(argv, **kwargs)
     except (OSError, subprocess.SubprocessError) as exc:
         raise ServiceError(f"could not run {' '.join(argv)}: {exc}") from None
 
@@ -518,6 +560,198 @@ def install_service(
         migrated_config=migrated_config,
         removed_legacy_link=removed_legacy_link,
     )
+
+
+def _pypi_tool_environment() -> dict[str, str]:
+    """Keep tool locations/proxies while refusing ambient package sources."""
+
+    return {
+        key: value for key, value in os.environ.items() if key not in _UNTRUSTED_UV_ENV
+    }
+
+
+def _replace_tool_version(
+    version: str,
+    *,
+    uv: str,
+    runner: Runner,
+) -> None:
+    result = _run(
+        runner,
+        [
+            uv,
+            "tool",
+            "install",
+            "--no-config",
+            "--default-index",
+            PYPI_SIMPLE_URL,
+            "--index-strategy",
+            "first-index",
+            "--keyring-provider",
+            "disabled",
+            "--no-sources",
+            "--reinstall",
+            "--force",
+            f"{updates.DISTRIBUTION_NAME}=={version}",
+        ],
+        env=_pypi_tool_environment(),
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        raise ServiceError(
+            f"uv could not install {updates.DISTRIBUTION_NAME} {version}: "
+            f"{detail or result.returncode}"
+        )
+
+
+def _verify_tool_version(
+    binary: Path,
+    version: str,
+    *,
+    runner: Runner,
+) -> None:
+    result = _run(runner, [str(binary), "--version"])
+    expected = f"mcp-gateway {version}"
+    if result.returncode != 0 or result.stdout.strip() != expected:
+        detail = (result.stderr or result.stdout).strip()
+        raise ServiceError(
+            f"installed command verification failed: expected {expected!r}, "
+            f"got {detail or f'exit {result.returncode}'}"
+        )
+
+
+def _verify_running_gateway(paths: ServicePaths, version: str, binary: Path) -> None:
+    """Require the restarted listener to be the selected uv tool environment."""
+
+    url = f"{_probe_base_url(paths)}/health"
+    try:
+        with urllib.request.urlopen(  # noqa: S310 - operator-configured local endpoint
+            url, timeout=2
+        ) as response:
+            raw = response.read(MAX_HEALTH_RESPONSE_BYTES + 1)
+    except (OSError, urllib.error.HTTPError, urllib.error.URLError) as exc:
+        raise ServiceError(
+            f"could not verify restarted service at {url}: {exc}"
+        ) from None
+    if len(raw) > MAX_HEALTH_RESPONSE_BYTES:
+        raise ServiceError("restarted service /health response exceeded 4 KiB")
+    try:
+        health = raw.decode("utf-8").strip()
+    except UnicodeDecodeError:
+        raise ServiceError("restarted service returned non-UTF-8 /health") from None
+
+    prefix = f"ok mcp-gateway {version} @ "
+    if not health.startswith(prefix):
+        raise ServiceError(
+            f"restarted service version mismatch: expected {version}, got {health!r}"
+        )
+    live_package = Path(health.removeprefix(prefix)).expanduser().resolve()
+    tool_root = binary.expanduser().resolve().parent.parent
+    if live_package != tool_root and tool_root not in live_package.parents:
+        raise ServiceError(
+            "restarted service path mismatch: "
+            f"expected code under {tool_root}, got {live_package}"
+        )
+
+
+def _restart_after_update(
+    installer: Callable[..., InstallResult],
+    *,
+    paths: ServicePaths,
+    binary: Path,
+    version: str,
+    live_verifier: Callable[[ServicePaths, str, Path], None],
+) -> None:
+    result = installer(paths=paths, binary=binary, force_restart=True)
+    if not result.reloaded:
+        raise ServiceError("resident service did not perform the required restart")
+    live_verifier(paths, version, binary)
+
+
+def update_application(  # noqa: PLR0912, PLR0913 - transactional collaborators
+    version: str | None = None,
+    *,
+    paths: ServicePaths | None = None,
+    binary: Path | None = None,
+    uv_binary: str | None = None,
+    runner: Runner = subprocess.run,
+    platform: str | None = None,
+    installer: Callable[..., InstallResult] = install_service,
+    live_verifier: Callable[[ServicePaths, str, Path], None] = _verify_running_gateway,
+) -> UpdateResult:
+    """Install one published version, verify it, and restart/rollback atomically."""
+
+    actual = paths or service_paths()
+    current = updates.installed_version()
+    if current is None or not updates.is_stable_version(current):
+        raise ServiceError(
+            "cannot determine a stable installed version; refusing an update "
+            "without an exact rollback target"
+        )
+
+    if version is not None and not updates.is_stable_version(version):
+        raise ServiceError("update version must be a stable X.Y.Z release")
+    try:
+        target = version or updates.latest_version()
+        if version is not None and not updates.version_exists(version):
+            raise ServiceError(
+                f"{updates.DISTRIBUTION_NAME} {version} is not published on PyPI"
+            )
+        if not updates.version_exists(current, allow_yanked=True):
+            raise ServiceError(
+                f"installed version {current} is not on PyPI; refusing an update "
+                "without a deterministic rollback artifact"
+            )
+    except updates.UpdateCheckError as exc:
+        raise ServiceError(str(exc)) from None
+
+    if target == current:
+        return UpdateResult(current, current, False, False)
+
+    uv = uv_binary or shutil.which("uv")
+    if uv is None:
+        raise ServiceError("uv is required; install it from https://docs.astral.sh/uv/")
+    executable = (binary or actual.binary).expanduser().resolve()
+    resident = (platform or sys.platform) == "darwin" and (
+        actual.plist.is_file() or actual.plist.is_symlink()
+    )
+
+    try:
+        _replace_tool_version(target, uv=uv, runner=runner)
+        _verify_tool_version(executable, target, runner=runner)
+        if resident:
+            _restart_after_update(
+                installer,
+                paths=actual,
+                binary=executable,
+                version=target,
+                live_verifier=live_verifier,
+            )
+        restarted = resident
+        return UpdateResult(current, target, True, restarted)
+    except Exception as exc:
+        rollback_error: Exception | None = None
+        try:
+            _replace_tool_version(current, uv=uv, runner=runner)
+            _verify_tool_version(executable, current, runner=runner)
+            if resident:
+                _restart_after_update(
+                    installer,
+                    paths=actual,
+                    binary=executable,
+                    version=current,
+                    live_verifier=live_verifier,
+                )
+        except (
+            Exception
+        ) as rollback_exc:  # pragma: no cover - catastrophic double fault
+            rollback_error = rollback_exc
+        detail = f"update to {target} failed: {exc}"
+        if rollback_error is None:
+            detail += f"; rolled back to {current}"
+        else:
+            detail += f"; rollback to {current} also failed: {rollback_error}"
+        raise ServiceError(detail) from None
 
 
 def refresh_installed_service(

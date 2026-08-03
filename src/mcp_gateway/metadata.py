@@ -18,7 +18,7 @@ def gateway_version() -> str:
     development.  The value is cached because it is immutable for a process.
     """
     try:
-        return importlib.metadata.version("mcp-gateway")
+        return importlib.metadata.version("mcp-local-gateway")
     except importlib.metadata.PackageNotFoundError:
         pass
     try:

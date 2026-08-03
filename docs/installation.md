@@ -1,45 +1,108 @@
 # Installation
 
-mcp-gateway can run in the foreground on any platform or as a macOS login
-service. There are two installation paths:
-
-- **A verified GitHub Release wheel (stable, any platform).** Download a tagged
-  private release with the GitHub CLI, verify its checksum, install the wheel
-  with `uv`, and start it in the foreground. No login service is set up; this is
-  the stable installation path.
-- **A checkout as a macOS login service.** Contributors and operators who need
-  the repository deployment workflow can clone it and run `./install.sh`. The
-  gateway then starts automatically every time they log in and stays in the
-  background.
-
-Both paths are described below.
+mcp-gateway runs in the foreground on every supported platform and can install
+itself as a resident macOS login service. The normal distribution is the public
+`mcp-local-gateway` package on PyPI; it installs the unchanged `mcp-gateway`
+command and `mcp_gateway` import package. Verified private GitHub Release assets
+and checkout installs remain fallback/contributor paths.
 
 ## Prerequisites
 
 You need [`uv`](https://docs.astral.sh/uv/), Astral's Python tool manager. It
-handles Python and every dependency for you — you do not need to install Python
-separately. To install `uv`:
+handles Python and every dependency; you do not need to install Python
+separately:
 
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-The repository is private. Authenticate the [GitHub CLI](https://cli.github.com/)
-with an account authorized to read it before downloading a release. Before an
-HTTPS clone, run `gh auth setup-git` after `gh auth login` so Git can use that
-authorized account. Install [`just`](https://just.systems/) only when you need
-the repository or macOS recipes, including the guarded `just update` command.
+GitHub authentication is not required for the normal PyPI install. You need the
+[GitHub CLI](https://cli.github.com/) and repository access only for private
+release artifacts or a checkout. Install [`just`](https://just.systems/) only
+for contributor/repository recipes.
 
-To register backends from inside the admin UI, install the client CLI you want
-the gateway to manage: `claude` for Claude Code and/or `codex` for Codex. On
-macOS the gateway also detects the Codex executable bundled with ChatGPT desktop.
-Both integrations are optional—you can always register each `/<backend>/mcp`
-endpoint by hand.
+Claude Code and Codex CLIs are optional. When present, the Admin UI can register
+independent backend endpoints in those clients; manual registration always
+remains available.
 
-## Path A — checkout and install as a login service (macOS)
+## Recommended — public PyPI package
 
-Use this stateful deployment path when you intentionally operate from a
-repository checkout. It is not the stable release-asset channel.
+```bash
+uv tool install mcp-local-gateway
+mcp-gateway
+```
+
+The distribution name differs because another project already owns
+`mcp-gateway` on PyPI. Package installation itself never changes services or
+user state. On the first interactive no-argument launch on macOS, the program
+offers to install its resident LaunchAgent once; accepting completes setup.
+Declining records the choice and starts in the foreground. Use
+`mcp-gateway --foreground` to bypass the offer explicitly.
+
+The macOS application-owned lifecycle creates config/state directories, an
+atomic versioned LaunchAgent plist, and a stable wrapper under
+`~/.local/libexec/mcp-gateway/`. It captures the installing shell's `PATH`,
+starts the service, and requires `/health` and `/ready`. A failed replacement
+restores the prior plist/wrapper and service. Inspect gateway plus backend-child
+resources on demand:
+
+```bash
+mcp-gateway --service-status
+```
+
+Resident mode keeps one gateway process alive. Warm `stdio` backends can remain
+its children; disabled backends consume no session resources, and stateless mode
+remains available when a backend need not stay warm.
+
+A fresh run normally seeds `~/.config/mcp-gateway/config.toml`. The bundled
+DeepWiki and Context7 examples contact those services for initial catalog
+capture and tool calls. With `update_check = true` (the default), the daemon also
+makes one lightweight PyPI version request at startup and daily; failures are
+offline-tolerant and updates are never auto-applied. Remove the sample backends
+and set `update_check = false` before launch for a network-silent configuration.
+### Upgrading from v1.1.0 or earlier
+
+Private releases through v1.1.0 used `mcp-gateway` as the distribution name.
+Because `uv` correctly treats the public `mcp-local-gateway` distribution as a
+different tool, migrate once rather than forcing two tool environments to own
+the same command:
+
+```bash
+uv tool uninstall mcp-gateway
+uv tool install mcp-local-gateway
+```
+
+This removes only the old package environment; gateway config, captured state,
+logs, and backups are unchanged. On macOS, complete the cutover and verify the
+resident service with:
+
+```bash
+mcp-gateway --install-service
+```
+
+On Linux and Windows, start `mcp-gateway` in the foreground as usual.
+
+
+## Authenticated fallback and checkout install
+
+Every release continues to carry checksummed wheel/source artifacts in the
+private GitHub repository. Use this only when PyPI is unavailable or when
+reviewing a specific private artifact:
+
+```bash
+gh auth login
+gh release download vX.Y.Z --repo voidfreud/mcp-gateway --dir mcp-gateway-vX.Y.Z
+cd mcp-gateway-vX.Y.Z
+shasum -a 256 -c SHA256SUMS
+uv tool install --reinstall ./*.whl
+mcp-gateway
+```
+
+The checksum file verifies all downloaded release assets. On systems without
+`shasum`, use an equivalent SHA-256 checker. The SBOM is evidence, not an install
+input. Do not use mutable `main` as a stable package source.
+
+Contributors who intentionally deploy a checkout on macOS can use:
 
 ```bash
 gh auth login
@@ -49,108 +112,22 @@ cd mcp-gateway
 ./install.sh
 ```
 
-The compatibility script installs the checkout as a `uv` tool, then delegates
-service ownership to the installed `mcp-gateway` command. Preview both actions
-without changing the machine with `./install.sh --dry-run`.
+`install.sh` installs the checkout as a stable `uv` tool and delegates to the
+same application-owned service lifecycle. Preview with `./install.sh --dry-run`.
+The installed service does not retain a path into the checkout. Existing
+checkout-era config is copied to `~/.config/mcp-gateway/config.toml` before the
+legacy symlink is removed.
 
-The application creates the state and config directories, an atomic versioned
-LaunchAgent plist, and a stable wrapper under
-`~/.local/libexec/mcp-gateway/`. It captures the installing shell's `PATH`,
-starts the service, and requires both `/health` and `/ready` to pass. Repeating
-the command is idempotent: unchanged files are not rewritten or double-loaded.
-A failed changed install restores the previous plist and wrapper.
-
-The resident service is one gateway process. Warm `stdio` backends can remain
-its child processes; disabled backends consume no session resources, and
-stateless mode remains available for backends that do not need a warm session.
-Inspect the whole resident process tree on demand:
-
-```bash
-mcp-gateway --service-status
-```
-
-To start without installing a login service, use
-`mcp-gateway --foreground`. On the first interactive no-argument launch on
-macOS, the command offers service installation once. Declining records that
-choice and starts in the foreground; it does not prompt again on every run.
-
-### Machine-specific paths
-
-The installed plist contains absolute paths because `launchd` does not
-understand `~`. The application renders those paths locally; no personal path
-is stored in the repository. The service uses
-`~/.config/mcp-gateway/config.toml` and writes launch capture logs plus gateway
-state under `~/.local/state/mcp-gateway/`. If an older checkout installation
-exists, installation copies its `config.toml` to the home config path before
-removing the legacy `~/.local/opt/mcp-gateway` symlink.
-
-If you need optional `newsyslog` rotation for launch capture logs, create its
-account-specific configuration locally from `newsyslog.conf(5)`; it must use
-your absolute paths and account ownership and is not a tracked project file
-(see [operations.md](operations.md#logs)).
-
-## Path B — install a stable release (any platform)
-
-This installs the `mcp-gateway` command globally from a verified GitHub Release
-wheel. It does not install a login service during package installation. In the
-commands below, replace `vX.Y.Z` with a release tag after reviewing its notes.
-
-```bash
-gh auth login
-gh release download vX.Y.Z --repo voidfreud/mcp-gateway --dir mcp-gateway-vX.Y.Z
-cd mcp-gateway-vX.Y.Z
-shasum -a 256 -c SHA256SUMS
-uv tool install --reinstall ./mcp_gateway-*.whl
-mcp-gateway
-```
-
-`gh release download` uses the authenticated account for this private
-repository. On systems without `shasum`, use an equivalent SHA-256 checker.
-The release may also contain an SBOM; it is not an install input. Do not use a
-mutable `main` Git URL as stable-install guidance. A tag-pinned Git install is
-only a developer convenience; see [releases.md](releases.md#installing-a-private-release).
-
-The first time it runs, a fresh standalone install normally creates a starter
-config at `~/.config/mcp-gateway/config.toml` (see [Where the config
-lives](#where-the-config-lives) for the exact selection rule). On macOS, an
-interactive `mcp-gateway` launch first offers to install the resident login
-service; use `mcp-gateway --foreground` to bypass that offer. Other platforms
-start in the foreground.
-
-The shipped default contains two public sample backends, DeepWiki and Context7.
-They are stateless proxies once running, but a freshly seeded default
-configuration with no captured-default state is not network-silent: before the
-app mounts its endpoints, startup connects to both public services to capture
-each backend's baseline metadata and tool list. Complete captured defaults are
-normally reused on later starts. That initial capture is separate from ordinary
-proxy use; tool calls can also make backend requests. Edit or remove those
-entries before starting the gateway if those outbound connections are not
-appropriate for your environment.
-
-To confirm the installed version:
-
-```bash
-mcp-gateway --version
-```
-
-> **Why a GitHub Release and not PyPI?** Releases are private GitHub assets by
-> choice. The `mcp-gateway` name is already taken on PyPI, and the project's
-> package metadata deliberately blocks an accidental upload there.
-
-### On Linux and Windows
-
-There is no login service outside macOS (the login integration uses macOS's
-`launchd`). Use Path B and start `mcp-gateway` yourself — for example from a
-terminal you keep open, or from your own service manager (systemd, a startup
-script, and so on). Everything else — the admin UI, config, backends — works the
-same.
+There is no bundled login-service integration outside macOS. On Linux and
+Windows, run `mcp-gateway` in a terminal or connect it to the service manager of
+your choice; Admin, config, backends, and updates otherwise work the same.
 
 ## Where the config lives
 
 The gateway looks for its config file in this order:
 
-1. The path in the `MCP_GATEWAY_CONFIG` environment variable — the login service
-   (Path A) sets this to `~/.config/mcp-gateway/config.toml`.
+1. The path in the `MCP_GATEWAY_CONFIG` environment variable — the macOS login
+   service sets this to `~/.config/mcp-gateway/config.toml`.
 2. A `config.toml` in the current working directory.
 3. `~/.config/mcp-gateway/config.toml`.
 
@@ -161,45 +138,46 @@ applies, the home path. The gateway therefore does not always create a home
 configuration file. See [configuration.md](configuration.md) for the full
 reference.
 
-## Upgrading (Path A)
+## Updating and rollback
 
-From a **clean checkout on `main`**, run:
+The normal update path requires no GitHub authentication:
+
+```bash
+mcp-gateway update
+```
+
+It resolves the latest published `mcp-local-gateway` version, asks `uv` to
+install that exact version, verifies the new command, and—when the resident
+service exists—uses the newly installed code to refresh service files, restart,
+and require `/health` plus `/ready`. Config, captured defaults, logs, backups,
+and runtime state are never part of the package swap.
+
+For provenance, the updater ignores ambient package-index, find-links,
+constraint, and override settings and resolves from public PyPI only. Network
+proxy and certificate environment settings still apply. Use the verified
+private-release fallback when that fixed source is unavailable.
+
+
+Use the same command with an exact published version to roll back:
+
+```bash
+mcp-gateway update --version X.Y.Z
+```
+
+If activation fails after a package swap, the command automatically attempts to
+reinstall and restart the old exact version and reports whether rollback
+succeeded. Versions predating the first `mcp-local-gateway` PyPI release remain
+available only through the authenticated GitHub Release fallback above.
+
+For a contributor checkout deployment, `just update` remains the guarded path:
 
 ```bash
 cd /path/to/mcp-gateway
 just update
 ```
 
-The guarded recipe fast-forwards from `origin/main`, runs `uv sync --locked`,
-reloads the LaunchAgent through `./install.sh`, and waits for both `/health` and
-`/ready`. It is a stateful deployment operation, not a generic package upgrade:
-it refuses a feature branch or dirty checkout and can briefly interrupt active
-MCP sessions. Your `config.toml`, captured defaults, backups, and runtime state
-are not part of the Git update and are preserved.
-
-If you prefer to run the steps separately:
-
-```bash
-git pull --ff-only origin main
-uv sync --locked
-./install.sh
-```
-
-Confirm the new version with the `/health` check above. A restart briefly drops
-active MCP sessions; clients reconnect to the freshly loaded daemon.
-
-For Path B, download and verify the next release wheel, then reinstall it:
-
-```bash
-gh release download vX.Y.Z --repo voidfreud/mcp-gateway --dir mcp-gateway-vX.Y.Z
-cd mcp-gateway-vX.Y.Z
-shasum -a 256 -c SHA256SUMS
-uv tool install --reinstall ./mcp_gateway-*.whl
-```
-
-For foreground development instead of a stable installation, clone the
-repository, run `uv sync --locked`, then start `uv run mcp-gateway`. Do not
-treat an unpinned `main` checkout as a release.
+It requires clean `main`, fast-forwards `origin/main`, installs the checkout,
+performs one controlled service restart, and verifies health/readiness.
 
 ## Moving the repository
 
@@ -242,7 +220,7 @@ claude mcp remove gateway-<name>
 To remove the separately installed application after removing its service:
 
 ```bash
-uv tool uninstall mcp-gateway
+uv tool uninstall mcp-local-gateway
 ```
 
 Removing only the application first leaves the LaunchAgent inert rather than in
@@ -255,4 +233,4 @@ absent. Still, service-first removal is the supported order.
 - [configuration.md](configuration.md) — the full `config.toml` reference.
 - [operations.md](operations.md) — running, logs, health checks, troubleshooting.
 - [security.md](security.md) — what the gateway protects and what it does not.
-- [releases.md](releases.md) — release automation and private release use.
+- [releases.md](releases.md) — release automation, PyPI publishing, and fallback artifacts.
