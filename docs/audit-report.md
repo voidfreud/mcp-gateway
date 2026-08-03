@@ -14,7 +14,7 @@ Priority-ordered hardening plan derived from the compliance audit (#322–#358) 
 
 | # | Action | Targets (audit refs) | Effort | Acceptance criteria |
 |---|--------|----------------------|--------|---------------------|
-| A0 | **Fresh-install dead daemon (installer lies "done").** `install.sh` defines `STATE_DIR=~/.local/state/mcp-gateway` (line 27) but never creates it, while the rendered plist sends the daemon's stdout/stderr logs there (plist template lines 48–51). launchd does not create parent dirs, so on a brand-new account the job fails to spawn and `install.sh` still exits 0 with "done" — it works on existing machines only because the folder already exists from before. Fix: `mkdir -p "$STATE_DIR"` in install.sh before kickstart (and, long-term, the first-run self-install A7 creates it as part of service setup). | #165 (Boot.4, OpsScripts.1) | S (one line + one regression check) | Fresh-account-style install (state dir absent) creates the dir before kickstart; daemon boots and /health responds |
+| A0 | ✅ **DONE (2026-08-03): Fresh-install dead daemon.** `install.sh` now creates `STATE_DIR=~/.local/state/mcp-gateway` before rendering and starting the LaunchAgent, with a fresh-account regression test proving the directory exists before launch. | #165 (Boot.4, OpsScripts.1) | S | Fresh-account-style install creates the state directory before kickstart |
 
 **Compliance & robustness plan (A1–A6):**
 

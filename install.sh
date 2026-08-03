@@ -202,6 +202,7 @@ if [ ! -f "$TEMPLATE" ]; then
     exit 1
 fi
 run mkdir -p "$AGENTS_DIR"
+run mkdir -p "$STATE_DIR"
 if [ "$DRY_RUN" -eq 1 ]; then
     echo "[dry-run] render $TEMPLATE (@@HOME@@ -> $HOME) -> $AGENTS_DIR/$LABEL.plist"
 else
