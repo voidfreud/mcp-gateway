@@ -4,6 +4,13 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project aims to
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.1](https://github.com/voidfreud/mcp-gateway/compare/v1.2.0...v1.2.1) (2026-08-03)
+
+
+### Bug Fixes
+
+* **deps:** upgrade cryptography to 50.0.0 ([#258](https://github.com/voidfreud/mcp-gateway/issues/258)) ([7dde596](https://github.com/voidfreud/mcp-gateway/commit/7dde596d547142d72b149282c82240ccb961a686))
+
 ## [1.2.0](https://github.com/voidfreud/mcp-gateway/compare/v1.1.0...v1.2.0) (2026-08-03)
 
 
