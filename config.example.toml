@@ -86,6 +86,8 @@ auth_value = "Bearer ${EXA_TOKEN}" # ${ENV} resolved at startup
 # headers_helper = "printf '{\"Authorization\": \"Bearer %s\"}' \"$(get-token)\""
 stateless = true                   # parsed; shared-session reuse is a
                                    # tier-2 optimisation (see README)
+# init_timeout = 30.0              # backend initialize handshake, seconds
+# request_timeout = 300.0          # each forwarded backend request, seconds
 # always_load = true               # pin ALL this backend's tools to load upfront
                                    # (eager — exempt from tool-search deferral)
 

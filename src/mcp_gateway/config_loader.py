@@ -24,6 +24,7 @@ import re
 import subprocess
 import sys
 import tomllib
+from copy import deepcopy
 from pathlib import Path
 from typing import Literal
 
@@ -285,6 +286,10 @@ class PromptOverride(BaseModel, extra="forbid"):
     args: list[PromptArgOverride] = Field(default_factory=list)
 
 
+DEFAULT_BACKEND_INIT_TIMEOUT = 30.0
+DEFAULT_BACKEND_REQUEST_TIMEOUT = 300.0
+
+
 class Backend(BaseModel, extra="forbid"):
     """One backend MCP server and its per-tool text overrides."""
 
@@ -332,6 +337,12 @@ class Backend(BaseModel, extra="forbid"):
     # efficiency knob (parsed; shared-session reuse is a tier-2 optimisation,
     # see README "Session strategy" — default per-request sessions for now)
     stateless: bool = False
+    # Bound every upstream handshake and request so one backend cannot retain
+    # a mount or downstream request forever.
+    init_timeout: float = Field(default=DEFAULT_BACKEND_INIT_TIMEOUT, gt=0, le=300)
+    request_timeout: float = Field(
+        default=DEFAULT_BACKEND_REQUEST_TIMEOUT, gt=0, le=3600
+    )
     # Pin ALL of this backend's tools to load upfront (per-tool meta on each).
     always_load: bool = False
     # Backend-level broadcast switch (#38). False -> NONE of this backend's tools
@@ -1157,6 +1168,31 @@ def tool_hook_fn(backend_name: str, tool: ToolOverride):
     return hooks_mod.make_hook_fn(vfn, pfn), None
 
 
+class _SchemaPreservingToolTransform(ToolTransform):
+    """Keep proxied root definitions that FastMCP's transform inlines."""
+
+    @staticmethod
+    def _restore_definitions(tool):
+        parent = getattr(tool, "parent_tool", None)
+        if parent is None:
+            return tool
+        parent_defs = parent.parameters.get("$defs")
+        if not parent_defs:
+            return tool
+        definitions = deepcopy(parent_defs)
+        definitions.update(tool.parameters.get("$defs", {}))
+        tool.parameters["$defs"] = definitions
+        return tool
+
+    async def list_tools(self, tools):
+        transformed = await super().list_tools(tools)
+        return [self._restore_definitions(tool) for tool in transformed]
+
+    async def get_tool(self, name, call_next, *, version=None):
+        tool = await super().get_tool(name, call_next, version=version)
+        return self._restore_definitions(tool)
+
+
 def build_transforms(  # noqa: PLR0912 — one branch per override field; splitting would scatter the transform assembly
     cfg: GatewayConfig,
     backend: Backend,
@@ -1260,7 +1296,7 @@ def build_transforms(  # noqa: PLR0912 — one branch per override field; splitt
                     enabled=True, meta=pin_meta(original)
                 )
                 index[original] = b.name
-    return ToolTransform(transforms), index
+    return _SchemaPreservingToolTransform(transforms), index
 
 
 class ResourcePromptTransform(Transform):
@@ -1512,6 +1548,10 @@ def to_raw(cfg: GatewayConfig) -> dict:  # noqa: PLR0915 — field-by-field TOML
             if b.env:
                 d["env"] = dict(b.env)
         d["stateless"] = b.stateless
+        if b.init_timeout != DEFAULT_BACKEND_INIT_TIMEOUT:
+            d["init_timeout"] = b.init_timeout
+        if b.request_timeout != DEFAULT_BACKEND_REQUEST_TIMEOUT:
+            d["request_timeout"] = b.request_timeout
         if b.always_load:
             d["always_load"] = True
         if not b.enabled:  # default True — only persist the off state (#38)

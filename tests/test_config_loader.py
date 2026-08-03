@@ -240,6 +240,47 @@ def test_load_secrets_reloads_on_mtime_change(monkeypatch, tmp_path):
     assert cl.load_secrets() == {"A": "two", "B": "three"}
 
 
+@pytest.mark.anyio
+async def test_tool_transform_preserves_root_schema_definitions():
+    from fastmcp.tools.function_tool import FunctionTool
+
+    def lookup(address: dict | None = None) -> str:
+        return str(address)
+
+    tool = FunctionTool.from_function(lookup, name="lookup")
+    definitions = {
+        "address": {
+            "type": "object",
+            "properties": {"city": {"type": "string"}},
+        }
+    }
+    tool.parameters = {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": definitions,
+        "type": "object",
+        "properties": {"address": {"$ref": "#/$defs/address"}},
+        "additionalProperties": False,
+    }
+    cfg = cl.GatewayConfig.model_validate(
+        {
+            "backends": [
+                {
+                    "name": "b",
+                    "transport": "stdio",
+                    "command": "/bin/x",
+                    "tools": [{"original": "lookup", "description": "Rewritten"}],
+                }
+            ]
+        }
+    )
+    transform, _ = cl.build_transforms(cfg, cfg.backends[0])
+
+    transformed = (await transform.list_tools([tool]))[0]
+
+    assert transformed.parameters["$defs"] == definitions
+    assert transformed.parameters["properties"]["address"]
+
+
 # --- eager / always_load meta ----------------------------------------------
 
 
@@ -695,6 +736,40 @@ def test_remote_transports_survive_toml_roundtrip():
         assert reparsed.backends[0].transport == transport
         assert reparsed.backends[0].url == "https://h/mcp"
         assert reparsed.backends[0].command is None
+
+
+def test_backend_timeouts_validate_and_survive_toml_roundtrip():
+    cfg = cl.GatewayConfig.model_validate(
+        {
+            "backends": [
+                {
+                    "name": "b",
+                    "transport": "http",
+                    "url": "https://h/mcp",
+                    "init_timeout": 1.25,
+                    "request_timeout": 45,
+                }
+            ]
+        }
+    )
+    reparsed = cl.GatewayConfig.model_validate(tomllib.loads(cl.dump_toml(cfg)))
+    assert reparsed.backends[0].init_timeout == 1.25
+    assert reparsed.backends[0].request_timeout == 45
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("init_timeout", 0),
+        ("init_timeout", 301),
+        ("request_timeout", 0),
+        ("request_timeout", 3601),
+        ("request_timeout", float("nan")),
+    ],
+)
+def test_backend_timeouts_reject_unbounded_values(field, value):
+    with pytest.raises(ValidationError):
+        _http_backend(**{field: value})
 
 
 def test_duplicate_backend_names_rejected():

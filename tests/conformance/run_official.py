@@ -1,24 +1,19 @@
 #!/usr/bin/env python3
-"""Run a narrow official MCP conformance smoke suite through mcp-gateway.
+"""Run the applicable official MCP server scenarios through mcp-gateway.
 
-This launcher is deliberately **not** a complete MCP certification claim.  The
-official runner's full suite requires a backend with specially named tools and
-fixed responses (images, audio, sampling, elicitation, and more).  Here a
-hermetic FastMCP stdio fixture exercises the gateway's actual per-backend
-Streamable HTTP endpoint with the generic official checks that apply now:
-
-* server initialization and lifecycle;
-* ping;
-* valid tool-list shape; and
-* DNS-rebinding protection.
+The hermetic FastMCP stdio fixture implements the official runner's prescribed
+tools, resources, prompts, completions, and client-interaction hooks. The gate
+runs every server scenario applicable to the gateway's advertised surface,
+including JSON Schema 2020-12 preservation. The upstream polling scenario
+remains excluded because conformance 0.1.16 marks it pending.
 
 Prepare the integrity-locked Node fixture once, then run manually:
 
     npm ci --ignore-scripts --no-audit --no-fund --prefix tests/conformance
     uv run python tests/conformance/run_official.py
 
-Passing artifacts are removed by default.  Failures always retain their
-scratch directory, including gateway, fixture, and official-runner logs.
+Passing artifacts are removed by default. Failures always retain their scratch
+directory, including gateway, fixture, and official-runner logs.
 """
 
 from __future__ import annotations
@@ -42,17 +37,60 @@ FIXTURE = Path(__file__).with_name("official_fixture.py")
 NODE_FIXTURE = Path(__file__).parent
 CONFORMANCE_VERSION = "0.1.16"
 SPEC_VERSION = "2025-11-25"
-SCENARIOS = (
+SKIPPED_SCENARIOS = {
+    "completion-complete": "completion is not advertised by gateway endpoints",
+    "tools-call-sampling": "sampling is a client capability, not a server capability",
+    "tools-call-elicitation": "elicitation is a client capability, not a server one",
+    "elicitation-sep1034-defaults": "elicitation is not a gateway server capability",
+    "elicitation-sep1330-enums": "elicitation is not a gateway server capability",
+    "server-sse-polling": "conformance 0.1.16 marks this scenario pending",
+    "resources-subscribe": "gateway endpoints advertise resources.subscribe=false",
+    "resources-unsubscribe": "gateway endpoints advertise resources.subscribe=false",
+}
+OFFICIAL_SERVER_SCENARIOS = (
     "server-initialize",
+    "logging-set-level",
     "ping",
+    "completion-complete",
     "tools-list",
+    "tools-call-simple-text",
+    "tools-call-image",
+    "tools-call-audio",
+    "tools-call-embedded-resource",
+    "tools-call-mixed-content",
+    "tools-call-with-logging",
+    "tools-call-error",
+    "tools-call-with-progress",
+    "tools-call-sampling",
+    "tools-call-elicitation",
+    "json-schema-2020-12",
+    "elicitation-sep1034-defaults",
+    "server-sse-polling",
+    "server-sse-multiple-streams",
+    "elicitation-sep1330-enums",
+    "resources-list",
+    "resources-read-text",
+    "resources-read-binary",
+    "resources-templates-read",
+    "resources-subscribe",
+    "resources-unsubscribe",
+    "prompts-list",
+    "prompts-get-simple",
+    "prompts-get-with-args",
+    "prompts-get-embedded-resource",
+    "prompts-get-with-image",
     "dns-rebinding-protection",
+)
+SCENARIOS = tuple(
+    scenario
+    for scenario in OFFICIAL_SERVER_SCENARIOS
+    if scenario not in SKIPPED_SCENARIOS
 )
 LAST_SCRATCH: list[Path | None] = [None]
 
 
-class SmokeFailure(AssertionError):
-    """One observable official-conformance smoke failure."""
+class ConformanceFailure(AssertionError):
+    """One observable official-conformance failure."""
 
 
 def _free_port() -> int:
@@ -72,7 +110,7 @@ def _wait_for(predicate: Any, label: str, *, timeout: float = 20) -> None:
             last_error = exc
         time.sleep(0.1)
     suffix = f"; last error: {last_error}" if last_error else ""
-    raise SmokeFailure(f"timed out waiting for {label}{suffix}")
+    raise ConformanceFailure(f"timed out waiting for {label}{suffix}")
 
 
 def _spawn(
@@ -108,7 +146,7 @@ def _stop(processes: list[subprocess.Popen]) -> None:
 
 
 def _write_config(path: Path, *, port: int, log_file: Path) -> None:
-    """Create an isolated gateway config with one in-repo stdio backend."""
+    """Create an isolated gateway config with a persistent fixture backend."""
     path.write_text(
         "\n".join(
             (
@@ -178,14 +216,14 @@ def _run_scenario(
     (scratch / "official-logs" / f"{scenario}.stdout").write_bytes(result.stdout)
     (scratch / "official-logs" / f"{scenario}.stderr").write_bytes(result.stderr)
     if result.returncode != 0:
-        raise SmokeFailure(
+        raise ConformanceFailure(
             f"official conformance scenario {scenario!r} failed with exit "
             f"{result.returncode}; inspect {scratch / 'official-logs'}"
         )
 
 
 def run(keep: bool) -> Path:
-    """Execute the official smoke subset in a private process/config namespace."""
+    """Execute applicable official scenarios in a private process/config namespace."""
     scratch = Path(tempfile.mkdtemp(prefix="mcp-gateway-official-conformance-"))
     LAST_SCRATCH[0] = scratch
     for directory in ("home", "logs", "processes", "official-logs", "official-results"):
@@ -207,8 +245,9 @@ def run(keep: bool) -> Path:
     receipt: dict[str, Any] = {
         "conformance_version": CONFORMANCE_VERSION,
         "endpoint": None,
-        "kind": "official MCP conformance smoke subset, not full certification",
+        "kind": "applicable official MCP server conformance scenarios",
         "scenarios": list(SCENARIOS),
+        "skipped": SKIPPED_SCENARIOS,
         "status": "running",
     }
     processes: list[subprocess.Popen] = []
@@ -259,11 +298,11 @@ def main() -> None:
     try:
         scratch = run(args.keep)
     except Exception as exc:  # noqa: BLE001 - compact CLI failure receipt
-        print(f"OFFICIAL MCP SMOKE FAILED: {exc}", file=sys.stderr)
+        print(f"OFFICIAL MCP CONFORMANCE FAILED: {exc}", file=sys.stderr)
         if LAST_SCRATCH[0] is not None:
             print(f"ARTIFACTS RETAINED: {LAST_SCRATCH[0]}", file=sys.stderr)
         raise SystemExit(1) from exc
-    print(f"OFFICIAL MCP SMOKE PASSED (subset only; not full certification): {scratch}")
+    print(f"OFFICIAL MCP CONFORMANCE PASSED (applicable scenarios): {scratch}")
 
 
 if __name__ == "__main__":

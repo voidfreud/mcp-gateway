@@ -47,11 +47,12 @@ def test_mount_paginates_full_transformed_catalog_with_opaque_cursor(monkeypatch
     source = _make_source_catalog()
     created_with: dict[str, Any] = {}
 
-    def create_proxy(_target, **settings):
+    def create_proxy(**settings):
+        settings.pop("client_factory")
         created_with.update(settings)
         return fastmcp_create_proxy(source, **settings)
 
-    monkeypatch.setattr(server, "create_proxy", create_proxy)
+    monkeypatch.setattr(server, "FastMCPProxy", create_proxy)
     cfg = cl.GatewayConfig.model_validate(
         {
             "backends": [
