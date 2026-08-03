@@ -1,0 +1,371 @@
+"""Contracts for the application-owned macOS LaunchAgent lifecycle."""
+
+from __future__ import annotations
+
+import io
+import os
+import plistlib
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from mcp_gateway import __main__ as cli
+from mcp_gateway import service
+
+
+class FakeLaunchctl:
+    def __init__(self, *, loaded: bool = False, pid: int = 4242) -> None:
+        self.loaded = loaded
+        self.pid = pid
+        self.calls: list[list[str]] = []
+        self.ps_output = ""
+
+    def __call__(self, argv: list[str], **_kwargs) -> subprocess.CompletedProcess[str]:
+        self.calls.append(argv)
+        if argv[0] == service.PS:
+            return subprocess.CompletedProcess(argv, 0, self.ps_output, "")
+        action = argv[1]
+        if action == "print":
+            output = f"\tpid = {self.pid}\n" if self.loaded else ""
+            return subprocess.CompletedProcess(
+                argv, 0 if self.loaded else 3, output, ""
+            )
+        if action == "bootout":
+            self.loaded = False
+        elif action == "bootstrap":
+            self.loaded = True
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+
+def _runtime(fake: FakeLaunchctl) -> service.ServiceRuntime:
+    return service.ServiceRuntime(
+        runner=fake,
+        sleep=lambda _seconds: None,
+        platform="darwin",
+        uid=501,
+        probe=lambda _paths: None,
+    )
+
+
+def _paths(tmp_path: Path) -> service.ServicePaths:
+    paths = service.service_paths(tmp_path)
+    paths.binary.parent.mkdir(parents=True)
+    paths.binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    paths.binary.chmod(0o755)
+    return paths
+
+
+def test_install_renders_versioned_atomic_service_and_captures_path(tmp_path):
+    paths = _paths(tmp_path)
+    fake = FakeLaunchctl()
+
+    result = service.install_service(
+        paths=paths,
+        path_value="/custom/bin:/usr/bin",
+        runtime=_runtime(fake),
+    )
+
+    assert result.changed is True
+    assert result.reloaded is True
+    assert paths.state_dir.is_dir()
+    assert paths.config_dir.is_dir()
+    assert paths.prompted_marker.read_text() == "installed\n"
+    assert paths.wrapper.stat().st_mode & 0o777 == 0o700
+    assert paths.plist.stat().st_mode & 0o777 == 0o600
+    payload = plistlib.loads(paths.plist.read_bytes())
+    assert payload["ProgramArguments"] == [str(paths.wrapper)]
+    assert payload["WorkingDirectory"] == str(paths.config_dir)
+    assert payload["RunAtLoad"] is True
+    assert payload["KeepAlive"] == {"SuccessfulExit": False}
+    assert payload["ExitTimeOut"] == 15
+    environment = payload["EnvironmentVariables"]
+    assert environment["PATH"] == f"{paths.binary.parent}:/custom/bin:/usr/bin"
+    assert environment["MCP_GATEWAY_CONFIG"] == str(paths.config)
+    assert environment["MCP_GATEWAY_SERVICE_TEMPLATE_VERSION"] == "1"
+    assert "/opt/homebrew" not in environment["PATH"]
+    assert [call[1] for call in fake.calls] == ["print", "bootstrap", "kickstart"]
+
+
+def test_reinstall_is_idempotent_and_does_not_double_bootstrap(tmp_path):
+    paths = _paths(tmp_path)
+    fake = FakeLaunchctl()
+    runtime = _runtime(fake)
+    service.install_service(paths=paths, path_value="/bin", runtime=runtime)
+    calls_after_first = list(fake.calls)
+
+    result = service.install_service(paths=paths, path_value="/bin", runtime=runtime)
+
+    assert result.changed is False
+    assert result.reloaded is False
+    assert fake.calls[len(calls_after_first) :] == [
+        [service.LAUNCHCTL, "print", f"gui/501/{service.LABEL}"]
+    ]
+
+
+def test_force_restart_reloads_unchanged_service_for_new_package_code(tmp_path):
+    paths = _paths(tmp_path)
+    fake = FakeLaunchctl()
+    runtime = _runtime(fake)
+    service.install_service(paths=paths, path_value="/bin", runtime=runtime)
+    fake.calls.clear()
+
+    result = service.install_service(
+        paths=paths,
+        path_value="/bin",
+        force_restart=True,
+        runtime=runtime,
+    )
+
+    assert result.changed is False
+    assert result.reloaded is True
+    assert [call[1] for call in fake.calls] == [
+        "print",
+        "print",
+        "bootout",
+        "print",
+        "bootstrap",
+        "kickstart",
+    ]
+
+
+def test_changed_install_boots_out_before_rebootstrap(tmp_path):
+    paths = _paths(tmp_path)
+    fake = FakeLaunchctl()
+    runtime = _runtime(fake)
+    service.install_service(paths=paths, path_value="/first", runtime=runtime)
+    fake.calls.clear()
+
+    result = service.install_service(paths=paths, path_value="/second", runtime=runtime)
+
+    assert result.changed and result.reloaded
+    actions = [call[1] for call in fake.calls]
+    assert actions == ["print", "print", "bootout", "print", "bootstrap", "kickstart"]
+
+
+def test_failed_replacement_restores_previous_service_files(tmp_path):
+    paths = _paths(tmp_path)
+    fake = FakeLaunchctl()
+    runtime = _runtime(fake)
+    service.install_service(paths=paths, path_value="/stable", runtime=runtime)
+    previous_plist = paths.plist.read_bytes()
+    previous_wrapper = paths.wrapper.read_bytes()
+    fake.calls.clear()
+    failing = service.ServiceRuntime(
+        runner=fake,
+        sleep=lambda _seconds: None,
+        platform="darwin",
+        uid=501,
+        probe=lambda _paths: (_ for _ in ()).throw(RuntimeError("not ready")),
+    )
+
+    with pytest.raises(service.ServiceError, match="previous service state restored"):
+        service.install_service(
+            paths=paths,
+            path_value="/broken-update",
+            runtime=failing,
+        )
+
+    assert paths.plist.read_bytes() == previous_plist
+    assert paths.wrapper.read_bytes() == previous_wrapper
+    assert fake.loaded is True
+    assert [call[1] for call in fake.calls] == [
+        "print",
+        "print",
+        "bootout",
+        "print",
+        "bootstrap",
+        "kickstart",
+        "print",
+        "bootout",
+        "print",
+        "bootstrap",
+        "kickstart",
+    ]
+
+
+def test_atomic_replace_failure_keeps_previous_plist(tmp_path, monkeypatch):
+    target = tmp_path / "service.plist"
+    target.write_bytes(b"previous")
+
+    def fail_replace(_source, _target):
+        raise OSError("simulated crash before rename")
+
+    monkeypatch.setattr(service.os, "replace", fail_replace)
+    with pytest.raises(OSError, match="simulated crash"):
+        service._atomic_write(target, b"truncated-new-content", mode=0o600)
+
+    assert target.read_bytes() == b"previous"
+    assert list(tmp_path.iterdir()) == [target]
+
+
+def test_stale_template_refreshes_without_launchctl_or_path_loss(tmp_path, monkeypatch):
+    paths = _paths(tmp_path)
+    fake = FakeLaunchctl()
+    service.install_service(
+        paths=paths, path_value="/captured/path", runtime=_runtime(fake)
+    )
+    payload = plistlib.loads(paths.plist.read_bytes())
+    payload["EnvironmentVariables"]["MCP_GATEWAY_SERVICE_TEMPLATE_VERSION"] = "0"
+    service._atomic_write(
+        paths.plist,
+        plistlib.dumps(payload, fmt=plistlib.FMT_XML, sort_keys=False),
+        mode=0o600,
+    )
+    monkeypatch.setenv("PATH", "/must/not/replace/captured/path")
+
+    assert service.refresh_installed_service(paths=paths, platform="darwin") is True
+
+    refreshed = plistlib.loads(paths.plist.read_bytes())
+    assert refreshed["EnvironmentVariables"]["PATH"].endswith("/captured/path")
+    assert (
+        refreshed["EnvironmentVariables"]["MCP_GATEWAY_SERVICE_TEMPLATE_VERSION"]
+        == service.TEMPLATE_VERSION
+    )
+    assert service.refresh_installed_service(paths=paths, platform="darwin") is False
+
+
+def test_install_migrates_checkout_config_and_removes_legacy_symlink(tmp_path):
+    paths = _paths(tmp_path)
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    (checkout / "config.toml").write_text("host = '127.0.0.1'\n", encoding="utf-8")
+    paths.legacy_link.parent.mkdir(parents=True)
+    paths.legacy_link.symlink_to(checkout)
+
+    result = service.install_service(paths=paths, runtime=_runtime(FakeLaunchctl()))
+
+    assert result.migrated_config is True
+    assert result.removed_legacy_link is True
+    assert paths.config.read_text() == "host = '127.0.0.1'\n"
+    assert paths.config.stat().st_mode & 0o777 == 0o600
+    assert not paths.legacy_link.exists()
+
+
+def test_missing_binary_wrapper_exits_successfully_without_restart_signal(tmp_path):
+    paths = _paths(tmp_path)
+    service.install_service(paths=paths, runtime=_runtime(FakeLaunchctl()))
+    paths.binary.unlink()
+
+    result = subprocess.run(
+        [str(paths.wrapper)], capture_output=True, text=True, check=False
+    )
+
+    assert result.returncode == 0
+    assert "executable missing" in result.stderr
+    assert "inert" in result.stderr
+
+
+def test_uninstall_removes_all_service_artifacts_and_keeps_data(tmp_path):
+    paths = _paths(tmp_path)
+    fake = FakeLaunchctl()
+    runtime = _runtime(fake)
+    service.install_service(paths=paths, runtime=runtime)
+    paths.legacy_link.parent.mkdir(parents=True)
+    paths.legacy_link.symlink_to(tmp_path / "old-checkout")
+    paths.config.write_text("host = '127.0.0.1'\n")
+
+    result = service.uninstall_service(paths=paths, purge_data=False, runtime=runtime)
+
+    assert result.unloaded is True
+    assert not paths.plist.exists()
+    assert not paths.wrapper.exists()
+    assert not paths.prompted_marker.exists()
+    assert not paths.legacy_link.is_symlink()
+    assert paths.config.exists()
+    assert paths.state_dir.is_dir()
+
+
+def test_uninstall_purges_data_only_when_explicit(tmp_path):
+    paths = _paths(tmp_path)
+    runtime = _runtime(FakeLaunchctl())
+    service.install_service(paths=paths, runtime=runtime)
+    paths.config.write_text("host = '127.0.0.1'\n")
+    (paths.state_dir / "gateway.log").write_text("history\n")
+
+    result = service.uninstall_service(paths=paths, purge_data=True, runtime=runtime)
+
+    assert result.purged_data is True
+    assert not paths.config_dir.exists()
+    assert not paths.state_dir.exists()
+
+
+def test_resource_status_reports_gateway_and_backend_process_tree():
+    fake = FakeLaunchctl(loaded=True, pid=100)
+    fake.ps_output = """\
+100 1 51200 0.2 mcp-gateway
+101 100 10240 0.0 backend-one
+102 101 20480 0.1 backend-child
+999 1 99999 9.9 unrelated
+"""
+
+    status = service.resource_status(fake, uid=501)
+
+    assert status.loaded is True
+    assert status.pid == 100
+    assert status.gateway_rss_bytes == 51200 * 1024
+    assert status.child_processes == 2
+    assert status.children_rss_bytes == (10240 + 20480) * 1024
+    assert status.total_rss_bytes == (51200 + 10240 + 20480) * 1024
+    assert status.cpu_percent == 0.2
+
+
+class TTY(io.StringIO):
+    def isatty(self) -> bool:
+        return True
+
+
+def test_first_run_decline_is_prompted_once_then_runs_foreground(tmp_path, monkeypatch):
+    paths = _paths(tmp_path)
+    starts: list[bool] = []
+    monkeypatch.setattr(service, "service_paths", lambda: paths)
+    monkeypatch.setattr(service.sys, "platform", "darwin")
+    monkeypatch.setattr(cli, "_run_foreground", lambda: starts.append(True))
+    first_output = TTY()
+
+    cli.main([], stdin=TTY("n\n"), stdout=first_output, stderr=io.StringIO())
+
+    assert "resident macOS login service" in first_output.getvalue()
+    assert paths.prompted_marker.read_text() == "declined\n"
+    assert starts == [True]
+
+    second_output = TTY()
+    cli.main([], stdin=TTY("y\n"), stdout=second_output, stderr=io.StringIO())
+    assert "resident macOS login service" not in second_output.getvalue()
+    assert starts == [True, True]
+
+
+def test_noninteractive_uninstall_requires_explicit_retention_choice():
+    stderr = io.StringIO()
+    with pytest.raises(SystemExit, match="1"):
+        cli.main(
+            ["--uninstall-service"],
+            stdin=io.StringIO(),
+            stdout=io.StringIO(),
+            stderr=stderr,
+        )
+    assert "requires --keep-data or --purge-data" in stderr.getvalue()
+
+
+def test_service_install_is_polite_off_macos(tmp_path):
+    paths = _paths(tmp_path)
+    with pytest.raises(service.ServiceError, match="only on macOS"):
+        service.install_service(
+            paths=paths,
+            runtime=service.ServiceRuntime(platform="linux"),
+        )
+
+
+def test_install_sh_is_thin_dry_run_wrapper(tmp_path):
+    script = Path(__file__).resolve().parents[1] / "install.sh"
+    result = subprocess.run(
+        ["/bin/bash", str(script), "--dry-run"],
+        env={**os.environ, "HOME": str(tmp_path)},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0
+    assert "uv tool install --force" in result.stdout
+    assert ".local/bin/mcp-gateway --install-service --restart" in result.stdout
+    assert not (tmp_path / ".local").exists()

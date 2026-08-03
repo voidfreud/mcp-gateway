@@ -8,6 +8,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Application-owned macOS resident lifecycle** — the installed CLI now owns
+  atomic versioned LaunchAgent setup, one-time interactive onboarding, stable
+  wrapper/PATH capture, health/readiness-gated controlled restarts, migration
+  from checkout-era service artifacts, explicit keep-or-purge removal, and
+  on-demand gateway/backend process-tree resource reporting. Checkout
+  `install.sh` is now a thin compatibility wrapper around the same lifecycle.
+
 - **Guarded Path A updates** — `just update` now provides one explicit,
   fail-closed deployment command: it requires a clean `main` checkout, pulls
   only fast-forward changes from `origin/main`, synchronizes `uv.lock`, reloads

@@ -80,9 +80,13 @@ cd mcp-gateway
 ./install.sh
 ```
 
-This stateful installation manages a LaunchAgent, a stable symlink, and local
-runtime state. Preview it with `./install.sh --dry-run`. For the exact behavior,
-moving, upgrades, and removal, read [the installation guide](docs/installation.md).
+The compatibility script installs a stable `uv` tool, then the application
+atomically installs and verifies its own LaunchAgent. It does not leave the
+service tied to the checkout path. Preview with `./install.sh --dry-run`; use
+`mcp-gateway --foreground` to run without the service and
+`mcp-gateway --service-status` to inspect resident gateway/backend resources.
+For exact install, migration, update, and removal behavior, read
+[the installation guide](docs/installation.md).
 
 Open <http://127.0.0.1:9100/admin> to import or edit backends. If the relevant
 client CLI is installed, the admin UI provides verified registration controls for

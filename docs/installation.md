@@ -49,55 +49,51 @@ cd mcp-gateway
 ./install.sh
 ```
 
-That is the whole install. To preview exactly what the script will do without
-changing anything, run `./install.sh --dry-run` first.
+The compatibility script installs the checkout as a `uv` tool, then delegates
+service ownership to the installed `mcp-gateway` command. Preview both actions
+without changing the machine with `./install.sh --dry-run`.
 
-### What `install.sh` does
+The application creates the state and config directories, an atomic versioned
+LaunchAgent plist, and a stable wrapper under
+`~/.local/libexec/mcp-gateway/`. It captures the installing shell's `PATH`,
+starts the service, and requires both `/health` and `/ready` to pass. Repeating
+the command is idempotent: unchanged files are not rewritten or double-loaded.
+A failed changed install restores the previous plist and wrapper.
 
-The script is safe to run repeatedly. Each run:
-
-1. **Creates the environment.** If the project's `.venv` does not exist yet, it
-   runs `uv sync` to build it and install every dependency. This produces the
-   `mcp-gateway` program the service runs.
-2. **Wires a stable symlink.** It points `~/.local/opt/mcp-gateway` at wherever
-   your clone actually lives. The login service references only this symlink,
-   never the clone's real path — so you can move the clone later and fix
-   everything by re-running the script (see [Moving the repository](#moving-the-repository)).
-3. **Installs the login service.** It creates
-   `~/.local/state/mcp-gateway` for the LaunchAgent's stdout and stderr logs,
-   fills in your home directory in `deploy/com.void.mcp-gateway.plist.template`,
-   and writes the result to
-   `~/Library/LaunchAgents/com.void.mcp-gateway.plist`. (The template in the repo
-   carries no personal paths, so it is safe to share.)
-4. **Starts the service.** It unloads any previous copy, loads the fresh one, and
-   starts the daemon immediately.
-
-When it finishes it prints a `curl` command to confirm the service is up:
+The resident service is one gateway process. Warm `stdio` backends can remain
+its child processes; disabled backends consume no session resources, and
+stateless mode remains available for backends that do not need a warm session.
+Inspect the whole resident process tree on demand:
 
 ```bash
-curl -s http://127.0.0.1:9100/health
-# -> ok mcp-gateway <version> @ /path/to/your/clone
+mcp-gateway --service-status
 ```
 
-The path in that reply is the directory the running service was actually started
-from. It should match where your clone lives. If it does not, see
-[operations.md](operations.md#the-daemon-is-running-from-an-old-clone-a-ghost-process).
+To start without installing a login service, use
+`mcp-gateway --foreground`. On the first interactive no-argument launch on
+macOS, the command offers service installation once. Declining records that
+choice and starts in the foreground; it does not prompt again on every run.
 
 ### Machine-specific paths
 
-The login service starts under macOS's `launchd`, which does not understand `~`,
-so the installed service file contains your home directory as a full path.
-`install.sh` handles that for you. If you need optional `newsyslog` rotation for
-the launchd capture logs, create its account-specific configuration locally from
-`newsyslog.conf(5)`; it must use your absolute paths and account ownership and is
-not a tracked project file (see [operations.md](operations.md#logs)).
+The installed plist contains absolute paths because `launchd` does not
+understand `~`. The application renders those paths locally; no personal path
+is stored in the repository. The service uses
+`~/.config/mcp-gateway/config.toml` and writes launch capture logs plus gateway
+state under `~/.local/state/mcp-gateway/`. If an older checkout installation
+exists, installation copies its `config.toml` to the home config path before
+removing the legacy `~/.local/opt/mcp-gateway` symlink.
+
+If you need optional `newsyslog` rotation for launch capture logs, create its
+account-specific configuration locally from `newsyslog.conf(5)`; it must use
+your absolute paths and account ownership and is not a tracked project file
+(see [operations.md](operations.md#logs)).
 
 ## Path B — install a stable release (any platform)
 
 This installs the `mcp-gateway` command globally from a verified GitHub Release
-wheel. It does **not** set up a login service — you start the gateway yourself.
-In the commands below, replace `vX.Y.Z` with the latest GitHub Release tag after
-reviewing its notes.
+wheel. It does not install a login service during package installation. In the
+commands below, replace `vX.Y.Z` with a release tag after reviewing its notes.
 
 ```bash
 gh auth login
@@ -116,17 +112,20 @@ only a developer convenience; see [releases.md](releases.md#installing-a-private
 
 The first time it runs, a fresh standalone install normally creates a starter
 config at `~/.config/mcp-gateway/config.toml` (see [Where the config
-lives](#where-the-config-lives) for the exact selection rule). The shipped
-default contains two public sample backends, DeepWiki and Context7. They are
-stateless proxies once running, but a freshly seeded default configuration with
-no captured-default state is not network-silent: before the app mounts its
-endpoints, startup connects to both public services to capture each backend's
-baseline metadata and tool list. Complete captured defaults are normally reused
-on later starts. That initial capture is separate from ordinary proxy use; tool
-calls can also make backend requests. Edit or remove those entries before
-starting the gateway if those outbound connections are not appropriate for your
-environment. The gateway runs in the foreground and stops when you close it or
-press Ctrl-C — start it again whenever you need it.
+lives](#where-the-config-lives) for the exact selection rule). On macOS, an
+interactive `mcp-gateway` launch first offers to install the resident login
+service; use `mcp-gateway --foreground` to bypass that offer. Other platforms
+start in the foreground.
+
+The shipped default contains two public sample backends, DeepWiki and Context7.
+They are stateless proxies once running, but a freshly seeded default
+configuration with no captured-default state is not network-silent: before the
+app mounts its endpoints, startup connects to both public services to capture
+each backend's baseline metadata and tool list. Complete captured defaults are
+normally reused on later starts. That initial capture is separate from ordinary
+proxy use; tool calls can also make backend requests. Edit or remove those
+entries before starting the gateway if those outbound connections are not
+appropriate for your environment.
 
 To confirm the installed version:
 
@@ -151,7 +150,7 @@ same.
 The gateway looks for its config file in this order:
 
 1. The path in the `MCP_GATEWAY_CONFIG` environment variable — the login service
-   (Path A) sets this to the `config.toml` inside your clone.
+   (Path A) sets this to `~/.config/mcp-gateway/config.toml`.
 2. A `config.toml` in the current working directory.
 3. `~/.config/mcp-gateway/config.toml`.
 
@@ -204,67 +203,51 @@ treat an unpinned `main` checkout as a release.
 
 ## Moving the repository
 
-If you move or rename your clone (Path A), the login service would otherwise
-point at the old location. Fix it in one step — from the **new** location, run:
-
-```bash
-./install.sh
-```
-
-That repoints the stable symlink, refreshes the installed service file, and
-restarts the daemon. Nothing else is needed. Confirm with the `/health` check —
-the path it reports should now be the new location.
+The resident service no longer points into the checkout: `./install.sh` installs
+the checkout as a `uv` tool and the plist invokes an application-owned stable
+wrapper. Moving or deleting the clone therefore does not strand the installed
+LaunchAgent. Run `./install.sh` from the new checkout only when you want to
+install that checkout's code as the current tool version.
 
 ## Uninstalling
 
-**Path A (login service)** — one command, symmetric with the install:
+Remove the login service through the installed application:
 
 ```bash
-./install.sh --uninstall
+mcp-gateway --uninstall-service
 ```
 
-That boots out the LaunchAgent, removes the installed service file
-(`~/Library/LaunchAgents/com.void.mcp-gateway.plist`) and the stable symlink
-(`~/.local/opt/mcp-gateway`), and prints exactly what was removed and what was
-deliberately kept. It is idempotent — running it twice, or without an install
-present, exits cleanly saying so. Preview with `--dry-run`.
-
-Your data is **kept** by default: config (`./config.toml` in the clone and/or
-`~/.config/mcp-gateway/`) and runtime state — logs and config backups — under
-`~/.local/state/mcp-gateway/`. To delete the config and state directories too,
-add `--purge` (asks for confirmation; irreversible — the backups live there):
+An interactive uninstall explains that the plist, wrapper, prompt marker, and
+legacy checkout artifacts will be removed, then asks whether to keep config,
+logs, backups, and state. Non-interactive callers must make retention explicit:
 
 ```bash
-./install.sh --uninstall --purge
+mcp-gateway --uninstall-service --keep-data
+mcp-gateway --uninstall-service --purge-data
 ```
 
-If you registered backends in an MCP client, remove those registrations yourself
-— the script cannot do it safely and will remind you. For Claude Code:
+Removal boots out the service before deleting its files and is idempotent. The
+checkout compatibility forms `./install.sh --uninstall` and
+`./install.sh --uninstall --purge` delegate to the same application command;
+add `--dry-run` to preview the delegation.
+
+If you registered backends in an MCP client, remove those registrations
+separately (or use the admin UI's remove buttons before uninstalling). For
+Claude Code:
 
 ```bash
-claude mcp remove gateway-<name>   # for each registered backend
+claude mcp remove gateway-<name>
 ```
 
-(or use the admin UI's remove buttons *before* uninstalling). Then delete the
-clone if you want.
-
-The manual recipe, for reference (what `--uninstall` does):
-
-```bash
-launchctl bootout gui/$(id -u)/com.void.mcp-gateway
-rm ~/Library/LaunchAgents/com.void.mcp-gateway.plist
-rm ~/.local/opt/mcp-gateway
-```
-
-**Path B (standalone tool):**
+To remove the separately installed application after removing its service:
 
 ```bash
 uv tool uninstall mcp-gateway
 ```
 
-This removes only the `mcp-gateway` binary; the same data notes apply —
-`~/.config/mcp-gateway/`, `~/.local/state/mcp-gateway/`, and any client
-registrations stay until you remove them by hand.
+Removing only the application first leaves the LaunchAgent inert rather than in
+a crash loop: the stable wrapper exits successfully when its executable is
+absent. Still, service-first removal is the supported order.
 
 ## Next steps
 
