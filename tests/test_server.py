@@ -7,7 +7,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import plistlib
 import re
 import shutil
 import subprocess
@@ -1957,180 +1956,18 @@ def test_autorefresh_event_paths_are_ungated(tmp_path, monkeypatch):
     assert seen == [0.0, 1234]
 
 
-# ---------------------------------------------------------------------------
-# #149 — launchd decoupled from the repo path via the ~/.local/opt symlink
-# ---------------------------------------------------------------------------
-
-REPO_ROOT = Path(__file__).resolve().parents[1]  # repo root (src layout)
-SYMLINK_PREFIX = "/.local/opt/mcp-gateway"
-
-
-def _plist_strings(node):
-    """Every string value in a parsed plist, recursively."""
-    if isinstance(node, str):
-        yield node
-    elif isinstance(node, dict):
-        for v in node.values():
-            yield from _plist_strings(v)
-    elif isinstance(node, list):
-        for v in node:
-            yield from _plist_strings(v)
-
-
-def _rendered_plist(home="/Users/somebody"):
-    tpl = (REPO_ROOT / "deploy" / "com.void.mcp-gateway.plist.template").read_text()
-    return plistlib.loads(tpl.replace("@@HOME@@", home).encode())
-
-
-def test_plist_template_carries_no_personal_paths():
-    # Shippable: the repo must contain NOBODY's home directory — only the
-    # @@HOME@@ placeholder install.sh renders for whoever installs (#149).
-    tpl = (REPO_ROOT / "deploy" / "com.void.mcp-gateway.plist.template").read_text()
-    assert "@@HOME@@" in tpl
-    assert "/Users/" not in tpl.replace("@@HOME@@", "")
-    assert "/Developer/" not in tpl
-
-
-def test_rendered_plist_paths_all_go_through_stable_symlink():
-    # Rendered for an arbitrary user, every repo reference routes through
-    # ~/.local/opt/mcp-gateway — a hardcoded clone path is exactly the drift
-    # that #149 made invisible.
-    plist = _rendered_plist()
-    strings = list(_plist_strings(plist))
-    assert strings
-
-    for s in strings:
-        assert "/Developer/" not in s, s
-        if "mcp-gateway" in s and "state" not in s and "com.void" not in s:
-            assert SYMLINK_PREFIX + "/" in s or s.endswith(SYMLINK_PREFIX), s
-
-    # The load-bearing keys: the venv console script, through the symlink.
-    assert plist["ProgramArguments"] == [
-        "/Users/somebody/.local/opt/mcp-gateway/.venv/bin/mcp-gateway"
-    ]
-    assert plist["WorkingDirectory"].endswith(SYMLINK_PREFIX)
-    assert SYMLINK_PREFIX + "/" in plist["EnvironmentVariables"]["MCP_GATEWAY_CONFIG"]
-    assert plist["Label"] == "com.void.mcp-gateway"
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_install_sh_is_executable_and_parses():
-    # install.sh maintains the symlink + plist; keep it syntactically valid for
-    # macOS's stock /bin/bash 3.2 (bash -n) and executable.
+    # Keep the checkout compatibility wrapper valid for macOS's stock
+    # /bin/bash 3.2 and executable.
     script = REPO_ROOT / "install.sh"
     assert os.access(script, os.X_OK)
     proc = subprocess.run(
         ["/bin/bash", "-n", str(script)], capture_output=True, text=True, check=False
     )
     assert proc.returncode == 0, proc.stderr
-
-
-# ---------------------------------------------------------------------------
-# #171 — install.sh --uninstall: symmetric one-command removal
-# ---------------------------------------------------------------------------
-
-
-def _install_sh(args, home, loaded, *, installable=False):
-    """Run install.sh with a sandbox $HOME and a fake launchctl on PATH.
-
-    `loaded` controls what the fake `launchctl print` reports, so the script's
-    bootout branch is exercised deterministically without launchd (works in
-    Linux CI too, where launchctl does not exist). `installable` lets bootstrap
-    and kickstart succeed while print reports no previously loaded service.
-    """
-    fake_bin = home / "fakebin"
-    fake_bin.mkdir(exist_ok=True)
-    lc = fake_bin / "launchctl"
-    if installable:
-        lc.write_text('#!/bin/sh\nif [ "$1" = "print" ]; then exit 1; fi\nexit 0\n')
-    else:
-        lc.write_text("#!/bin/sh\nexit 0\n" if loaded else "#!/bin/sh\nexit 1\n")
-    lc.chmod(0o755)
-    env = dict(os.environ)
-    env["HOME"] = str(home)
-    env["PATH"] = f"{fake_bin}:{env['PATH']}"
-    return subprocess.run(
-        ["/bin/bash", str(REPO_ROOT / "install.sh"), *args],
-        capture_output=True,
-        text=True,
-        env=env,
-        check=False,
-    )
-
-
-def _fake_install(home):
-    """Lay down what install.sh creates: the rendered plist and the symlink."""
-    agents = home / "Library" / "LaunchAgents"
-    agents.mkdir(parents=True)
-    plist = agents / "com.void.mcp-gateway.plist"
-    plist.write_text("<plist/>")
-    opt = home / ".local" / "opt"
-    opt.mkdir(parents=True)
-    link = opt / "mcp-gateway"
-    link.symlink_to(REPO_ROOT)
-    return plist, link
-
-
-def test_fresh_install_creates_state_directory_before_launch(tmp_path):
-    state = tmp_path / ".local" / "state" / "mcp-gateway"
-    assert not state.exists()
-    proc = _install_sh([], tmp_path, loaded=False, installable=True)
-    assert proc.returncode == 0, proc.stderr
-    assert state.is_dir()
-
-
-def test_uninstall_dry_run_renders_actions_and_keeps_everything(tmp_path):
-    # Mirrors the installer's --dry-run contract: every action is printed,
-    # nothing is touched, and the kept-data + Claude Code hints are explicit.
-    plist, link = _fake_install(tmp_path)
-    proc = _install_sh(["--uninstall", "--dry-run"], tmp_path, loaded=True)
-    assert proc.returncode == 0, proc.stderr
-    out = proc.stdout
-    assert "[dry-run] launchctl bootout" in out
-    assert f"[dry-run] rm {plist}" in out
-    assert f"[dry-run] rm {link}" in out
-    # user data is listed as KEPT, never as an action
-    assert ".config/mcp-gateway" in out
-    assert ".local/state/mcp-gateway" in out
-    assert "rm -rf" not in out
-    assert "claude mcp remove gateway-<name>" in out
-    assert "nothing was changed" in out
-    assert plist.exists() and link.is_symlink()
-
-
-def test_uninstall_purge_dry_run_adds_data_dirs(tmp_path):
-    _fake_install(tmp_path)
-    proc = _install_sh(["--uninstall", "--purge", "--dry-run"], tmp_path, loaded=True)
-    assert proc.returncode == 0, proc.stderr
-    assert f"[dry-run] rm -rf {tmp_path}/.config/mcp-gateway" in proc.stdout
-    assert f"[dry-run] rm -rf {tmp_path}/.local/state/mcp-gateway" in proc.stdout
-
-
-def test_uninstall_removes_plist_and_symlink_but_keeps_data(tmp_path):
-    plist, link = _fake_install(tmp_path)
-    config = tmp_path / ".config" / "mcp-gateway"
-    config.mkdir(parents=True)
-    state = tmp_path / ".local" / "state" / "mcp-gateway"
-    state.mkdir(parents=True)
-    proc = _install_sh(["--uninstall"], tmp_path, loaded=False)
-    assert proc.returncode == 0, proc.stderr
-    assert not plist.exists()
-    assert not link.exists() and not link.is_symlink()
-    # user data survives a plain --uninstall
-    assert config.is_dir() and state.is_dir()
-    assert "uninstall complete" in proc.stdout
-
-
-def test_uninstall_with_nothing_installed_exits_cleanly(tmp_path):
-    # Idempotent: a second run (or a run with no install present) is a no-op.
-    proc = _install_sh(["--uninstall"], tmp_path, loaded=False)
-    assert proc.returncode == 0, proc.stderr
-    assert "nothing to do" in proc.stdout
-
-
-def test_install_sh_rejects_unknown_flags(tmp_path):
-    proc = _install_sh(["--bogus"], tmp_path, loaded=False)
-    assert proc.returncode == 2
-    assert "usage:" in proc.stderr
 
 
 def test_register_carries_bearer_header_and_redacts_it(tmp_path, monkeypatch):

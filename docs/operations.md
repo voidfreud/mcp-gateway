@@ -5,42 +5,69 @@ recovery, and a troubleshooting table.
 
 ## The daemon
 
-On macOS (Path A install) the gateway runs as a `launchd` LaunchAgent with the
-label **`com.void.mcp-gateway`**. `RunAtLoad` starts it when you log in;
-`KeepAlive` restarts it if it ever dies. It runs the `mcp-gateway` program from
-your clone's environment directly — one resident process, no supervisor.
+On macOS the optional resident mode is a `launchd` LaunchAgent with label
+**`com.void.mcp-gateway`**. `RunAtLoad` starts it at login and `KeepAlive`
+restarts non-zero failures. The plist invokes an application-owned stable
+wrapper rather than a checkout path, so moving or deleting a source clone does
+not strand the job.
 
-Common commands (run them as-is; `$(id -u)` fills in your user id):
+Application-owned lifecycle commands:
 
 ```bash
-# status
-launchctl print gui/$(id -u)/com.void.mcp-gateway
+# install or repair, then require /health and /ready
+mcp-gateway --install-service
 
-# restart
-launchctl kickstart -k gui/$(id -u)/com.void.mcp-gateway
+# loaded state plus gateway and backend-child RSS
+mcp-gateway --service-status
 
-# stop and unload
-launchctl bootout gui/$(id -u)/com.void.mcp-gateway
+# remove service files and explicitly retain user data
+mcp-gateway --uninstall-service --keep-data
 ```
 
-You can also restart it from the admin UI's **⚙ Gateway → Restart** button.
+An interactive no-argument launch offers resident setup once on macOS.
+`mcp-gateway --foreground` always bypasses that offer. Uninstall without a data
+flag asks whether to keep config and state; non-interactive callers must pass
+`--keep-data` or `--purge-data`.
 
-If you installed as a standalone tool (Path B) there is no login service — you
-started `mcp-gateway` yourself, and you stop it the same way (close it, or
-Ctrl-C).
+You can restart the loaded job from the admin UI's **Gateway → Restart** button,
+or directly with:
+
+```bash
+launchctl kickstart -k gui/$(id -u)/com.void.mcp-gateway
+```
+
+### Resource footprint
+
+Resident mode keeps one gateway process alive. Warm `stdio` backends can remain
+child processes so repeated calls avoid session startup; that configurable
+latency tradeoff, not service-management overhead, will usually dominate memory.
+Disabled backends consume no session resources, and backends that do not need a
+warm session can use stateless mode.
+
+`mcp-gateway --service-status` measures the gateway and its complete descendant
+process tree once. It does not add polling, workers, or a daemon-side memory
+limit. From a checkout, the disposable receipt below starts isolated foreground
+instances, samples settled CPU/RSS across restart cycles, and never touches the
+installed service or live backends:
+
+```bash
+uv run python tools/measure_service_resources.py --cycles 3 --settle 5
+```
+
+Review first-to-last RSS and sample spread for growth rather than treating one
+machine's absolute footprint as a universal ceiling.
 
 ### Updating the login service
 
 After a change is merged to GitHub, use `just update` from a clean checkout on
-`main`. This is the macOS service deployment path: it fast-forwards the source,
-synchronizes locked dependencies, reloads launchd, and waits for `/health` plus
-`/ready`. It does not overwrite `config.toml` or runtime state. See
-[installation.md](installation.md#upgrading-path-a).
+`main`. This guarded checkout deployment fast-forwards source, installs the
+checkout as the stable tool, performs one controlled service restart, and
+requires `/health` plus `/ready` before reporting success. It does not overwrite
+config or runtime state. See [installation.md](installation.md#upgrading-path-a).
 
-The update command intentionally refuses dirty worktrees and feature branches;
-this prevents an accidental local experiment from being deployed as the service.
-It is stateful and may briefly drop active MCP sessions, after which clients can
-reconnect. Do not use it for a foreground `uv tool` installation.
+The update command refuses dirty worktrees and feature branches. It is stateful
+and may briefly drop active MCP sessions, after which clients can reconnect. Do
+not use it for a foreground release-wheel installation.
 
 ## Health and readiness
 

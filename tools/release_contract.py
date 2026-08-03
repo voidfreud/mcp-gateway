@@ -497,11 +497,11 @@ def verify_clean_install(wheel: Path, version: str, *, root: Path, uv: str) -> N
                 f"installed entry-point metadata was not JSON: {exc}"
             ) from exc
         if installed_entry_points != {
-            "console_scripts": [["mcp-gateway", "mcp_gateway.server:main"]]
+            "console_scripts": [["mcp-gateway", "mcp_gateway.__main__:main"]]
         }:
             raise ContractError(
                 "installed console entry point must be exactly "
-                "mcp-gateway = mcp_gateway.server:main"
+                "mcp-gateway = mcp_gateway.__main__:main"
             )
 
 

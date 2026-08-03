@@ -1279,21 +1279,9 @@ def _load_config_or_recover(log) -> config_loader.GatewayConfig:
         raise
 
 
-def main() -> None:
-    # `mcp-gateway --version` prints and exits — the install smoke check
-    # (anything else on argv is a usage error; the daemon takes no arguments).
-    args = sys.argv[1:]
-    if args == ["--version"]:
-        print(
-            f"mcp-gateway {admin.gateway_version()} @ {Path(__file__).resolve().parent}"
-        )
-        return
-    if args:
-        print(
-            f"usage: mcp-gateway [--version]  (unexpected: {' '.join(args)})",
-            file=sys.stderr,
-        )
-        raise SystemExit(2)
+def run_foreground() -> None:
+    """Run the daemon in the current process without service CLI dispatch."""
+
     # Configure logging BEFORE loading config, so a load failure is a clean
     # structured line in gateway.log rather than a raw traceback in launchd's
     # err.log (#96). Start on the default log path; re-point if the loaded cfg
@@ -1336,6 +1324,24 @@ def main() -> None:
     finally:
         log.info("gateway_stopping")
         logging_setup.shutdown()
+
+
+def main() -> None:
+    """Compatibility entry point for direct ``mcp_gateway.server`` execution."""
+
+    args = sys.argv[1:]
+    if args == ["--version"]:
+        print(
+            f"mcp-gateway {admin.gateway_version()} @ {Path(__file__).resolve().parent}"
+        )
+        return
+    if args:
+        print(
+            f"usage: mcp-gateway [--version]  (unexpected: {' '.join(args)})",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    run_foreground()
 
 
 if __name__ == "__main__":

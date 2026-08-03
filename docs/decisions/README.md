@@ -35,3 +35,4 @@ remain linked GitHub Issues rather than new ADRs.
 | [0007](0007-catalog-pagination-and-virtual-results.md) | Gateway-owned catalog pagination and Virtual Tool result schemas | Accepted | Refines [ADR-0005](0005-virtual-tools.md) |
 | [0008](0008-runtime-ownership-and-admin-boundaries.md) | Typed runtime ownership and incremental Admin module boundaries | Accepted | — |
 | [0009](0009-process-isolation-boundary.md) | Process isolation is conditional, not a default gateway mode | Accepted | Related to [ADR-0004](0004-per-session-isolation.md) |
+| [0010](0010-resident-launchagent.md) | Resident macOS LaunchAgent availability model | Accepted | Related to [ADR-0002](0002-per-backend-endpoints.md), [ADR-0004](0004-per-session-isolation.md), and [ADR-0009](0009-process-isolation-boundary.md) |

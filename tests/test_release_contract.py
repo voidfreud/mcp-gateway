@@ -60,7 +60,7 @@ def _write_wheel(
         archive.writestr(f"{dist_info}/RECORD", "")
         archive.writestr(
             f"{dist_info}/entry_points.txt",
-            "[console_scripts]\nmcp-gateway = mcp_gateway.server:main\n",
+            "[console_scripts]\nmcp-gateway = mcp_gateway.__main__:main\n",
         )
         archive.writestr(f"{dist_info}/licenses/LICENSE", "MIT\n")
     return output / wheel_name
@@ -291,7 +291,7 @@ def test_clean_install_receipt_is_offline_no_deps_and_checks_metadata(
     output.mkdir()
     wheel = _write_wheel(output, requirements=("fastmcp==3.4.4",))
     commands: list[list[str]] = []
-    entry_points = {"console_scripts": [["mcp-gateway", "mcp_gateway.server:main"]]}
+    entry_points = {"console_scripts": [["mcp-gateway", "mcp_gateway.__main__:main"]]}
     create_console_script = True
 
     def fake_run(command, *, cwd):
@@ -326,7 +326,7 @@ def test_clean_install_receipt_is_offline_no_deps_and_checks_metadata(
     with pytest.raises(contract.ContractError, match="console entry point"):
         contract.verify_clean_install(wheel, VERSION, root=root, uv="uv")
 
-    entry_points["console_scripts"] = [["mcp-gateway", "mcp_gateway.server:main"]]
+    entry_points["console_scripts"] = [["mcp-gateway", "mcp_gateway.__main__:main"]]
     create_console_script = False
     with pytest.raises(contract.ContractError, match="did not create"):
         contract.verify_clean_install(wheel, VERSION, root=root, uv="uv")

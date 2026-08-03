@@ -33,7 +33,7 @@ dependencies = [
 ]
 
 [project.scripts]
-mcp-gateway = "mcp_gateway.server:main"
+mcp-gateway = "mcp_gateway.__main__:main"
 
 [project.urls]
 Repository = "https://github.com/voidfreud/mcp-gateway"
