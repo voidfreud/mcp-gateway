@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import ipaddress
 import json
+import math
 import os
 import re
 import subprocess
@@ -176,6 +177,13 @@ class ParamOverride(BaseModel, extra="forbid"):
     # With a default set, hiding is safe even for a required param: Claude
     # never sees it, the backend always receives this value.
     default: str | int | float | bool | None = None
+
+    @field_validator("default")
+    @classmethod
+    def _default_must_be_finite(cls, value):
+        if isinstance(value, float) and not math.isfinite(value):
+            raise ConfigError("parameter override default must be finite")
+        return value
 
 
 class ToolOverride(BaseModel, extra="forbid", populate_by_name=True):
@@ -536,6 +544,10 @@ class VirtualInput(BaseModel, extra="forbid"):
                 f"virtual input {self.name!r}: a required input cannot have a default"
             )
         if self.default is not None:
+            if isinstance(self.default, float) and not math.isfinite(self.default):
+                raise ConfigError(
+                    f"virtual input {self.name!r}: default must be finite"
+                )
             if isinstance(self.default, bool):
                 valid = self.type == "boolean"
             elif self.type == "integer":
@@ -567,6 +579,20 @@ class VirtualMember(BaseModel, extra="forbid"):
     timeout: float = Field(default=30.0, gt=0, le=300)
     route_patterns: list[str] = Field(default_factory=list)
     route_description: str | None = None
+
+    @field_validator("static_args")
+    @classmethod
+    def _static_args_must_be_finite(cls, values):
+        invalid = sorted(
+            key
+            for key, value in values.items()
+            if isinstance(value, float) and not math.isfinite(value)
+        )
+        if invalid:
+            raise ConfigError(
+                f"virtual member static_args must be finite for {invalid}"
+            )
+        return values
 
     @model_validator(mode="after")
     def _check(self) -> VirtualMember:

@@ -600,8 +600,6 @@ def input_schema(tool: cl.VirtualTool) -> dict:
             schema["description"] = item.description
         if item.default is not None:
             schema["default"] = item.default
-        if not item.required and item.default is None:
-            schema = {"anyOf": [schema, {"type": "null"}], "default": None}
         properties[item.name] = schema
         if item.required:
             required.append(item.name)

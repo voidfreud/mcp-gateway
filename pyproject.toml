@@ -53,6 +53,7 @@ only-include = ["src/mcp_gateway", "README.md", "LICENSE", "pyproject.toml"]
 dev = [
     "httpx2>=2.5.0",
     "hypothesis>=6.155.7",
+    "jsonschema>=4.26.0",
     "pip-audit==2.9.0",
     "pytest>=9.1.1",
     "ruff==0.15.22",
