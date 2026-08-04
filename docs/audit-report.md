@@ -5,9 +5,13 @@
 **Result:** ~200 findings — 9 serious, 28 moderate, remainder minor/clean
 
 **Current status (2026-08-04):** The A0–A8 release-readiness plan below is
-complete. The detailed findings that follow are preserved as point-in-time
-audit evidence, not an automatically current backlog; revalidate a finding
-against the present code and tests before acting on it.
+complete. Post-audit hardening is also complete: v1.3.1 is public, CodeQL
+default setup scans Python and Actions with the extended query suite, its
+high-severity clear-text logging finding was fixed rather than dismissed, and
+the repository currently reports zero open CodeQL, Dependabot, or secret
+scanning alerts. The detailed findings that follow are preserved as
+point-in-time audit evidence, not an automatically current backlog; revalidate
+a finding against the present code and tests before acting on it.
 
 ---
 
@@ -57,21 +61,27 @@ Priority-ordered hardening plan derived from the compliance audit (#322–#358) 
 
 | # | Requirement | Ref | Acceptance |
 |---|-------------|-----|------------|
-| 1 | **[DONE] Auth-free distribution** — the public distribution is `mcp-local-gateway`; the command/import remain `mcp-gateway` / `mcp_gateway`. Tagged releases publish the verified wheel and sdist through OIDC; public checksummed GitHub artifacts remain a fallback. | Release.3/4 | Package metadata, clean-wheel install receipt, pinned publish job, GitHub `pypi` environment, Trusted Publisher, and public v1.2.1 upload verified |
+| 1 | **[DONE] Auth-free distribution** — the public distribution is `mcp-local-gateway`; the command/import remain `mcp-gateway` / `mcp_gateway`. Tagged releases publish the verified wheel and sdist through OIDC; public checksummed GitHub artifacts remain a fallback. | Release.3/4 | Package metadata, clean-wheel install receipt, pinned publish job, GitHub `pypi` environment, Trusted Publisher, and public v1.3.1 upload verified |
 | 2 | **[DONE] `mcp-gateway update` command** — resolves/validates a stable PyPI version, installs that exact version with `uv`, verifies the shim, restarts an existing resident service through the application-owned lifecycle, and requires health/readiness. | A7 req 2; justfile update | Focused success, no-op, unpublished-refusal, resident-restart, and CLI contracts green |
 | 3 | **[DONE] Notify, don't auto-apply** — one immediate/daily bounded request, offline-tolerant status/logging, conditional Admin badge, and strict `update_check` opt-out. | README network-behavior note | Disabled lifespan starts zero monitors; enabled starts one; Admin/config/UI contracts green |
 | 4 | **[DONE] Version-pinned rollback** — activation failure reinstalls/verifies the old exact gateway package version and restarts the previous resident service; `update --version X.Y.Z` is the deliberate rollback path. Compatible dependencies are resolved from PyPI at install time, so this is not a byte-for-byte environment restore. Package changes never touch user config/state. | backups (#172), recovery path | Failure-path package/service rollback contract green |
 | 5 | **[DONE] New-user narrative documented** — auth-free install, resident setup, update notice, one-command apply, version-pinned rollback, uninstall, privacy, and fallback artifacts are covered by the owning guides. | README | README + installation/operations/releases/security/config/Admin/API docs updated |
 | 6 | **[DONE] Availability-model interaction** — ADR-0010 chooses the resident daemon and records controlled restart plus readiness verification after binary swaps. | A7 decision block | Decision rationale and implementation agree |
 
-**Release receipt:** [v1.2.1](https://github.com/voidfreud/mcp-gateway/releases/tag/v1.2.1) published through the
-[Trusted Publishing workflow](https://github.com/voidfreud/mcp-gateway/actions/runs/30861063438)
-to [public PyPI](https://pypi.org/project/mcp-local-gateway/1.2.1/). A clean
-environment with GitHub/PyPI credentials removed installed the public wheel,
-reported `mcp-gateway 1.2.1`, imported `cryptography 50.0.0`, and completed an
-update no-op against PyPI. The v1.2.0 PyPI upload was canceled when the
-main-branch security gate discovered GHSA-g6cj-pr64-35w5; [#258](https://github.com/voidfreud/mcp-gateway/pull/258)
-updated the lock before v1.2.1 shipped.
+**Release receipt:** [v1.3.1](https://github.com/voidfreud/mcp-gateway/releases/tag/v1.3.1)
+published through the
+[Trusted Publishing workflow](https://github.com/voidfreud/mcp-gateway/actions/runs/30901239471)
+to [public PyPI](https://pypi.org/project/mcp-local-gateway/1.3.1/). The
+checksummed GitHub assets matched their manifest. A clean environment with a
+fresh package cache and GitHub/PyPI credentials removed installed the public
+wheel, reported `mcp-gateway 1.3.1`, and proved that a resolved config secret
+does not reach the config-loader self-check output. CodeQL alert 1 was closed
+through the fixing commit in [#275](https://github.com/voidfreud/mcp-gateway/pull/275),
+not dismissed. Post-release workflow follow-ups
+[#277](https://github.com/voidfreud/mcp-gateway/pull/277) and
+[#278](https://github.com/voidfreud/mcp-gateway/pull/278) removed deprecated
+GitHub App token inputs and moved artifact uploads to Node.js 24; the affected
+live workflow paths completed without annotations.
 
 **Sequencing notes:** A0 first (one line, unblocks every fresh install). A1+A2 next (your own bugs, no fixture work, ~a day); A3 is the largest chunk and should drive fixing the SDK-inherited error-code/timeout violations; A4–A5 land as regression locks while A3's red items get fixed; A7 (self-install) is independent — it absorbs A0's fix at the source and is a natural follow-up once the daemon lifecycle is stable. Do **not** run conformance scenarios for capabilities the gateway deliberately does not advertise (false failures → gate noise), and do **not** build a custom protocol test framework — the official suite is the framework, everything else is targeted nets.
 
