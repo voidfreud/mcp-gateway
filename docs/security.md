@@ -128,12 +128,13 @@ then fetches is challenged).
 token and stores it in the browser's local storage, so you enter it once.
 
 **Client registration.** Every client registration must carry the configured
-credential or its calls return `401`. The admin UI has separate, supported
-registration controls for Claude Code and Codex; use the one for the client you
-run. Their credential mechanisms differ:
+credential or its calls return `401`. The gateway does not register endpoints
+for you — add each `/<backend>/mcp` endpoint in the client you run, using that
+client's supported configuration or CLI, and carry the credential there. The
+mechanisms differ by client:
 
-**Claude Code.** The registration carries an `Authorization` header. The admin
-UI adds it automatically. If you register by hand, include it:
+**Claude Code.** The registration carries an `Authorization` header. Include it
+when registering the endpoint:
 
 ```bash
 claude mcp add --transport http gateway-<name> http://127.0.0.1:9100/<name>/mcp --header "Authorization: Bearer ${MCP_GATEWAY_TOKEN}"
@@ -145,9 +146,9 @@ otherwise Claude Code treats them as header values. The command expands
 without printing its value. If you add or change the token later, re-register
 the backend so Claude Code sends the new header.
 
-**Consequence for Codex.** Codex's CLI accepts a bearer-token environment
+**Codex.** Codex's CLI accepts a bearer-token environment
 variable rather than a literal header. With `bearer_token = "${MCP_GATEWAY_TOKEN}"`,
-the dashboard registers a backend using:
+register the endpoint with:
 
 ```bash
 codex mcp add gateway-<name> --url http://127.0.0.1:9100/<name>/mcp --bearer-token-env-var MCP_GATEWAY_TOKEN
@@ -157,8 +158,8 @@ Only the variable name is written to Codex configuration. The Codex desktop,
 CLI, or IDE process must itself receive that environment variable; putting the
 value only in the gateway's secrets file is not sufficient for Codex calls.
 
-The token comparison is constant-time, and the token is redacted from anything
-the gateway echoes back (logs, the register button's output).
+The token comparison is constant-time, and the token is never written into
+anything the gateway stores or echoes back (logs, config backups).
 
 The same middleware protects `/virtual/mcp` and every Virtual Tool CRUD,
 validation, and live-test route. Virtual Tools do not create an authentication

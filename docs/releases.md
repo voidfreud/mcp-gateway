@@ -58,8 +58,8 @@ Release review has three deliberately separate evidence tiers:
   not an additional GitHub merge gate, such as `just hygiene`, disposable
   loopback harnesses, and a local wheel inspection.
 - **Required local receipt when applicable:** machine-specific checks that CI
-  cannot prove: daemon lifecycle, installed-service behavior, client
-  registration, configured backends, and authenticated integrations. Run these
+  cannot prove: daemon lifecycle, installed-service behavior, configured
+  backends, and authenticated integrations. Run these
   only with authorization for that machine and record a redacted receipt in the
   release-acceptance Issue.
 

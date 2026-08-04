@@ -1,8 +1,8 @@
 # Admin UI guide
 
 The gateway serves a built-in web admin at **http://127.0.0.1:9100/admin** by
-default. It is the main way to work with the gateway: import backends, rewrite
-what each tool broadcasts to MCP clients, and register the results. The page is
+default. It is the main way to work with the gateway: import backends and
+rewrite what each tool broadcasts to MCP clients. The page is
 served by the same daemon that does the proxying. Loopback is the safe default;
 an authenticated non-loopback deployment is supported when it is intentionally
 configured — see [security.md](security.md#binding-beyond-loopback).
@@ -65,8 +65,9 @@ The **Import MCP** button adds a new backend. You give it a name and its
 connection details — a URL for a remote (HTTP) server, or a command for a local
 (stdio) one, plus any auth. The gateway connects to it, captures its original
 tool list and instructions as a baseline, and mounts it live at
-`/<name>/mcp`. Importing offers separate checkboxes to register that independent
-endpoint in **Claude Code**, **Codex**, or both at the same time.
+`/<name>/mcp`. Clients then register that independent endpoint using their own
+supported configuration or CLI — the gateway does not register it for them
+(detailed per-client steps follow in issue #285).
 
 Adding a backend first validates and captures its baseline, then writes config.
 In a running daemon with lifecycle mount hooks, the new endpoint is added live
@@ -93,15 +94,6 @@ backend-wide controls:
   the endpoint URL, the config key, or any registered MCP-server name — all of
   those keep using the real name. Use this when you just want a friendlier label.
 - **Rename…** A real identity change (see [Rename vs Display name](#rename-vs-display-name)).
-- **Register (in the Claude Code cluster).** Registers this backend's gateway
-  endpoint with Claude Code in one click, with a selectable scope (see
-  [Registering in Claude Code](#registering-in-claude-code)).
-  A small chip next to the button shows whether the backend is currently
-  **registered in Claude Code** (checked via the `claude` command and cached for
-  a minute; the chip disappears if the command isn't installed).
-- **Add / Remove (in the Codex cluster).** Adds or removes this backend as its
-  own Codex MCP server, named `gateway-<name>`. The status comes from
-  `codex mcp list --json`; no aggregate gateway server is created.
 - **Warm session toggle.** Keeps one persistent connection to the backend open
   instead of reconnecting on every call — noticeably faster for remote
   backends (measured 2–4× on live probes). If the held connection ever dies,
@@ -133,54 +125,30 @@ These look similar but do very different things:
   `gateway-<name>` registration name. Because the endpoint itself moves, the
   gateway hot-mounts the new route before responding, while the stable backend
   ID used by Virtual Tools stays unchanged. Re-register every client that still
-  points to the old endpoint. The UI's Claude Code action cleans up the old
-  registration; use Codex's remove/add controls for Codex. The UI shows the old
-  and new endpoint and registration names.
+  points to the old endpoint — the gateway does not manage client
+  registrations, so update each client's configuration by hand. The UI shows
+  the old and new endpoint and registration names.
 
-### Registering in Claude Code
+### Registering endpoints in MCP clients
 
-The gateway exposes **one MCP endpoint per backend**. To use a backend from
-Claude Code, that endpoint has to be registered as an MCP server. **Register in
-CC** does this for you — it runs the same `claude mcp add` you would type by
-hand, registering the endpoint as `gateway-<name>`.
+The gateway exposes **one MCP endpoint per backend** at `/<name>/mcp`, plus the
+shared `/virtual/mcp` endpoint. The gateway does not register endpoints for
+you: each MCP client has its own supported configuration or CLI for adding an
+MCP server, and you add the endpoint there. The conventional MCP-server name is
+`gateway-<name>` for a backend and `gateway-virtual` for the Virtual Tools
+endpoint.
 
-- You choose the **scope** — `local` (this project), `user` (all your projects),
-  or `project` (shared via the project's config).
-- If a bearer token is configured on the gateway, the registration automatically
-  includes the `Authorization` header, so calls do not get rejected.
-- Removing a backend best-effort de-registers it from Claude Code first.
-- Claude Code sometimes needs a reload to notice a registration change in either
-  direction.
+Two things apply to every client:
 
-The `claude` command must be available to the daemon for this to work; if it is
-not, the button reports that clearly. You can always register by hand instead —
-see [operations.md](operations.md) and the README.
+- If a bearer token is configured on the gateway, the registration must carry
+  the credential (for example an `Authorization` header, or the client's
+  token-environment-variable mechanism) or calls get rejected — see
+  [security.md](security.md).
+- After adding, changing, or removing a registration, some clients need a
+  reload or a new session to notice it.
 
-### Registering in Codex
-
-The **Codex** control registers exactly the selected backend endpoint—never the
-whole gateway—by running (with the configured host and port in place of the
-default example):
-
-```bash
-codex mcp add gateway-<name> --url http://127.0.0.1:9100/<name>/mcp
-```
-
-When registered, the same control becomes **Remove** and runs `codex mcp
-remove gateway-<name>`. Codex stores these registrations globally for the local
-Codex host; it has no Claude-style local/user/project scope selector. Restart
-Codex or open a new task after changing registrations.
-
-The **Virtual Tools** header has the same Codex **Add / Remove** controls for
-the shared `/virtual/mcp` endpoint. They register or remove the independent
-`gateway-virtual` server; they do not change individual Virtual Tool drafts or
-activation.
-
-For a bearer-protected gateway, `bearer_token` must be a single `${ENV_VAR}`
-reference. The gateway passes only that variable's name through Codex's
-`--bearer-token-env-var` option; it never writes the resolved token into Codex
-configuration. The environment variable must also be available to the Codex
-process itself, not only to the gateway daemon.
+Follow the client's MCP server configuration documentation, registering
+`http://127.0.0.1:9100/<name>/mcp` (or your configured host and port).
 
 ## Tool cards
 
@@ -298,11 +266,7 @@ The **⚙ Gateway** item collects gateway-wide settings and information:
   Saving asks a launchd-managed daemon to restart. In foreground/development
   mode it saves the values and reports that they apply on the next real restart.
   Changing the token invalidates existing client registrations until they carry
-  the new value; the UI offers **Re-register all** for Claude Code immediately
-  afterward.
-- **Re-register all in CC.** One click to refresh every enabled backend's
-  Claude Code registration (remove + add each, sequentially, with a per-backend
-  result). Use after changing the bearer token or the port.
+  the new value; re-register the endpoints in each client afterwards.
 - **Restart.** Restarts the daemon on demand. (In foreground/dev mode, where
   there is no login service to restart, the UI says so honestly instead of
   hanging.)

@@ -22,9 +22,9 @@ checkout. The verified-release fallback below uses the
 [GitHub CLI](https://cli.github.com/), which asks you to authenticate. Install
 [`just`](https://just.systems/) only for contributor/repository recipes.
 
-Claude Code and Codex CLIs are optional. When present, the Admin UI can register
-independent backend endpoints in those clients; manual registration always
-remains available.
+The MCP client CLIs you use are optional. Each `/<backend>/mcp` endpoint is
+registered in the client itself using that client's supported configuration or
+CLI; the gateway never registers endpoints for you.
 
 ## Recommended — public PyPI package
 
@@ -226,8 +226,7 @@ checkout compatibility forms `./install.sh --uninstall` and
 add `--dry-run` to preview the delegation.
 
 If you registered backends in an MCP client, remove those registrations
-separately (or use the admin UI's remove buttons before uninstalling). For
-Claude Code:
+separately before uninstalling. For Claude Code:
 
 ```bash
 claude mcp remove gateway-<name>

@@ -119,12 +119,6 @@
   /* Chip */
   .chip { font: 500 9px var(--mono); padding: 1px 5px; border-radius: 4px;
           border: 1px solid var(--b); color: var(--tm); flex-shrink: 0; background: var(--s2); }
-  /* #46 — Claude Code registration chip (next to "Register in CC") */
-  .cc-chip, .codex-chip { font: 500 10px system-ui; text-transform: none; letter-spacing: 0; }
-  .cc-chip.cc-yes, .codex-chip.cc-yes { color: var(--gn); border-color: color-mix(in srgb, var(--gn) 30%, transparent);
-                    background: color-mix(in srgb, var(--gn) 9%, transparent); }
-  .cc-chip.cc-no, .codex-chip.cc-no { color: var(--rd); border-color: color-mix(in srgb, var(--rd) 30%, transparent);
-                    background: color-mix(in srgb, var(--rd) 9%, transparent); }
 
   /* Connection-status dots (#23) — painted async from /admin/api/status.
      st-unk = probe in flight: a soft skeleton pulse, not a verdict. */
@@ -500,9 +494,8 @@
   <div class="modal">
     <h3>Rename backend <code id="rn_cur" style="font:600 12px var(--mono);color:var(--ac)"></code></h3>
     <p class="hint" style="margin:0 0 10px">This is a <b>real identity change</b> — unlike the cosmetic display
-      name. The endpoint URL becomes <code>/&lt;new name&gt;/mcp</code>, the gateway hot-mounts that route, and the
-      client registration changes from <code>gateway-&lt;old&gt;</code> to <code>gateway-&lt;new&gt;</code> —
-      registered clients must be updated or the server disappears from them.</p>
+      name. The endpoint URL becomes <code>/&lt;new name&gt;/mcp</code>, and the gateway hot-mounts that route.
+      Any MCP client using the old endpoint must be updated manually.</p>
     <label>New name</label>
     <input type="text" id="rn_name" class="mono" placeholder="new-name"
            autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" />
@@ -585,14 +578,11 @@ const ICON = {
 };
 const GATEWAY = '__gateway__';  // sentinel for the gateway pseudo-item
 const VIRTUAL = '__virtual__';  // first-class Virtual Tools category
-const CODEX_VIRTUAL = 'virtual';  // Codex registration identity for /virtual/mcp
 let STATE = null, SELECTED = null;
 let VIRTUAL_STATE = { mounted: false, tools: [], unavailable: true };
 let VIRTUAL_CATALOG = { backends: [] };
 let VIRTUAL_TEST_NAME = null;
 let STATUS = null;  // #23: backend name -> {state, ms, tools, error}, async
-let CC_REG = null;  // #46: {available, registered:{backend:bool}}, async
-let CODEX_REG = null;  // independent backend + Virtual Tools Codex registrations, async
 const timers = {};
 let LOG_STREAM_ABORT = null;
 
@@ -703,46 +693,6 @@ function paintStatus() {
 async function refreshStatus() {
   try { STATUS = (await api('GET', '/admin/api/status')).backends; paintStatus(); }
   catch {}
-}
-// #46 — Claude Code registration indicator. Fetched once per page load (cached
-// server-side 60s); re-fetched fresh after a register/deregister. Non-blocking:
-// the chip stays hidden until the fetch resolves, and nothing if the CLI is
-// unavailable.
-async function refreshCCReg(fresh) {
-  try { CC_REG = await api('GET', '/admin/api/cc-registrations' + (fresh ? '?fresh=1' : '')); }
-  catch { CC_REG = null; }
-  paintCCReg();
-}
-function paintCCReg() {
-  const avail = CC_REG && CC_REG.available;
-  document.querySelectorAll('.cc-chip[data-b]').forEach(el => {
-    const reg = !!(avail && CC_REG.registered && CC_REG.registered[el.dataset.b]);
-    el.style.display = '';
-    el.textContent = !CC_REG ? 'checking…' : (avail ? (reg ? 'registered' : 'not registered') : 'unavailable');
-    el.className = 'chip cc-chip ' + (reg ? 'cc-yes' : 'cc-no');
-    const add = document.querySelector(`.cc-action-add[data-b="${CSS.escape(el.dataset.b)}"]`);
-    const remove = document.querySelector(`.cc-action-remove[data-b="${CSS.escape(el.dataset.b)}"]`);
-    if (add) add.disabled = !avail || reg;
-    if (remove) remove.disabled = !avail || !reg;
-  });
-}
-async function refreshCodexReg(fresh) {
-  try { CODEX_REG = await api('GET', '/admin/api/codex-registrations' + (fresh ? '?fresh=1' : '')); }
-  catch { CODEX_REG = null; }
-  paintCodexReg();
-}
-function paintCodexReg() {
-  const avail = CODEX_REG && CODEX_REG.available && CODEX_REG.ok !== false;
-  document.querySelectorAll('.codex-chip[data-b]').forEach(el => {
-    const reg = !!(avail && CODEX_REG.registered && CODEX_REG.registered[el.dataset.b]);
-    el.style.display = '';
-    el.textContent = !CODEX_REG ? 'checking…' : (avail ? (reg ? 'added' : 'not added') : 'unavailable');
-    el.className = 'chip codex-chip ' + (reg ? 'cc-yes' : 'cc-no');
-    const add = document.querySelector(`.codex-action-add[data-b="${CSS.escape(el.dataset.b)}"]`);
-    const remove = document.querySelector(`.codex-action-remove[data-b="${CSS.escape(el.dataset.b)}"]`);
-    if (add) add.disabled = !avail || reg;
-    if (remove) remove.disabled = !avail || !reg;
-  });
 }
 let REFRESHED_ONCE = false;
 async function refreshBackends() {  // #43: on-dashboard-load re-introspect
@@ -908,15 +858,14 @@ function renderDetail(name) {
       <span class="btn-group">
         <button class="btn" style="font-size:11px" onclick="reintrospect('${escJS(b.name)}')">Re-inspect</button>
         <button class="btn" style="font-size:11px" onclick="openRename('${escJS(b.name)}')"
-          title="hard-rename: changes the endpoint URL + Claude Code registration">Rename…</button>
+          title="hard-rename: changes the endpoint URL">Rename…</button>
         <button class="btn" style="font-size:11px" onclick="loadSnapshot('${escJS(b.name)}')"
           title="restore this backend's field values from a saved JSON file">Load fields</button>
       </span>
       <button class="btn btn-danger" style="font-size:11px" onclick="delBackend('${escJS(b.name)}')">Remove</button>
     </div>
     <div class="b-sub-line">MCP endpoint <code>http://${esc(STATE.host)}:${STATE.port}${esc(b.endpoint || '')}</code>
-      · registers in Claude Code as <code>gateway-${esc(b.name)}</code> — the routing identity
-      (display name is cosmetic)</div>
+      · routing name <code>${esc(b.name)}</code> (display name is cosmetic)</div>
     <div class="ctrl-bar">
       <span class="cgroup">
         <span class="cg-cap">Broadcast</span>
@@ -935,30 +884,6 @@ function renderDetail(name) {
         <input type="text" class="f-display mono" value="${esc(b.display_name || '')}"
           title="cosmetic label for the sidebar + header; does not change routing"
           placeholder="${esc(b.name)}" style="width:130px;padding:3px 7px;font-size:11px">
-      </span>
-      <span class="cgroup">
-        <span class="cg-cap">Claude Code</span>
-        <select id="b-ccscope" title="claude mcp add scope"
-          style="width:auto;padding:3px 7px;font-size:11px">
-          <option value="local">local</option>
-          <option value="user">user</option>
-          <option value="project">project</option>
-        </select>
-        <span class="chip cc-chip" data-b="${esc(b.name)}" style="display:none"
-          title="whether gateway-${esc(b.name)} is registered in Claude Code (claude mcp list)"></span>
-        <button class="btn cc-action-add" data-b="${esc(b.name)}" style="font-size:11px"
-          onclick="registerCC('${escJS(b.name)}')">Add</button>
-        <button class="btn btn-danger cc-action-remove" data-b="${esc(b.name)}" style="font-size:11px"
-          onclick="deregisterCC('${escJS(b.name)}')">Remove</button>
-      </span>
-      <span class="cgroup">
-        <span class="cg-cap">Codex</span>
-        <span class="chip codex-chip" data-b="${esc(b.name)}" style="display:none"
-          title="whether gateway-${esc(b.name)} is configured as an independent Codex MCP"></span>
-        <button class="btn codex-action-add" data-b="${esc(b.name)}" style="font-size:11px"
-          onclick="registerCodex('${escJS(b.name)}')">Add</button>
-        <button class="btn btn-danger codex-action-remove" data-b="${esc(b.name)}" style="font-size:11px"
-          onclick="deregisterCodex('${escJS(b.name)}')">Remove</button>
       </span>
     </div>
     ${danglingBanner(b)}
@@ -979,8 +904,6 @@ function renderDetail(name) {
   wireCaps(m);
   wireGrow(m);
   paintStatus();   // #23: live state for the header dot + status line
-  paintCCReg();    // #46: live CC-registration chip (async; no-op until fetched)
-  paintCodexReg(); // read-only independent Codex registration status
   const tw = $('#tools', m);
   if (!b.introspected) { tw.innerHTML = '<div class="empty">Backend not introspected yet — click Re-inspect.</div>'; return; }
   // Order: pinned first, switched-off last; among equals, overridden above.
@@ -1409,18 +1332,9 @@ function renderVirtualTools() {
       </div></div>`;
   }).join('');
   m.innerHTML = `<div class="b-head"><h2>Virtual Tools</h2><span class="chip">first-class</span>${endpoint}<span class="spacer"></span>
-      <span class="btn-group"><span class="cg-cap">Codex</span>
-        <span class="chip codex-chip" data-b="${CODEX_VIRTUAL}" style="display:none"
-          title="whether /virtual/mcp is configured as an independent Codex MCP"></span>
-        <button class="btn codex-action-add" data-b="${CODEX_VIRTUAL}" style="font-size:11px"
-          onclick="registerCodex('${CODEX_VIRTUAL}')">Add</button>
-        <button class="btn btn-danger codex-action-remove" data-b="${CODEX_VIRTUAL}" style="font-size:11px"
-          onclick="deregisterCodex('${CODEX_VIRTUAL}')">Remove</button>
-      </span>
       <button class="btn-pri" onclick="openVirtualEditor()">+ Create Virtual Tool</button></div>
     <div class="b-sub-line">Stable source bindings, live effective-name resolution, optional live testing, and fidelity-preserving aggregation at <code>/virtual/mcp</code>.</div>
     ${unavailable}${cards || `<div class="vt-empty">No Virtual Tools yet.<br><button class="btn-pri" style="margin-top:12px" onclick="openVirtualEditor()">Create the first draft</button></div>`}`;
-  paintCodexReg();
 }
 
 async function ensureVirtualCatalog() {
@@ -2013,39 +1927,21 @@ function importSettings() {
   inp.click();
 }
 
-// ---- #155 gateway settings card + #154 re-register-all --------------------
-// Explicit save (never auto-save — it restarts the daemon). After a bearer-token
-// CHANGE, offer to re-register every backend so their Claude Code registrations
-// carry the new token (#154).
+// ---- #155 gateway settings card ------------------------------------------
+// Explicit save (never auto-save — it restarts the daemon).
 async function saveSettings() {
   const bearer = $('#set_bearer').value.trim();
   const ivRaw = $('#set_interval').value.trim();
   const iv = ivRaw === '' ? 0 : parseInt(ivRaw, 10);
   if (isNaN(iv) || iv < 0) { toast('introspect interval must be an integer ≥ 0'); return; }
   const logLevel = $('#set_log_level') ? $('#set_log_level').value : (STATE.log_level || 'INFO');
-  const prevBearer = STATE.bearer_token || '';
   try {
     const payload = { introspect_interval: iv, log_level: logLevel,
       update_check: $('#set_update_check').checked === true };
     if (STATE.auth_mode !== 'oauth_jwt') payload.bearer_token = bearer;
     const r = await api('PUT', '/admin/api/settings', payload);
-    const tokenChanged = bearer !== prevBearer;
     afterRestart(r, 'settings saved');
-    if (tokenChanged && confirm('The bearer token changed — existing Claude Code registrations must carry the new token. Re-register all enabled backends now?'))
-      await reregisterAll('local');
   } catch (e) { toast('save failed: ' + e.message, 5000); }
-}
-// #154 — deregister + re-register every enabled backend in Claude Code.
-async function reregisterAll(scope) {
-  scope = scope || 'local';
-  const enabled = (STATE.backends || []).filter(b => b.enabled);
-  if (!enabled.length) { toast('no enabled backends to register'); return; }
-  if (!confirm(`Re-register all ${enabled.length} enabled backend(s) in Claude Code (scope ${scope})? This deregisters then re-adds each.`)) return;
-  try {
-    const r = await api('POST', '/admin/api/cc-reregister-all', { scope });
-    if (r.ok) toast(`re-registered ${r.ok_count}/${r.count} backend(s) — reload Claude Code`, 5000);
-    else toast(`re-registered ${r.ok_count}/${r.count}; some failed — check logs`, 6000);
-  } catch (e) { toast('re-register failed: ' + e.message, 5000); }
 }
 
 function loadSnapshot(scope) {
@@ -2348,8 +2244,8 @@ async function setDisplayName(name, value) {
   try { await api('POST', '/admin/api/backend/' + encodeURIComponent(name) + '/display-name', { value }); await load(); }
   catch (e) { toast('rename failed: ' + e.message); }
 }
-// #44 — hard-rename modal: a REAL identity change (endpoint + registration),
-// unlike the cosmetic display name.
+// #44 — hard-rename modal: a real routing identity change, unlike the
+// cosmetic display name.
 let RENAME_FROM = null;
 function openRename(name) {
   RENAME_FROM = name;
@@ -2374,90 +2270,19 @@ async function doRename() {
     const r = await api('POST', '/admin/api/backend/' + encodeURIComponent(oldName) + '/rename', { value: newName });
     closeRename();
     SELECTED = newName;
-    toast(`renamed — new endpoint ${r.new_endpoint} · re-register in Claude Code as ${r.new_registration}`, 6000);
+    toast(`renamed — new endpoint ${r.new_endpoint}`, 5000);
     if (r.reloaded === 'restarting') await waitReload();
     else {
       await load();
       toast(r.reloaded === 'hot-rename'
-        ? 'renamed and hot-mounted · update the Claude Code registration'
+        ? 'renamed and hot-mounted'
         : 'renamed in config · endpoint moves on the next manual restart');
     }
-    await reRegisterCC(oldName, newName);
-    await reRegisterCodex(oldName, newName);
   } catch (e) { $('#rn_err').textContent = e.message; }
   finally { $('#rn_go').disabled = false; }
 }
-// after a rename: swap the Claude Code registration old -> new (scope local).
-async function reRegisterCC(oldName, newName) {
-  try {
-    const dr = await api('POST', '/admin/api/backend/' + encodeURIComponent(oldName) + '/deregister', { scope: 'local' });
-    if (!dr.ok) console.warn('claude mcp remove gateway-' + oldName + ' failed:', dr.stderr || dr.stdout);
-    const rr = await api('POST', '/admin/api/backend/' + encodeURIComponent(newName) + '/register', { scope: 'local' });
-    if (rr.ok) toast(`registered gateway-${newName} in Claude Code (old gateway-${oldName} ${dr.ok ? 'removed' : 'NOT removed — remove it manually'}) — reload Claude Code if it doesn't appear`, 7000);
-    else toast('claude mcp add failed: ' + (rr.stderr || rr.stdout || 'exit ' + rr.exit), 8000);
-  } catch (e) { toast('Claude Code re-register failed: ' + e.message, 6000); }
-}
-// #45 — one-click `claude mcp add` for this backend's gateway endpoint.
-async function registerCC(name, scope) {
-  scope = scope || 'local';
-  try {
-    const r = await api('POST', '/admin/api/backend/' + encodeURIComponent(name) + '/register', { scope });
-    if (r.ok) toast(`registered gateway-${name} (scope ${scope}) — reload Claude Code if it doesn't appear`, 5000);
-    else toast('claude mcp add failed: ' + (r.stderr || r.stdout || 'exit ' + r.exit), 8000);
-    await refreshCCReg(true);
-  } catch (e) { toast('register failed: ' + e.message, 5000); }
-}
-async function deregisterCC(name, scope) {
-  scope = scope || ($('#b-ccscope') ? $('#b-ccscope').value : 'local');
-  try {
-    const r = await api('POST', '/admin/api/backend/' + encodeURIComponent(name) + '/deregister', { scope });
-    if (r.ok) toast(`removed gateway-${name} from Claude Code`, 5000);
-    else toast('claude mcp remove failed: ' + (r.stderr || r.stdout || 'exit ' + r.exit), 8000);
-    await refreshCCReg(true);
-  } catch (e) { toast('deregister failed: ' + e.message, 5000); }
-}
-async function registerCodex(name) {
-  const target = name === CODEX_VIRTUAL
-    ? '/admin/api/virtual/codex/register'
-    : '/admin/api/backend/' + encodeURIComponent(name) + '/codex/register';
-  try {
-    const r = await api('POST', target, {});
-    if (r.ok) toast(`registered gateway-${name} in Codex — restart Codex or open a new task`, 6000);
-    else toast('codex mcp add failed: ' + (r.stderr || r.stdout || 'exit ' + r.exit), 8000);
-    await refreshCodexReg(true);
-  } catch (e) { toast('Codex registration failed: ' + e.message, 6000); }
-}
-async function deregisterCodex(name) {
-  const target = name === CODEX_VIRTUAL
-    ? '/admin/api/virtual/codex/deregister'
-    : '/admin/api/backend/' + encodeURIComponent(name) + '/codex/deregister';
-  try {
-    const r = await api('POST', target, {});
-    if (r.ok) toast(`removed gateway-${name} from Codex`, 6000);
-    else toast('codex mcp remove failed: ' + (r.stderr || r.stdout || 'exit ' + r.exit), 8000);
-    await refreshCodexReg(true);
-  } catch (e) { toast('Codex deregister failed: ' + e.message, 6000); }
-}
-async function reRegisterCodex(oldName, newName) {
-  try {
-    const removed = await api('POST', '/admin/api/backend/' + encodeURIComponent(oldName) + '/codex/deregister', {});
-    const added = await api('POST', '/admin/api/backend/' + encodeURIComponent(newName) + '/codex/register', {});
-    if (added.ok) toast(`updated Codex registration to gateway-${newName}${removed.ok ? '' : ' (old registration could not be removed)'}`, 6500);
-    else toast('codex mcp add failed: ' + (added.stderr || added.stdout || 'exit ' + added.exit), 8000);
-  } catch (e) { toast('Codex re-registration failed: ' + e.message, 6000); }
-}
 async function delBackend(name) {
   if (!confirm('Remove backend "' + name + '"? This restarts the gateway.')) return;
-  // best-effort: drop the Claude Code registration first (the backend is about
-  // to disappear from config, but deregister works regardless — cleanup path).
-  try {
-    const d = await api('POST', '/admin/api/backend/' + encodeURIComponent(name) + '/deregister', { scope: 'local' });
-    if (!d.ok) console.warn('claude mcp remove gateway-' + name + ' failed:', d.stderr || d.stdout);
-  } catch (e) { console.warn('deregister skipped: ' + e.message); }
-  try {
-    const d = await api('POST', '/admin/api/backend/' + encodeURIComponent(name) + '/codex/deregister', {});
-    if (!d.ok) console.warn('codex mcp remove gateway-' + name + ' failed:', d.stderr || d.stdout);
-  } catch (e) { console.warn('Codex deregister skipped: ' + e.message); }
   try { const r = await api('DELETE', '/admin/api/backend/' + encodeURIComponent(name)); SELECTED = null; afterRestart(r, 'removed'); }
   catch (e) { toast('remove failed: ' + e.message); }
 }
@@ -2535,10 +2360,6 @@ async function doImport() {
     closeImport(); SELECTED = r.backend;
     if (r.reloaded === 'restarting') await waitReload();
     else afterRestart(r, 'imported');
-    if (r.backend) {
-      await registerCC(r.backend, 'local');
-      await registerCodex(r.backend);
-    }
   }
   catch (e) { $('#im_err').textContent = e.message; }
   finally { $('#im_go').disabled = false; }
@@ -2565,9 +2386,9 @@ function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;',
 // JS-escape then HTML-escape for inline on*="fn('…')" handlers (issue #51).
 function escJS(s) { return esc(String(s ?? '').replace(/\\/g, '\\\\').replace(/'/g, "\\'")); }
 
-// Boot: paint from cached state immediately, then (async, non-blocking) probe
-// liveness (#23) and run the throttled on-open re-introspect sweep (#43).
-load().then(() => { refreshStatus(); refreshBackends(); refreshCCReg(); refreshCodexReg(); });
+// Boot: paint from cached state immediately, then probe liveness and run the
+// throttled on-open re-introspect sweep.
+load().then(() => { refreshStatus(); refreshBackends(); });
 </script>
 </body>
 </html>
