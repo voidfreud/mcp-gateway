@@ -45,6 +45,12 @@ links that point to repository-relative files or fragments. External URL
 reachability is intentionally outside this command and remains an advisory,
 manual review concern.
 
+The scriptable `mcp-gateway` CLI is covered by the unit suite: command-tree
+shapes, JSON-file and `-` stdin inputs, `--json` single-value output, stderr
+errors with nonzero exit, and the never-prompt `--yes` guard. A live CLI
+session against an installed daemon belongs in the release receipt when a
+change touches the entry point or service lifecycle.
+
 ### Required local release receipt, when applicable
 
 CI cannot validate a developer's machine. For a release that touches the

@@ -16,6 +16,28 @@ from starlette.routing import Route
 from mcp_gateway import config_loader as cl
 from mcp_gateway.config_loader import Backend, GatewayConfig
 
+# Exact set of top-level keys the backend-add endpoint accepts (mirrors the
+# CLI's strict payload validation). A typo like "statless" must 400 before any
+# work — never silently project into the Backend model.
+_BACKEND_ADD_FIELDS = frozenset(
+    {
+        "name",
+        "transport",
+        "url",
+        "command",
+        "args",
+        "env",
+        "auth_header",
+        "auth_value",
+        "headers",
+        "auth",
+        "headers_helper",
+        "stateless",
+        "init_timeout",
+        "request_timeout",
+    }
+)
+
 
 class AdminContext(Protocol):
     """The live Admin context surface needed by backend routes."""
@@ -252,16 +274,49 @@ def backend_routes(  # noqa: PLR0915
             )
         return ctx.restart_response(response)
 
-    async def add_backend(  # noqa: PLR0911
+    async def add_backend(  # noqa: PLR0911, PLR0912
         request: Request,
     ):
         """Import, introspect, persist, and hot-add a new backend."""
         payload = await request.json()
+        if not isinstance(payload, dict):
+            return JSONResponse(
+                {"ok": False, "error": "backend payload must be a JSON object"},
+                status_code=400,
+            )
+        unknown = sorted(set(payload) - _BACKEND_ADD_FIELDS)
+        if unknown:
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": f"unknown backend field(s): {', '.join(unknown)}",
+                },
+                status_code=400,
+            )
         if payload.get("name") in cl.RESERVED_BACKEND_NAMES:
             return deps().error(f"backend name {payload.get('name')!r} is reserved")
         if any(b.name == payload.get("name") for b in ctx.load().backends):
             return JSONResponse(
                 {"ok": False, "error": "backend name already exists"}, status_code=400
+            )
+        # #284: stdio backends may pass an env mapping. It is stored VERBATIM —
+        # values may be ${ENV_VAR} references resolved at client-config build
+        # time (config_loader.backend_entry), never expanded or logged here.
+        # A missing key means "no env"; ANY provided non-object (including
+        # explicit null and falsy values like []/""/0/false) is a strict 400 so
+        # a malformed payload never silently becomes an empty mapping.
+        if "env" not in payload:
+            env: dict[str, str] = {}
+        elif isinstance(payload["env"], dict):
+            env = payload["env"]
+        else:
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": "backend env must be an object mapping string "
+                    "environment variable names to string values",
+                },
+                status_code=400,
             )
         try:
             b = Backend(
@@ -270,6 +325,7 @@ def backend_routes(  # noqa: PLR0915
                 url=deps().clean(payload.get("url")),
                 command=deps().clean(payload.get("command")),
                 args=payload.get("args") or [],
+                env=env,
                 auth_header=deps().clean(payload.get("auth_header")),
                 auth_value=deps().clean(payload.get("auth_value")),
                 headers=payload.get("headers") or {},

@@ -4,7 +4,10 @@ The admin UI is a thin front end over an HTTP API served by the same daemon.
 The default address is `http://127.0.0.1:9100`; configured deployments use
 their configured host and port. This page documents that API for scripting and
 automation. Most people never need it — the [admin UI](admin-guide.md) does all
-of this — but it is here when you want it.
+of this — and the `mcp-gateway` command line is a friendlier client of the same
+routes with `--json` for pipelines (see
+[operations.md](operations.md#command-line-reference)). The raw API is here
+when you want it.
 
 ## Conventions
 
@@ -72,7 +75,7 @@ of this — but it is here when you want it.
 
 | Method | Path | Body | Response |
 |--------|------|------|----------|
-| POST | `/admin/api/backend` | `{name, transport, url?/command?/args?, auth_header?, auth_value?, headers?, auth?, headers_helper?, stateless?}` | Validates, connects, captures a baseline, and saves a new backend. When lifecycle mount hooks are available, it mounts live with `reloaded: "hot-add"`; a mount failure leaves the saved backend and returns `"mount-failed"` for repair/restart. Without those hooks it returns normal restart semantics (`"restarting"` when launchd-managed, otherwise `"dev-no-restart"`). `400` on a name clash, invalid fields, or a failed initial connection. |
+| POST | `/admin/api/backend` | `{name, transport, url?/command?/args?, env?, auth_header?, auth_value?, headers?, auth?, headers_helper?, stateless?, init_timeout?, request_timeout?}` | Validates, connects, captures a baseline, and saves a new backend. `env` is a table of string→string setting environment variables for a `stdio` backend process; it is ignored for remote transports. In `headers` and `env`, a value under a **credential-like key** (name matching `authorization`, `proxy-authorization`, `cookie`, `token`, `secret`, `password`, `passwd`, `api-key`, `apikey`, `private-key`, `credential`, `access-key`, `dsn`, `database-url`, `redis-url`, `mongodb-uri`, `connection-string`, … after case and `_`≡`-` normalization) MUST be exactly one `${ENV_VAR}` reference or a `Bearer`/`Basic`/`Token` prefix followed by one reference; a raw literal — or a reference mixed with other raw text — is rejected with `400`. Ordinary keys may be literal; an `env` key ending in `-file`/`-path`/`-dir`/`-directory` is exempt (non-secret metadata path), headers never are. When lifecycle mount hooks are available, it mounts live with `reloaded: "hot-add"`; a mount failure leaves the saved backend and returns `"mount-failed"` for repair/restart. Without those hooks it returns normal restart semantics (`"restarting"` when launchd-managed, otherwise `"dev-no-restart"`). `400` on a name clash, invalid fields, or a failed initial connection. |
 | DELETE | `/admin/api/backend/{name}` | — | Removes the backend and prunes its captured defaults. Returns normal restart semantics: `"restarting"` when launchd-managed, otherwise `"dev-no-restart"`. |
 | POST | `/admin/api/backend/{name}/rename` | `{value: "<new name>"}` | Hard rename (endpoint, config key, defaults, and registration name all move). With live mount hooks, it mounts the new route as `"hot-rename"`; a failed mount returns HTTP 500 as `"mount-failed-rolled-back"` after restoring the old configuration. Without those hooks it returns normal restart semantics. External MCP-client registrations still need updating. Response includes `old_endpoint`, `new_endpoint`, `old_registration`, `new_registration`. |
 | POST | `/admin/api/backend/{name}/display-name` | `{value: "<label>"}` | Sets the cosmetic display label (empty clears it). `{ok}`. No restart. |
@@ -83,8 +86,11 @@ of this — but it is here when you want it.
 | GET | `/admin/api/settings` | — | The gateway-wide settings: `{bearer_token, introspect_interval, update_check, log_level, log_max_bytes, log_backup_count}`. `bearer_token` is the stored `${ENV_VAR}` reference, never a resolved secret. OAuth deployments additionally return read-only `auth_mode` and public `oauth` metadata. |
 | PUT | `/admin/api/settings` | Any subset of the settings keys below. | Validates and persists boot-time settings. A launchd-managed daemon is asked to restart (`reloaded: "restarting"`); a foreground/development process returns `"dev-no-restart"`, leaving the saved values for its next real restart. In OAuth mode, changing `bearer_token` is rejected. |
 
-For backend creation, `auth_value` must contain an `${ENV_VAR}` reference; a
-literal credential is rejected with `400`.
+For backend creation, `auth_value` must be exactly one `${ENV_VAR}` reference
+or a `Bearer`/`Basic`/`Token` prefix followed by one reference; anything else
+is rejected with `400`. The same rule applies to any `headers`/`env` value
+under a credential-like key (see the row above); ordinary keys may be
+literal.
 
 ### Gateway settings payload
 

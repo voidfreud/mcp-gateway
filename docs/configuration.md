@@ -1,20 +1,25 @@
 # Configuration reference
 
-The gateway is configured by a single file, `config.toml`. The admin UI reads and
-writes this file for you, so you rarely need to edit it by hand — but you can, and
-this page is the complete reference.
+The gateway is configured by a single file, `config.toml`. The admin UI — and
+its scriptable twin, the `mcp-gateway` CLI — reads and writes this file for
+you, so you rarely need to edit it by hand — but you can, and this page is
+the complete reference.
 
 A few things to know first:
 
-- **The admin UI owns this file.** Every UI save regenerates it. Comments you add
-  by hand are **not** preserved on the next UI save. The annotated template
-  `config.example.toml` in the repo keeps a commented copy of the schema for
-  reference.
+- **The admin UI and the `mcp-gateway` CLI own this file.** The CLI writes
+  through the same admin API the UI uses, and every save regenerates the file.
+  Comments you add by hand are **not** preserved on the next save. The
+  annotated template `config.example.toml` in the repo keeps a commented copy
+  of the schema for reference.
 - **Only non-default values are stored.** The UI writes an override only when it
   actually differs from the backend's original, so the file stays small.
 - **Where it lives** depends on how you installed — see
   [installation.md](installation.md#where-the-config-lives). It is auto-created
-  from a working default on first run.
+  from a working default on first run. Read-only `mcp-gateway` commands
+  (`backend list`, `settings show`, …) never create or seed it: they derive the
+  admin URL from the file when it already exists and otherwise fall back to
+  `http://127.0.0.1:9100`.
 - **Secrets never go in this file.** Use `${ENV_VAR}` references; see
   [Secrets](#secrets) below.
 
@@ -120,13 +125,13 @@ deployments but cannot be combined with `[oauth]`.
 | `transport` | `"http"` \| `"streamable-http"` \| `"sse"` \| `"stdio"` | required | How to reach the backend. `http` and `streamable-http` are the same modern remote transport; `sse` is the legacy remote transport; `stdio` runs a local command. |
 | `url` | string or unset | unset | The backend's URL. **Required for `http`/`streamable-http`/`sse`.** May contain `${ENV}` references. |
 | `auth_header` | string or unset | unset | Name of an auth header to send (for example `Authorization`). Set **both** `auth_header` and `auth_value` or neither. |
-| `auth_value` | string or unset | unset | Value for that header (for example `Bearer ${EXA_TOKEN}`). It must contain an `${ENV}` reference; raw credential values are rejected. |
-| `headers` | table of string→string | empty | Extra static headers to send. Credential-bearing values should use `${ENV}`; literal non-secret values are allowed. Merged with `auth_header`/`auth_value` (the pair wins on a name clash). |
+| `auth_value` | string or unset | unset | Value for that header (for example `Bearer ${EXA_TOKEN}`). Must be exactly one `${ENV}` reference or a `Bearer`/`Basic`/`Token` prefix followed by one reference; any other literal or raw/ref mix is rejected. |
+| `headers` | table of string→string | empty | Extra static headers to send. A value under a **credential-like key** (name matching `authorization`, `proxy-authorization`, `cookie`, `token`, `secret`, `password`, `api-key`, `private-key`, `credential`, `access-key`, `dsn`, `database-url`, `redis-url`, `mongodb-uri`, `connection-string`, … after case and `_`≡`-` normalization) MUST be exactly one `${ENV}` reference or a `Bearer`/`Basic`/`Token` prefix followed by one reference — a raw literal, or a reference mixed with other raw text, is rejected. Ordinary keys (for example `X-Tenant`) may be literal. Merged with `auth_header`/`auth_value` (the pair wins on a name clash). |
 | `auth` | `"oauth"` or unset | unset | Set to `"oauth"` for an OAuth-protected remote MCP. The gateway runs the browser consent flow on first connect and caches the tokens. |
 | `headers_helper` | string or list of strings, or unset | unset | A command that prints a JSON object of headers, for tokens computed at connect time. A **list** is run as arguments with no shell (safe). A **string** is run through the shell (for `$()`/pipes) and carries full shell privilege. Runs **once** when the backend connects, not per call and not on a timer — good for a token valid for the daemon's uptime (e.g. `gh auth token`), not one that must rotate mid-session. |
 | `command` | string or unset | unset | The program to run for a `stdio` backend. **Required for `stdio`.** |
 | `args` | list of strings | empty | Arguments for the `stdio` `command`. |
-| `env` | table of string→string | empty | Environment variables for the `stdio` process. Credential values should use `${ENV}`; literal non-secret settings are allowed. |
+| `env` | table of string→string | empty | Environment variables for the `stdio` process. A value under a **credential-like key** (same classifier as `headers`: `token`, `secret`, `password`, `api-key`, `access-key`, `dsn`, `database-url`, `redis-url`, `mongodb-uri`, `connection-string`, …) MUST be exactly one `${ENV}` reference or a `Bearer`/`Basic`/`Token` prefix followed by one reference; ordinary keys (for example `HOME`, `LANG`) may be literal. An env key whose normalized name ends in `-file`, `-path`, `-dir`, or `-directory` (for example `PASSWORD_FILE`, `TOKEN_CACHE_DIR`) is treated as non-secret metadata and may be literal — this exemption applies to **env keys only, never headers**. |
 | `stateless` | boolean | `false` | Session strategy. `false` (**warm**, the default and what the UI's import uses) keeps one persistent connection — much faster, and the gateway automatically reconnects it if it dies (at most one repair per 30s). `true` opens a fresh session per request — a fallback for backends whose sessions misbehave when held. Toggleable live per backend in the admin UI. |
 | `init_timeout` | number (seconds) | `30` | Maximum time allowed for the backend's MCP initialize handshake. Must be greater than `0` and at most `300`. A timeout leaves that backend unmounted and readiness degraded without blocking other endpoints. |
 | `request_timeout` | number (seconds) | `300` | Maximum time allowed for each request forwarded to the backend. Must be greater than `0` and at most `3600`. |
@@ -311,9 +316,12 @@ read another backend's secrets — but every backend's auth references resolve f
 the same file.
 
 The dedicated credential fields (`bearer_token`, `oauth.admin_bearer_token`,
-and backend `auth_value`) reject raw values. Arbitrary URLs, headers, arguments,
-and subprocess environment values cannot be classified reliably, so never place
-credentials there as literals. On POSIX systems, config and secrets files are
+and backend `auth_value`) reject raw values, and a backend `headers`/`env`
+value under a credential-like key must be exactly one `${ENV}` reference or a
+`Bearer`/`Basic`/`Token` prefix followed by one (raw literals and raw/ref
+mixes are rejected). Arbitrary URLs, arguments, and other subprocess
+environment values cannot be classified reliably, so never place credentials
+there as literals. On POSIX systems, config and secrets files are
 created or repaired with user-only `0600` permissions; the macOS resident
 service keeps its config, state, and wrapper directories at `0700`. See
 [security.md](security.md#secrets-handling) for more.

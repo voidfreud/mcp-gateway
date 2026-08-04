@@ -1,4 +1,11 @@
 # mcp-gateway tasks. Run `just` to list, `just check` for the full gate.
+#
+# These are CONTRIBUTOR/REPOSITORY recipes: quality gates and deployment
+# helpers for a local checkout. They are not the user control interface —
+# users drive an installed gateway with the `mcp-gateway` CLI (service,
+# status/check/restart, backend/tool/virtual/settings/logs, update) and the
+# admin UI. Keep recipes that duplicate CLI commands only where a raw
+# checkout path is genuinely useful, and say so.
 
 log_path := env_var_or_default("MCP_GATEWAY_LOG_FILE", env_var("HOME") + "/.local/state/mcp-gateway/gateway.log")
 
@@ -51,22 +58,23 @@ smoke:
 verify url="http://127.0.0.1:9100":
     uv run verify_rename.py {{url}}
 
-# Restart the launchd daemon
-restart:
-    launchctl kickstart -k gui/$(id -u)/com.void.mcp-gateway
-
 # Show recent structured JSON events without needing the dashboard.
+# Raw-file convenience for contributors (works even when the daemon is down);
+# users should prefer `mcp-gateway logs show` (admin API, same filters).
 # Override the path with MCP_GATEWAY_LOG_FILE when using a non-default config.
 logs lines="100":
     @if test -f "{{log_path}}"; then tail -n {{lines}} "{{log_path}}"; else echo "log file not found: {{log_path}}" >&2; exit 1; fi
 
-# Follow the active structured log until Ctrl-C.
+# Follow the active structured log until Ctrl-C. User-facing equivalent:
+# `mcp-gateway logs follow`.
 logs-follow:
     tail -F "{{log_path}}"
 
 # Pull the merged main branch, sync the locked environment, reload launchd,
 # and verify the new daemon. This is deliberately explicit and fail-closed:
 # never deploy a feature branch, a dirty checkout, or a half-ready service.
+# Checkout-deployment equivalent of `mcp-gateway update` (which targets the
+# installed package); users on a packaged install use the CLI command.
 update:
     @if test "$(git branch --show-current)" != "main"; then echo "error: just update must run from the main branch" >&2; exit 1; fi
     @if test -n "$(git status --porcelain=v1)"; then echo "error: just update requires a clean checkout" >&2; git status --short >&2; exit 1; fi
@@ -77,11 +85,14 @@ update:
     @curl --fail --silent --show-error --retry 10 --retry-delay 1 --retry-connrefused --retry-max-time 30 http://127.0.0.1:9100/ready
 
 # Install/sync the LaunchAgent via the ~/.local/opt symlink (#149).
-# Re-run after moving the repo. Preview with: ./install.sh --dry-run
+# Checkout-scoped; users enable the service on a packaged install with
+# `mcp-gateway service install`. Re-run after moving the repo. Preview with:
+# ./install.sh --dry-run
 install:
     ./install.sh
 
 # Remove the LaunchAgent, plist, and symlink; keeps config/state (#171).
-# Add --purge by hand to also delete those. Preview with --dry-run.
+# Checkout-scoped; users remove the service with `mcp-gateway service
+# uninstall`. Add --purge by hand to also delete those. Preview with --dry-run.
 uninstall:
     ./install.sh --uninstall

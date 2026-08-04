@@ -15,6 +15,48 @@ This guide walks the UI top to bottom. For what each change means in practice �
 whether it takes effect instantly or needs a restart — see
 [When changes take effect](#when-changes-take-effect) at the end.
 
+## The same surface from the terminal
+
+The web UI and the `mcp-gateway` CLI drive the same admin API
+([api.md](api.md)) and write the same `config.toml`, so every dashboard action
+has a scriptable command. The CLI is the automation surface; the full
+reference — global flags, JSON input, and safety rules — lives in
+[operations.md](operations.md#command-line-reference). Highlights:
+
+| UI action | CLI command |
+|-----------|-------------|
+| Import a backend | `mcp-gateway backend add …` |
+| Display name | `mcp-gateway backend display-name <name> …` |
+| Backend detail / liveness | `mcp-gateway backend show <name>` / `mcp-gateway status` |
+| Broadcasting toggle | `mcp-gateway backend enable\|disable <name>` |
+| Master switch | `mcp-gateway backend enable-all\|disable-all` |
+| Pin all tools | `mcp-gateway backend pin\|unpin <name>` |
+| Warm session toggle | `mcp-gateway backend session <name> …` |
+| Re-inspect | `mcp-gateway backend inspect <name>` |
+| Rename… | `mcp-gateway backend rename <name> …` |
+| Tool card edits | `mcp-gateway tool set <backend> <tool> …` |
+| Run tool (mini-inspector) | `mcp-gateway tool run <backend> <tool> …` |
+| Stale override migrate/discard | `mcp-gateway tool migrate …` / `tool discard …` |
+| Resource edits | `mcp-gateway resource set …` |
+| Prompt edits | `mcp-gateway prompt set …` |
+| Server instructions | `mcp-gateway instructions set <backend> …` |
+| Virtual Tools editor | `mcp-gateway virtual create\|update\|validate\|test\|activate …` |
+| Export / import | `mcp-gateway settings export\|import` |
+| Gateway settings | `mcp-gateway settings show\|set` |
+| Restart | `mcp-gateway restart` |
+| Live log row | `mcp-gateway logs show\|follow` |
+
+Choose by workflow: the UI is the interactive surface (visual editing, the
+transactional Virtual Tools draft → validate → test → activate lifecycle),
+while the CLI is the automation surface (`--json` for pipelines, `--yes` for
+destructive actions, JSON-file inputs for complex payloads, safe non-TTY
+use). The mapping is one-way complete — every dashboard action has a CLI
+counterpart. The reverse is not claimed: the CLI additionally owns
+automation-only controls that have no dashboard equivalent, such as `run`,
+`version`, `update`, `service install|status|uninstall`, `check`, and
+pipeline-friendly output. Where a capability exists in both, they operate on
+the same admin API and write the same `config.toml`.
+
 ## The sidebar and status dots
 
 The left pane lists every backend, plus **Gateway** and **Virtual Tools** items.
@@ -232,7 +274,9 @@ A save that would collide is refused with a clear error.
 If you are renaming many tools at once and do not want to resolve every collision
 by hand, turn on **auto-uniquify** in the ⚙ Gateway header. With it on, a
 colliding save is retried once with a deterministic `_2` / `_3` suffix, and the
-UI tells you the final name that shipped. (Auto-uniquify covers name collisions
+UI tells you the final name that shipped. The CLI equivalent is per-save:
+`mcp-gateway tool set <backend> <tool> --name X --auto-uniquify` (without the
+flag a colliding rename is rejected). (Auto-uniquify covers name collisions
 only; a duplicate description still has to be fixed by hand.)
 
 ## Gateway overview (⚙ Gateway)
