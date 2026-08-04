@@ -1852,5 +1852,3 @@ if __name__ == "__main__":
     print(f"loaded {len(cfg.backends)} backend(s); {len(all_index)} tool override(s)")
     for key, backend in all_index.items():
         print(f"  transform key: {key:40s} <- backend {backend}")
-    print("proxy config:")
-    print(json.dumps(to_proxy_config(cfg), indent=2))
