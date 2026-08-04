@@ -4,6 +4,13 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project aims to
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.1](https://github.com/voidfreud/mcp-gateway/compare/v1.3.0...v1.3.1) (2026-08-04)
+
+
+### Bug Fixes
+
+* stop self-check from printing resolved secrets ([#275](https://github.com/voidfreud/mcp-gateway/issues/275)) ([9a24378](https://github.com/voidfreud/mcp-gateway/commit/9a243781d009e88ff275f21699b33c8f49782aee))
+
 ## [1.3.0](https://github.com/voidfreud/mcp-gateway/compare/v1.2.1...v1.3.0) (2026-08-04)
 
 
