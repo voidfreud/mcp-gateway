@@ -67,6 +67,11 @@ def test_local_secret_and_agent_state_paths_are_ignored() -> None:
         ".env.local",
         "secrets.env",
         "config.secret.toml",
+        "CLAUDE.md",
+        ".agents/skills/gitnexus-exploring/SKILL.md",
+        ".agents/worktrees/example/checkout",
+        ".claude/skills/gitnexus-exploring/SKILL.md",
+        ".claude/worktrees/example/checkout",
         ".claude/hooks/pre-commit",
         ".claude/cache/index.json",
         ".gitnexus/cache/index.json",
@@ -77,7 +82,7 @@ def test_local_secret_and_agent_state_paths_are_ignored() -> None:
         "tests/conformance/node_modules/package/index.js",
     ):
         result = subprocess.run(
-            ["git", "check-ignore", "--quiet", "--", local_path],
+            ["git", "check-ignore", "--no-index", "--quiet", "--", local_path],
             cwd=PROJECT_ROOT,
             capture_output=True,
             text=True,

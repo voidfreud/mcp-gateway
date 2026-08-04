@@ -456,27 +456,8 @@ def _check_layout(root: Path, diagnostics: list[str]) -> None:
             )
         )
     _check_research_layout(root, diagnostics)
-    adapter = root / ".claude/skills/mcp-tool-design/SKILL.md"
-    adapter_fields, _ = _frontmatter(adapter, root, diagnostics)
-    if adapter_fields.get("name") != "mcp-tool-design":
-        diagnostics.append(
-            _diagnostic(adapter, 2, "frontmatter", "name must match the skill", root)
-        )
-    adapter_root = adapter.parent
-    adapter_files = {
-        path.relative_to(adapter_root).as_posix()
-        for path in adapter_root.rglob("*")
-        if path.is_file() and path.name != ".DS_Store"
-    }
-    if adapter_files != {"SKILL.md"}:
-        diagnostics.append(
-            _diagnostic(
-                adapter_root, 1, "claude-adapter", "must contain the adapter only", root
-            )
-        )
     for path in canonical.rglob("*.md"):
         _check_links(path, root, diagnostics)
-    _check_links(adapter, root, diagnostics)
     _check_openai_yaml(canonical / "agents/openai.yaml", root, diagnostics)
 
 

@@ -16,6 +16,10 @@ config.secret.toml
 # Local extensions and developer-tool state.
 .hooks/
 hooks.local/
+# AGENTS.md and .agents/ are canonical; provider-specific generated copies stay local.
+CLAUDE.md
+.agents/skills/gitnexus-*/
+.claude/skills/gitnexus-*/
 .claude/hooks/
 .claude/cache/
 .gitnexus/
@@ -42,5 +46,6 @@ claude-design/
 # macOS noise
 .DS_Store
 
-# Agent worktrees (Claude Code isolation)
+# Agent worktrees (canonical path plus provider compatibility)
+.agents/worktrees/
 .claude/worktrees/
