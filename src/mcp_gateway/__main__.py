@@ -47,6 +47,8 @@ def _answer(prompt: str, *, stdin: TextIO, stdout: TextIO) -> str:
 def _print_install(result, *, stdout: TextIO) -> None:
     action = "installed and started" if result.reloaded else "already installed"
     stdout.write(f"resident service {action}: com.void.mcp-gateway\n")
+    if result.changed and result.reloaded:
+        stdout.write("future updates: run `mcp-gateway update`\n")
     if result.migrated_config:
         stdout.write("migrated checkout config to ~/.config/mcp-gateway/config.toml\n")
     if result.removed_legacy_link:
