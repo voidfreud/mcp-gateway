@@ -70,6 +70,9 @@ def test_install_renders_versioned_atomic_service_and_captures_path(tmp_path):
     assert result.reloaded is True
     assert paths.state_dir.is_dir()
     assert paths.config_dir.is_dir()
+    assert paths.state_dir.stat().st_mode & 0o777 == 0o700
+    assert paths.config_dir.stat().st_mode & 0o777 == 0o700
+    assert paths.wrapper_dir.stat().st_mode & 0o777 == 0o700
     assert paths.prompted_marker.read_text() == "installed\n"
     assert paths.wrapper.stat().st_mode & 0o777 == 0o700
     assert paths.plist.stat().st_mode & 0o777 == 0o600
@@ -222,7 +225,13 @@ def test_stale_template_refreshes_without_launchctl_or_path_loss(tmp_path, monke
         refreshed["EnvironmentVariables"]["MCP_GATEWAY_SERVICE_TEMPLATE_VERSION"]
         == service.TEMPLATE_VERSION
     )
+    for directory in (paths.state_dir, paths.config_dir, paths.wrapper_dir):
+        directory.chmod(0o755)
     assert service.refresh_installed_service(paths=paths, platform="darwin") is False
+    assert all(
+        directory.stat().st_mode & 0o777 == 0o700
+        for directory in (paths.state_dir, paths.config_dir, paths.wrapper_dir)
+    )
 
 
 def test_install_migrates_checkout_config_and_removes_legacy_symlink(tmp_path):
@@ -638,3 +647,46 @@ def test_update_cli_supports_latest_and_exact_version(monkeypatch):
     assert "1.1.0 -> 1.2.0" in latest_output.getvalue()
     assert "health/readiness verified" in latest_output.getvalue()
     assert "1.1.0 -> 1.2.0" in exact_output.getvalue()
+
+
+def test_help_aliases_print_command_guide_to_stdout():
+    for alias in ("-h", "--help"):
+        out = io.StringIO()
+        err = io.StringIO()
+        cli.main([alias], stdin=io.StringIO(), stdout=out, stderr=err)
+        text = out.getvalue()
+        assert text.startswith("usage: mcp-gateway")
+        assert "--install-service" in text
+        assert "--uninstall-service" in text
+        assert "--service-status" in text
+        assert "update [--version X.Y.Z]" in text
+        assert "-h, --help" in text
+        assert err.getvalue() == ""
+
+
+def test_invalid_argument_prints_usage_to_stderr_and_exits_2():
+    out = io.StringIO()
+    err = io.StringIO()
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(
+            ["--bogus"],
+            stdin=io.StringIO(),
+            stdout=out,
+            stderr=err,
+        )
+    assert excinfo.value.code == 2
+    assert out.getvalue() == ""
+    assert err.getvalue().startswith("usage: mcp-gateway")
+
+
+def test_help_alias_with_extra_args_still_exits_2():
+    err = io.StringIO()
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(
+            ["--help", "extra"],
+            stdin=io.StringIO(),
+            stdout=io.StringIO(),
+            stderr=err,
+        )
+    assert excinfo.value.code == 2
+    assert err.getvalue().startswith("usage: mcp-gateway")

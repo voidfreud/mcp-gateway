@@ -2,8 +2,8 @@
 
 This is the canonical release process for mcp-gateway. Every release publishes
 the `mcp-local-gateway` distribution to public PyPI through OIDC Trusted
-Publishing and retains checksummed artifacts in this private repository's
-GitHub Release. For verification tiers and the redacted local receipt, see
+Publishing and retains checksummed artifacts in a public GitHub Release. For
+verification tiers and the redacted local receipt, see
 [testing and verification](testing.md).
 
 ## Version policy
@@ -85,9 +85,10 @@ variable `RELEASE_PLEASE_APP_ID` and its private key as the Actions secret
 `RELEASE_PLEASE_APP_PRIVATE_KEY`. Do not substitute a personal access token.
 The workflows fail closed if either value is absent.
 
-This guide describes the required setup; it does not claim that the repository
-settings are already configured. Confirm them in GitHub before relying on a
-release run.
+The release job revokes its broad release token before dependency resolution.
+It uses a separate read-only token for the exact PR checkout, performs the
+lockfile refresh with no repository credential, then mints a contents-write
+token only for the validated push and revokes it immediately afterward.
 
 ### PyPI Trusted Publisher
 
@@ -113,6 +114,16 @@ GitHub's repository-level **Immutable Releases** setting is a separate GitHub
 policy. The workflow neither enables nor verifies it. Enable and verify that
 setting in GitHub if platform-enforced release immutability is required; do not
 infer it from this repository's workflow alone.
+
+## Build contract
+
+Release jobs use the repository-pinned `uv` version and the exact
+`hatchling` version in `uv.lock`. After `uv sync --locked`, the release contract
+builds offline with `--no-build-isolation`, inspects wheel and sdist metadata,
+clean-installs the wheel, exports the SBOM, and only then writes checksums. A
+toolchain change therefore requires a reviewed lock refresh and the same full
+gate as application code.
+
 
 ## Corrections and failures
 
@@ -145,10 +156,9 @@ remove the stale release label and let automation propose the current release;
 investigate workflow logs and repository setup before manually editing release
 files.
 
-Attestation, provenance, and broader security policy are tracked in Issue
-[#201](https://github.com/voidfreud/mcp-gateway/issues/201). Final release
-acceptance is tracked in Issue
-[#212](https://github.com/voidfreud/mcp-gateway/issues/212).
+Security reports use the repository's private vulnerability-reporting form; see
+[the security policy](../.github/SECURITY.md). Release hardening that is not
+implemented belongs in a current GitHub issue rather than this guide.
 
 ## Installing a release
 
@@ -165,8 +175,13 @@ For an exact update or rollback after installation:
 mcp-gateway update --version X.Y.Z
 ```
 
-The private GitHub Release remains a verifiable fallback. Use an authorized
-GitHub account, download the chosen release, and verify every asset:
+The selected gateway version is exact, but `uv` resolves its compatible
+dependencies from public PyPI when installing. Release checksums cover the
+published gateway artifacts, and the SBOM records the release build
+environment; neither is a lockfile for every future public installation.
+
+The public GitHub Release remains a verifiable fallback. Authenticate the
+GitHub CLI, download the chosen release, and verify every asset:
 
 ```bash
 gh auth login
@@ -184,13 +199,11 @@ install is a developer convenience, not a release artifact:
 uv tool install "git+https://github.com/voidfreud/mcp-gateway@vX.Y.Z"
 ```
 
-For foreground development, clone the repository, prepare its locked
+For foreground development, clone the public repository, prepare its locked
 environment, and run from the checkout instead of treating `main` as a stable
 release channel:
 
 ```bash
-gh auth login
-gh auth setup-git
 git clone https://github.com/voidfreud/mcp-gateway
 cd mcp-gateway
 uv sync --locked

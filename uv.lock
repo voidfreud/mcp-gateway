@@ -341,19 +341,19 @@ wheels = [
 
 [[package]]
 name = "fastmcp"
-version = "3.4.4"
+version = "3.4.5"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "fastmcp-slim", extra = ["client", "server"] },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/9c/f7/5188565d1b93ad611cbd80bf473e7ad669d1f3b689c4bedcd304e1ec3472/fastmcp-3.4.4.tar.gz", hash = "sha256:378202e26ec15b23819d9a1c0d1b0ebda096bc712720532010a0b82a45c2b1df", size = 28796458, upload-time = "2026-07-09T00:32:41.352Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/23/14/c1ffb91b7d1fece86c81e1f9df5474f30fd97e4cdaa398814bbbeee88568/fastmcp-3.4.5.tar.gz", hash = "sha256:a95f2bc876bef42e8b50f7872f24f3f2fe3b1d37408c734e8b9d9e03014b72d3", size = 28800521, upload-time = "2026-07-27T19:20:01.231Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/5f/67/3cef84ba38a23dca1e1e776bfda8a35ab3c7a6c94a8ca81d0715de6dd3c5/fastmcp-3.4.4-py3-none-any.whl", hash = "sha256:f86f208713212260068cf55c32936839eee856fefc7808e18a032f31eb0f718e", size = 8019, upload-time = "2026-07-09T00:32:39.411Z" },
+    { url = "https://files.pythonhosted.org/packages/c6/4f/73450a436c963c0382d15a882fc5d08f15aadc329194df1b54495a7c8383/fastmcp-3.4.5-py3-none-any.whl", hash = "sha256:5d3d438eb2917e63e6faf53e8cb8fe26d887ec3232f848093a4eecad7fa34861", size = 8017, upload-time = "2026-07-27T19:19:57.942Z" },
 ]
 
 [[package]]
 name = "fastmcp-slim"
-version = "3.4.4"
+version = "3.4.5"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "platformdirs" },
@@ -363,9 +363,9 @@ dependencies = [
     { name = "rich" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/45/79/f35661c6a1d76dfbe17a079f912d96fffcfdd40fad5a9144bb9e7dfb1fdf/fastmcp_slim-3.4.4.tar.gz", hash = "sha256:dcaa3e0be2127d7eacdce592c2ef0039204923dc0ec396454615cb4a3275b078", size = 590203, upload-time = "2026-07-09T00:32:20.531Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/81/1d/f3e271fbcd01ce01a4cf623b336d8e1305c192aa5d5e8e0223b7167462e9/fastmcp_slim-3.4.5.tar.gz", hash = "sha256:5badc3bceee61f61297eeb9494f499325f3ce1cafabf4611b31f6c3e9d7dff59", size = 591622, upload-time = "2026-07-27T19:15:19.455Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/16/91/321e0b2e9ed70d0628b17ddaec76fc7b09f3e1d5d290f70bf101a2890142/fastmcp_slim-3.4.4-py3-none-any.whl", hash = "sha256:9d3a6327b9ee835188eb7323fc3b5d4cd061631b48da8ece56794bb538972505", size = 765158, upload-time = "2026-07-09T00:32:19.11Z" },
+    { url = "https://files.pythonhosted.org/packages/43/3b/16d8aa8224094519f30b078138e725b8a731bf0a13f1f850e58b5f9b3cc4/fastmcp_slim-3.4.5-py3-none-any.whl", hash = "sha256:bc31217827c4999812543c83ee95ed9a47f3ed1e3fd0bd4f64371e375b748eca", size = 766478, upload-time = "2026-07-27T19:15:18.015Z" },
 ]
 
 [package.optional-dependencies]
@@ -427,6 +427,21 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/01/ee/02a2c011bdab74c6fb3c75474d40b3052059d95df7e73351460c8588d963/h11-0.16.0.tar.gz", hash = "sha256:4e35b956cf45792e4caa5885e69fba00bdbc6ffafbfa020300e549b208ee5ff1", size = 101250, upload-time = "2025-04-24T03:35:25.427Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/04/4b/29cac41a4d98d144bf5f6d33995617b185d14b22401f75ca86f384e87ff1/h11-0.16.0-py3-none-any.whl", hash = "sha256:63cf8bbe7522de3bf65932fda1d9c2772064ffb3dae62d55932da54b31cb6c86", size = 37515, upload-time = "2025-04-24T03:35:24.344Z" },
+]
+
+[[package]]
+name = "hatchling"
+version = "1.31.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "packaging" },
+    { name = "pathspec" },
+    { name = "pluggy" },
+    { name = "trove-classifiers" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/25/e2/dfa73fe78f773018dcaebc6d09b819bc10d328ff5a6b4a66efa1e3d71f52/hatchling-1.31.0.tar.gz", hash = "sha256:6b48ad4068a482ed7239b3a8215bc55b47aad3345d58dfc94e553c5d2d46211b", size = 57208, upload-time = "2026-07-08T01:48:32.237Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/64/e2/2c0af0a52d16be74a4f194564fcdc417521ed863e9b65e4bc9052dacba6f/hatchling-1.31.0-py3-none-any.whl", hash = "sha256:aac80bec8b6fe35e8480f1c335be8910fa210a0e6f735a139be205dadcacb544", size = 77747, upload-time = "2026-07-08T01:48:31.024Z" },
 ]
 
 [[package]]
@@ -735,6 +750,7 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "hatchling" },
     { name = "httpx2" },
     { name = "hypothesis" },
     { name = "jsonschema" },
@@ -746,7 +762,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "fastmcp", specifier = "==3.4.4" },
+    { name = "fastmcp", specifier = "==3.4.5" },
     { name = "pydantic", specifier = ">=2.13.4" },
     { name = "structlog", specifier = ">=26.1.0" },
     { name = "tomli-w", specifier = ">=1.2.0" },
@@ -754,6 +770,7 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "hatchling", specifier = "==1.31.0" },
     { name = "httpx2", specifier = ">=2.9.1" },
     { name = "hypothesis", specifier = ">=6.164.0" },
     { name = "jsonschema", specifier = ">=4.26.0" },
@@ -860,6 +877,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/66/f3/5a20387de9bcd0607871bfc2198ee0e15836da7baa4592ccd7f24c27c986/pathable-0.6.0.tar.gz", hash = "sha256:6404b8b82aef5ff0fd478934137128b99b12212ba35afdde5525ca4f8388ea58", size = 18970, upload-time = "2026-05-19T18:15:11.911Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/a2/e8/6d75ffd9784bce2e93d1ae4415649427e39a53bb172d4672b2b59c6f0a7b/pathable-0.6.0-py3-none-any.whl", hash = "sha256:82c4ca6c98c502ad12e0d4e9779b6210afee93c38990988c8c5d1b49bdcdf566", size = 18983, upload-time = "2026-05-19T18:15:10.728Z" },
+]
+
+[[package]]
+name = "pathspec"
+version = "1.1.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/5a/82/42f767fc1c1143d6fd36efb827202a2d997a375e160a71eb2888a925aac1/pathspec-1.1.1.tar.gz", hash = "sha256:17db5ecd524104a120e173814c90367a96a98d07c45b2e10c2f3919fff91bf5a", size = 135180, upload-time = "2026-04-27T01:46:08.907Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/f1/d9/7fb5aa316bc299258e68c73ba3bddbc499654a07f151cba08f6153988714/pathspec-1.1.1-py3-none-any.whl", hash = "sha256:a00ce642f577bf7f473932318056212bc4f8bfdf53128c78bbd5af0b9b20b189", size = 57328, upload-time = "2026-04-27T01:46:07.06Z" },
 ]
 
 [[package]]
@@ -1408,6 +1434,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/19/75/241269d1da26b624c0d5e110e8149093c759b7a286138f4efd61a60e75fe/tomli_w-1.2.0.tar.gz", hash = "sha256:2dd14fac5a47c27be9cd4c976af5a12d87fb1f0b4512f81d69cce3b35ae25021", size = 7184, upload-time = "2025-01-15T12:07:24.262Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/c7/18/c86eb8e0202e32dd3df50d43d7ff9854f8e0603945ff398974c1d91ac1ef/tomli_w-1.2.0-py3-none-any.whl", hash = "sha256:188306098d013b691fcadc011abd66727d3c414c571bb01b1a174ba8c983cf90", size = 6675, upload-time = "2025-01-15T12:07:22.074Z" },
+]
+
+[[package]]
+name = "trove-classifiers"
+version = "2026.6.1.19"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/c2/e3/7ca82ee24c82d344584abd5b8637b3bd056f2900226e8d82fc22f1184b92/trove_classifiers-2026.6.1.19.tar.gz", hash = "sha256:c5132b4b61a829d11cfbd2d72e97f20a45ed6edb95e45c5efdeb5e00836b2745", size = 17059, upload-time = "2026-06-01T19:41:34.649Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/7c/a4/81502f486f01db95bc8320646a8a12511f5e556cb63d5e224d91816605c4/trove_classifiers-2026.6.1.19-py3-none-any.whl", hash = "sha256:ab4c4ec93cc4a4e7815fa759906e05e6bb3f2fbd92ea0f897288c6a43efd15b3", size = 14211, upload-time = "2026-06-01T19:41:33.434Z" },
 ]
 
 [[package]]

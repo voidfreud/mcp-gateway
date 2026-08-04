@@ -14,6 +14,29 @@ USAGE = """usage: mcp-gateway [--version | --foreground |
                    --uninstall-service [--keep-data | --purge-data] |
                    --service-status | update [--version X.Y.Z]]"""
 
+HELP = """usage: mcp-gateway [command]
+
+Start the gateway or manage its resident macOS login service.
+
+Commands:
+  (no arguments)       Start in the foreground, offering to install the
+                       resident macOS login service on first run.
+  --foreground         Start in the foreground without the service prompt.
+  --version            Print the installed gateway version and exit.
+  --install-service [--restart]
+                       Install or restart the resident macOS login service.
+  --uninstall-service [--keep-data | --purge-data]
+                       Remove the resident service, keeping or purging user
+                       data (required when not running interactively).
+  --service-status     Show the resident service's status (macOS only).
+  update [--version X.Y.Z]
+                       Update the installed gateway package and resident
+                       service to the latest or a specific version.
+
+Options:
+  -h, --help           Show this help and exit.
+"""
+
 
 def _answer(prompt: str, *, stdin: TextIO, stdout: TextIO) -> str:
     stdout.write(prompt)
@@ -174,6 +197,10 @@ def main(
 
     if args == ["--version"]:
         sink.write(f"mcp-gateway {gateway_version()}\n")
+        return
+
+    if args in (["-h"], ["--help"]):
+        sink.write(HELP)
         return
 
     try:

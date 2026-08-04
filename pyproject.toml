@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling==1.31.0"]
 build-backend = "hatchling.build"
 
 [project]
@@ -26,7 +26,7 @@ classifiers = [
 dependencies = [
     # Private compatibility seams are guarded in tests/test_fastmcp_compat.py.
     # Upgrade deliberately: change this pin, refresh uv.lock, and run the full gate.
-    "fastmcp==3.4.4",
+    "fastmcp==3.4.5",
     "pydantic>=2.13.4",
     "structlog>=26.1.0",
     "tomli-w>=1.2.0",
@@ -51,6 +51,8 @@ only-include = ["src/mcp_gateway", "README.md", "LICENSE", "pyproject.toml"]
 
 [dependency-groups]
 dev = [
+    # The release contract builds without isolation from this locked backend.
+    "hatchling==1.31.0",
     "httpx2>=2.9.1",
     "hypothesis>=6.164.0",
     "jsonschema>=4.26.0",
@@ -61,6 +63,9 @@ dev = [
     # suppressions or source exclusions.
     "ty==0.0.63",
 ]
+
+[tool.uv]
+required-version = "==0.10.9"
 
 [tool.ruff]
 # corpus/ stores retained source pointers and provenance records rather than

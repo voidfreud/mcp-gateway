@@ -84,7 +84,7 @@ diff-vs-default model (see below).
 | `introspect_interval` | integer (seconds) | `0` (off) | How often to re-scan every backend's tool list on a timer. `0` means off, which is the recommended default — the gateway already refreshes on reconnect, on a backend's own change notification, and on admin page load. Set an interval only for a long-lived remote backend that silently swaps its tools. |
 | `baseline_max_age` | integer (seconds) | `86400` (24 h) | How long a captured baseline counts as fresh for the **post-mount** refresh: at boot (or remount) a backend whose stored baseline is younger than this is not re-introspected, sparing slow stdio backends a second cold start per boot. `0` disables the gate (re-capture on every mount). Only the mount-time trigger is gated — a backend's own change notification, an admin page load, and the manual Re-inspect button always refresh. |
 | `update_check` | boolean | `true` | Check the fixed public PyPI project once at startup and every 24 hours. The check sends the installed gateway version in its User-Agent, has a 10-second timeout, tolerates offline/error responses, and never applies an update. Set `false` for zero update-check network requests; the Admin UI exposes the same toggle. |
-| `bearer_token` | string or unset | unset | Optional access token. When set (as a `${ENV}` reference), every backend endpoint **and** the admin API require `Authorization: Bearer <token>`. See [security.md](security.md#the-optional-bearer-token). |
+| `bearer_token` | string or unset | unset | Optional access token. When set, it must be one `${ENV}` reference; raw values are rejected. Every backend endpoint **and** the admin API then require `Authorization: Bearer <token>`. See [security.md](security.md#the-optional-bearer-token). |
 | `oauth` | table or unset | unset | JWT resource-server profile for standard remote OAuth. Mutually exclusive with `bearer_token`; protects each backend and `/virtual/mcp` independently. See [OAuth resource-server mode](#oauth-resource-server-mode). |
 | `backends` | list | empty | One `[[backends]]` block per backend. An empty configuration is valid: the Admin UI remains available to add or import backends, and `/virtual/mcp` remains mounted with an empty catalog. No backend MCP endpoint is available until a backend is configured and mounted. |
 | `virtual_tools` | list | empty | Gateway-owned tools served together at the permanent `/virtual/mcp` endpoint. Normally managed through the Admin UI. |
@@ -106,10 +106,10 @@ Each independent MCP resource has its own audience and discovery document:
 
 Use HTTPS for remote authorization-server, issuer, JWKS, and public gateway
 URLs. Plain HTTP is accepted only for explicit loopback development URLs. A
-remote bind must set `oauth.admin_bearer_token`; that separate `${ENV}` token
-protects `/admin/api/*` and is never accepted as an MCP access token. The legacy
-`bearer_token` profile remains available for loopback deployments but cannot be
-combined with `[oauth]`.
+remote bind must set `oauth.admin_bearer_token`; that separate token must be one
+`${ENV}` reference, protects `/admin/api/*`, and is never accepted as an MCP
+access token. The legacy `bearer_token` profile remains available for loopback
+deployments but cannot be combined with `[oauth]`.
 
 ## Backend settings (`[[backends]]`)
 
@@ -120,13 +120,13 @@ combined with `[oauth]`.
 | `transport` | `"http"` \| `"streamable-http"` \| `"sse"` \| `"stdio"` | required | How to reach the backend. `http` and `streamable-http` are the same modern remote transport; `sse` is the legacy remote transport; `stdio` runs a local command. |
 | `url` | string or unset | unset | The backend's URL. **Required for `http`/`streamable-http`/`sse`.** May contain `${ENV}` references. |
 | `auth_header` | string or unset | unset | Name of an auth header to send (for example `Authorization`). Set **both** `auth_header` and `auth_value` or neither. |
-| `auth_value` | string or unset | unset | Value for that header (for example `Bearer ${EXA_TOKEN}`). Use `${ENV}` — never a raw secret. |
-| `headers` | table of string→string | empty | Extra static headers to send. Values may use `${ENV}`. Merged with `auth_header`/`auth_value` (the pair wins on a name clash). |
+| `auth_value` | string or unset | unset | Value for that header (for example `Bearer ${EXA_TOKEN}`). It must contain an `${ENV}` reference; raw credential values are rejected. |
+| `headers` | table of string→string | empty | Extra static headers to send. Credential-bearing values should use `${ENV}`; literal non-secret values are allowed. Merged with `auth_header`/`auth_value` (the pair wins on a name clash). |
 | `auth` | `"oauth"` or unset | unset | Set to `"oauth"` for an OAuth-protected remote MCP. The gateway runs the browser consent flow on first connect and caches the tokens. |
 | `headers_helper` | string or list of strings, or unset | unset | A command that prints a JSON object of headers, for tokens computed at connect time. A **list** is run as arguments with no shell (safe). A **string** is run through the shell (for `$()`/pipes) and carries full shell privilege. Runs **once** when the backend connects, not per call and not on a timer — good for a token valid for the daemon's uptime (e.g. `gh auth token`), not one that must rotate mid-session. |
 | `command` | string or unset | unset | The program to run for a `stdio` backend. **Required for `stdio`.** |
 | `args` | list of strings | empty | Arguments for the `stdio` `command`. |
-| `env` | table of string→string | empty | Environment variables for the `stdio` process. Values may use `${ENV}`. |
+| `env` | table of string→string | empty | Environment variables for the `stdio` process. Credential values should use `${ENV}`; literal non-secret settings are allowed. |
 | `stateless` | boolean | `false` | Session strategy. `false` (**warm**, the default and what the UI's import uses) keeps one persistent connection — much faster, and the gateway automatically reconnects it if it dies (at most one repair per 30s). `true` opens a fresh session per request — a fallback for backends whose sessions misbehave when held. Toggleable live per backend in the admin UI. |
 | `init_timeout` | number (seconds) | `30` | Maximum time allowed for the backend's MCP initialize handshake. Must be greater than `0` and at most `300`. A timeout leaves that backend unmounted and readiness degraded without blocking other endpoints. |
 | `request_timeout` | number (seconds) | `300` | Maximum time allowed for each request forwarded to the backend. Must be greater than `0` and at most `3600`. |
@@ -310,8 +310,13 @@ out of the process environment, so a local `stdio` backend's subprocess cannot
 read another backend's secrets — but every backend's auth references resolve from
 the same file.
 
-Because the config holds only references and public endpoints, it is safe to
-commit or share. See [security.md](security.md#secrets-handling) for more.
+The dedicated credential fields (`bearer_token`, `oauth.admin_bearer_token`,
+and backend `auth_value`) reject raw values. Arbitrary URLs, headers, arguments,
+and subprocess environment values cannot be classified reliably, so never place
+credentials there as literals. On POSIX systems, config and secrets files are
+created or repaired with user-only `0600` permissions; the macOS resident
+service keeps its config, state, and wrapper directories at `0700`. See
+[security.md](security.md#secrets-handling) for more.
 
 ## Related
 

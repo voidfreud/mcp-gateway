@@ -37,7 +37,7 @@ jobs:
       release_sha: ${{ steps.release-please.outputs.sha }}
     steps:
       - name: Mint repository-scoped release token
-        id: app-token
+        id: release-token
         # actions/create-github-app-token v3.2.0
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1
         with:
@@ -45,6 +45,7 @@ jobs:
           private-key: ${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
           repositories: ${{ github.event.repository.name }}
+          skip-token-revoke: true # revoked explicitly before dependency resolution
           permission-contents: write
           permission-pull-requests: write
           permission-issues: write
@@ -54,7 +55,7 @@ jobs:
         # googleapis/release-please-action v5.0.0
         uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7
         with:
-          token: ${{ steps.app-token.outputs.token }}
+          token: ${{ steps.release-token.outputs.token }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
@@ -79,28 +80,40 @@ jobs:
           print(f"number={number}")
           PY
 
-      - name: Check out the release PR
+      - name: Revoke the release token
+        if: always() && steps.release-token.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ steps.release-token.outputs.token }}
+        run: gh api --method DELETE /installation/token
+
+      - name: Mint read-only release PR token
+        id: pr-read-token
         if: steps.release-please.outputs.prs_created == 'true'
-        # actions/checkout v7.0.0
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        # actions/create-github-app-token v3.2.0
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1
         with:
-          token: ${{ steps.app-token.outputs.token }}
-          fetch-depth: 0
-          persist-credentials: false
+          app-id: ${{ vars.RELEASE_PLEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          skip-token-revoke: true # revoked immediately after checkout
+          permission-contents: read
+          permission-pull-requests: read
 
       - name: Set up uv for the release PR
         if: steps.release-please.outputs.prs_created == 'true'
         # astral-sh/setup-uv v8.3.2
         uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990
         with:
+          version: "0.10.9"
           enable-cache: false
 
-      - name: Refresh the release PR lockfile when needed
+      - name: Resolve the exact release PR head
+        id: release-head
         if: steps.release-please.outputs.prs_created == 'true'
         env:
-          APP_TOKEN: ${{ steps.app-token.outputs.token }}
-          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          APP_SLUG: ${{ steps.release-token.outputs.app-slug }}
+          GH_TOKEN: ${{ steps.pr-read-token.outputs.token }}
           PR_NUMBER: ${{ steps.release-pr.outputs.number }}
         shell: bash
         run: |
@@ -112,22 +125,61 @@ jobs:
           }
 
           [[ "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]] || fail "invalid release PR number"
+          [[ "$APP_SLUG" =~ ^[a-z0-9-]+$ ]] || fail "invalid GitHub App slug"
           pull="repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}"
           head_ref="$(gh api "$pull" --jq '.head.ref')"
           head_sha="$(gh api "$pull" --jq '.head.sha')"
+          bot_id="$(gh api "/users/${APP_SLUG}[bot]" --jq '.id')"
           git check-ref-format "refs/heads/${head_ref}" >/dev/null || fail "invalid release PR head ref"
           [[ "$head_sha" =~ ^[0-9a-f]{40}$ ]] || fail "invalid release PR head SHA"
+          [[ "$bot_id" =~ ^[0-9]+$ ]] || fail "could not resolve GitHub App bot identity"
+          {
+            echo "head_ref=$head_ref"
+            echo "head_sha=$head_sha"
+            echo "bot_id=$bot_id"
+          } >> "$GITHUB_OUTPUT"
 
-          # The checkout action intentionally did not persist credentials. The
-          # short-lived token exists only for this runner's fetch and push.
-          git remote set-url origin "https://x-access-token:${APP_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-          git fetch --no-tags origin "refs/heads/${head_ref}:refs/remotes/origin/${head_ref}"
-          [[ "$(git rev-parse "refs/remotes/origin/${head_ref}")" == "$head_sha" ]] || fail "release PR head changed while resolving it"
-          git checkout --detach "$head_sha"
-          [[ "$(git rev-parse HEAD)" == "$head_sha" ]] || fail "could not check out the release PR head"
+      - name: Check out the exact release PR head
+        if: steps.release-please.outputs.prs_created == 'true'
+        # actions/checkout v7.0.0
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          token: ${{ steps.pr-read-token.outputs.token }}
+          ref: ${{ steps.release-head.outputs.head_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Revoke the release PR read token
+        if: always() && steps.pr-read-token.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ steps.pr-read-token.outputs.token }}
+        run: gh api --method DELETE /installation/token
+
+      - name: Refresh the release PR lockfile without write credentials
+        id: lock-refresh
+        if: steps.release-please.outputs.prs_created == 'true'
+        env:
+          APP_SLUG: ${{ steps.release-token.outputs.app-slug }}
+          BOT_ID: ${{ steps.release-head.outputs.bot_id }}
+          EXPECTED_SHA: ${{ steps.release-head.outputs.head_sha }}
+          PR_NUMBER: ${{ steps.release-pr.outputs.number }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          fail() {
+            echo "::error::$*"
+            exit 1
+          }
+
+          [[ "$(git rev-parse HEAD)" == "$EXPECTED_SHA" ]] || fail "release PR head changed before lock refresh"
+          [[ "$APP_SLUG" =~ ^[a-z0-9-]+$ ]] || fail "invalid GitHub App slug"
+          [[ "$BOT_ID" =~ ^[0-9]+$ ]] || fail "invalid GitHub App bot identity"
+          echo "push=false" >> "$GITHUB_OUTPUT"
 
           # Prefer the hermetic resolver. A GitHub-hosted runner may not have
-          # every wheel cached, so only then retry with its network access.
+          # every wheel cached, so only then retry online. This step receives no
+          # repository-write token and checkout persisted no credentials.
           if ! uv lock --offline; then
             echo "::warning::uv lock --offline needed unavailable runner cache; retrying online"
             uv lock
@@ -144,14 +196,62 @@ jobs:
           fi
           [[ -z "$(git ls-files --others --exclude-standard)" ]] || fail "lock refresh produced untracked files"
 
-          [[ "$APP_SLUG" =~ ^[a-z0-9-]+$ ]] || fail "invalid GitHub App slug"
-          bot_id="$(gh api "/users/${APP_SLUG}[bot]" --jq '.id')"
-          [[ "$bot_id" =~ ^[0-9]+$ ]] || fail "could not resolve GitHub App bot identity"
           git config user.name "${APP_SLUG}[bot]"
-          git config user.email "${bot_id}+${APP_SLUG}[bot]@users.noreply.github.com"
+          git config user.email "${BOT_ID}+${APP_SLUG}[bot]@users.noreply.github.com"
           git add -- uv.lock
           git commit --no-verify -m "chore: refresh uv.lock for release PR #${PR_NUMBER}"
-          git push origin "HEAD:refs/heads/${head_ref}"
+          echo "push=true" >> "$GITHUB_OUTPUT"
+
+      - name: Mint lockfile push token
+        id: lock-push-token
+        if: steps.release-please.outputs.prs_created == 'true' && steps.lock-refresh.outputs.push == 'true'
+        # actions/create-github-app-token v3.2.0
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1
+        with:
+          app-id: ${{ vars.RELEASE_PLEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          skip-token-revoke: true # revoked immediately after the push
+          permission-contents: write
+
+      - name: Push the verified lock refresh
+        if: steps.release-please.outputs.prs_created == 'true' && steps.lock-refresh.outputs.push == 'true'
+        env:
+          APP_TOKEN: ${{ steps.lock-push-token.outputs.token }}
+          EXPECTED_SHA: ${{ steps.release-head.outputs.head_sha }}
+          HEAD_REF: ${{ steps.release-head.outputs.head_ref }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git check-ref-format "refs/heads/${HEAD_REF}" >/dev/null
+          [[ "$(git rev-parse HEAD^)" == "$EXPECTED_SHA" ]]
+
+          askpass="$RUNNER_TEMP/mcp-gateway-git-askpass.sh"
+          cleanup() {
+            rm -f "$askpass"
+          }
+          trap cleanup EXIT
+          cat > "$askpass" <<'SH'
+          #!/bin/sh
+          case "$1" in
+            *Username*) printf '%s\n' "$GIT_USERNAME" ;;
+            *Password*) printf '%s\n' "$GIT_PASSWORD" ;;
+            *) exit 1 ;;
+          esac
+          SH
+          chmod 700 "$askpass"
+          GIT_ASKPASS="$askpass" \
+            GIT_TERMINAL_PROMPT=0 \
+            GIT_USERNAME=x-access-token \
+            GIT_PASSWORD="$APP_TOKEN" \
+            git push "https://github.com/${GITHUB_REPOSITORY}.git" "HEAD:refs/heads/${HEAD_REF}"
+
+      - name: Revoke the lockfile push token
+        if: always() && steps.lock-push-token.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ steps.lock-push-token.outputs.token }}
+        run: gh api --method DELETE /installation/token
 
   release-artifacts:
     name: Publish verified release artifacts
@@ -252,6 +352,7 @@ jobs:
         # astral-sh/setup-uv v8.3.2
         uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990
         with:
+          version: "0.10.9"
           enable-cache: false
 
       - name: Set up just

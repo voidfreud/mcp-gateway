@@ -83,6 +83,9 @@ of this — but it is here when you want it.
 | GET | `/admin/api/settings` | — | The gateway-wide settings: `{bearer_token, introspect_interval, update_check, log_level, log_max_bytes, log_backup_count}`. `bearer_token` is the stored `${ENV_VAR}` reference, never a resolved secret. OAuth deployments additionally return read-only `auth_mode` and public `oauth` metadata. |
 | PUT | `/admin/api/settings` | Any subset of the settings keys below. | Validates and persists boot-time settings. A launchd-managed daemon is asked to restart (`reloaded: "restarting"`); a foreground/development process returns `"dev-no-restart"`, leaving the saved values for its next real restart. In OAuth mode, changing `bearer_token` is rejected. |
 
+For backend creation, `auth_value` must contain an `${ENV_VAR}` reference; a
+literal credential is rejected with `400`.
+
 ### Gateway settings payload
 
 `PUT /admin/api/settings` accepts any subset of these keys:

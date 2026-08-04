@@ -17,7 +17,7 @@ def test_fastmcp_runtime_dependency_is_exactly_pinned():
         (Path(__file__).parents[1] / "pyproject.toml").read_text()
     )
     dependencies = pyproject["project"]["dependencies"]
-    assert "fastmcp==3.4.4" in dependencies
+    assert "fastmcp==3.4.5" in dependencies
 
 
 def test_fastmcp_private_runtime_contract():

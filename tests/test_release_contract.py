@@ -397,7 +397,7 @@ def test_sbom_export_requires_supported_uv_and_validates_output(
         contract.export_sbom(output, VERSION, root=tmp_path, uv="uv")
 
 
-def test_build_contract_has_one_offline_build_and_writes_release_assets(
+def test_build_contract_has_one_locked_offline_build_and_writes_release_assets(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root = _release_root(tmp_path)
@@ -405,8 +405,13 @@ def test_build_contract_has_one_offline_build_and_writes_release_assets(
 
     def fake_run(command, *, cwd):
         calls.append(list(command))
-        if command[1:4] == ["build", "--offline", "--out-dir"]:
-            _write_valid_artifacts(Path(command[4]))
+        if command[1:5] == [
+            "build",
+            "--offline",
+            "--no-build-isolation",
+            "--out-dir",
+        ]:
+            _write_valid_artifacts(Path(command[5]))
         return subprocess.CompletedProcess(command, 0, "", "")
 
     def fake_sbom(output, version, *, root, uv):
@@ -423,6 +428,12 @@ def test_build_contract_has_one_offline_build_and_writes_release_assets(
     monkeypatch.setattr(contract, "export_sbom", fake_sbom)
 
     artifacts = contract.build_release(root, "dist", "v1.0.0")
+    assert calls[0][1:5] == [
+        "build",
+        "--offline",
+        "--no-build-isolation",
+        "--out-dir",
+    ]
     assert [command[1] for command in calls].count("build") == 1
     assert [asset.name for asset in artifacts.publishable] == [
         "mcp_local_gateway-1.0.0-py3-none-any.whl",

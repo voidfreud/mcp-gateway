@@ -3,8 +3,9 @@
 mcp-gateway runs in the foreground on every supported platform and can install
 itself as a resident macOS login service. The normal distribution is the public
 `mcp-local-gateway` package on PyPI; it installs the unchanged `mcp-gateway`
-command and `mcp_gateway` import package. Verified private GitHub Release assets
-and checkout installs remain fallback/contributor paths.
+command and `mcp_gateway` import package. Every release also publishes
+checksummed public GitHub Release assets. Checkout installs remain a
+contributor path.
 
 ## Prerequisites
 
@@ -16,10 +17,10 @@ separately:
 curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-GitHub authentication is not required for the normal PyPI install. You need the
-[GitHub CLI](https://cli.github.com/) and repository access only for private
-release artifacts or a checkout. Install [`just`](https://just.systems/) only
-for contributor/repository recipes.
+GitHub authentication is not required for the normal PyPI install or a public
+checkout. The verified-release fallback below uses the
+[GitHub CLI](https://cli.github.com/), which asks you to authenticate. Install
+[`just`](https://just.systems/) only for contributor/repository recipes.
 
 Claude Code and Codex CLIs are optional. When present, the Admin UI can register
 independent backend endpoints in those clients; manual registration always
@@ -83,11 +84,11 @@ mcp-gateway --install-service
 On Linux and Windows, start `mcp-gateway` in the foreground as usual.
 
 
-## Authenticated fallback and checkout install
+## Verified release fallback and checkout install
 
-Every release continues to carry checksummed wheel/source artifacts in the
-private GitHub repository. Use this only when PyPI is unavailable or when
-reviewing a specific private artifact:
+Every release carries checksummed wheel/source artifacts in the public GitHub
+repository. Use this only when PyPI is unavailable or when reviewing a specific
+release artifact:
 
 ```bash
 gh auth login
@@ -105,8 +106,6 @@ input. Do not use mutable `main` as a stable package source.
 Contributors who intentionally deploy a checkout on macOS can use:
 
 ```bash
-gh auth login
-gh auth setup-git
 git clone https://github.com/voidfreud/mcp-gateway
 cd mcp-gateway
 ./install.sh
@@ -138,6 +137,17 @@ applies, the home path. The gateway therefore does not always create a home
 configuration file. See [configuration.md](configuration.md) for the full
 reference.
 
+### Credential references on upgrade
+
+Current releases reject literal values in `bearer_token`,
+`oauth.admin_bearer_token`, and backend `auth_value`. Before updating an older
+config that stored a token directly, move the token to
+`~/.config/mcp-gateway/secrets.env` and leave only a reference in
+`config.toml`, for example `bearer_token = "${MCP_GATEWAY_TOKEN}"` or
+`auth_value = "Bearer ${EXA_TOKEN}"`. On POSIX systems, the gateway creates the
+config at `0600` and repairs existing config and secrets files to that mode when
+it reads them.
+
 ## Updating and rollback
 
 The normal update path requires no GitHub authentication:
@@ -155,7 +165,7 @@ and runtime state are never part of the package swap.
 For provenance, the updater ignores ambient package-index, find-links,
 constraint, and override settings and resolves from public PyPI only. Network
 proxy and certificate environment settings still apply. Use the verified
-private-release fallback when that fixed source is unavailable.
+GitHub Release fallback when that fixed source is unavailable.
 
 
 Use the same command with an exact published version to roll back:
@@ -167,7 +177,13 @@ mcp-gateway update --version X.Y.Z
 If activation fails after a package swap, the command automatically attempts to
 reinstall and restart the old exact version and reports whether rollback
 succeeded. Versions predating the first `mcp-local-gateway` PyPI release remain
-available only through the authenticated GitHub Release fallback above.
+available only through the verified GitHub Release fallback above.
+
+“Exact” refers to the `mcp-local-gateway` package version. Like a normal Python
+application install, `uv` resolves compatible dependencies from public PyPI at
+install or rollback time; the GitHub checksum and SBOM verify the gateway
+release artifacts, not a byte-for-byte restoration of the prior tool
+environment.
 
 For a contributor checkout deployment, `just update` remains the guarded path:
 

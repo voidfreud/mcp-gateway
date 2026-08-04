@@ -464,7 +464,7 @@ def _assert_transport_errors(client: httpx.Client, endpoint: str) -> None:
         content=json.dumps({"jsonrpc": "2.0", "id": 99, "method": "initialize"}),
         headers=_headers(content_type="text/plain"),
     )
-    # FastMCP 3.4.4's proxy layer normalizes this to 400, while the underlying
+    # FastMCP's proxy layer normalizes this to 400, while the underlying
     # transport can emit 415. Both are protocol-level rejection, so pin the
     # observable supported behaviour without assuming a private implementation.
     if wrong_type.status_code not in {400, 415}:

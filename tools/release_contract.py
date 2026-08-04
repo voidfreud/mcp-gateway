@@ -562,7 +562,17 @@ def build_release(
     version = validate_versions(root, tag)
     output = prepare_output_directory(root, raw_output)
     uv = _uv_executable()
-    _run_checked([uv, "build", "--offline", "--out-dir", str(output)], cwd=root)
+    _run_checked(
+        [
+            uv,
+            "build",
+            "--offline",
+            "--no-build-isolation",
+            "--out-dir",
+            str(output),
+        ],
+        cwd=root,
+    )
     wheel, sdist = validate_built_artifacts(output, version)
     validate_runtime_metadata(root, wheel, sdist, version)
     verify_clean_install(wheel, version, root=root, uv=uv)

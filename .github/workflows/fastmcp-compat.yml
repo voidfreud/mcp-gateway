@@ -39,6 +39,7 @@ jobs:
       # astral-sh/setup-uv v8.3.2
       - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990
         with:
+          version: "0.10.9"
           enable-cache: true
           cache-dependency-glob: uv.lock
       - name: Resolve newest FastMCP in an isolated checkout
