@@ -137,29 +137,41 @@ def test_roundtrip_handles_tricky_description():
     )
 
 
-def test_self_check_main_runs_clean():
-    # #80: the documented `python -m mcp_gateway.config_loader <cfg>`
-    # self-check must not
-    # crash (it used to call build_transforms with a missing arg).
+def test_self_check_main_runs_without_printing_resolved_secrets(tmp_path):
     import pathlib
     import subprocess
     import sys
 
+    secret = "codeql-regression-secret-value"
+    secrets = tmp_path / "secrets.env"
+    secrets.write_text(f"SELF_CHECK_TOKEN={secret}\n")
+    config = tmp_path / "config.toml"
+    config.write_text(
+        """
+[[backends]]
+name = "secret_backend"
+transport = "http"
+url = "https://example.invalid/mcp"
+auth_header = "Authorization"
+auth_value = "Bearer ${SELF_CHECK_TOKEN}"
+""".lstrip()
+    )
+
     repo = pathlib.Path(__file__).resolve().parent.parent
-    r = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "mcp_gateway.config_loader",
-            "src/mcp_gateway/config.default.toml",
-        ],
+    env = {**os.environ, "MCP_GATEWAY_SECRETS": str(secrets)}
+    result = subprocess.run(
+        [sys.executable, "-m", "mcp_gateway.config_loader", str(config)],
         cwd=repo,
-        check=False,  # returncode asserted below with stderr attached
+        env=env,
+        check=False,
         capture_output=True,
         text=True,
     )
-    assert r.returncode == 0, r.stderr
-    assert "backend(s)" in r.stdout
+
+    assert result.returncode == 0, result.stderr
+    assert "loaded 1 backend(s)" in result.stdout
+    assert secret not in result.stdout
+    assert "proxy config:" not in result.stdout
 
 
 # --- env expansion ---------------------------------------------------------
