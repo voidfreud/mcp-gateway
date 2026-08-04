@@ -7,12 +7,15 @@ import json
 import re
 import string
 import time
+from pathlib import Path
 
 import anyio
 import pytest
 import structlog
 from hypothesis import given
 from hypothesis import strategies as st
+from starlette.applications import Starlette
+from starlette.testclient import TestClient
 
 from mcp_gateway import admin, runtime
 from mcp_gateway import config_loader as cl
@@ -2077,3 +2080,255 @@ def test_sweep_orphan_exactly_half_still_sweeps(defaults_dir):
     assert removed == ["gone1", "gone2"]
     assert not (defaults_dir / "gone1.json").exists()
     assert (defaults_dir / "keep1.json").exists()
+
+
+# --- #284: backend-add accepts a stdio env mapping ---------------------------
+
+
+def _backend_admin_app(tmp_path: Path) -> Starlette:
+    """Minimal admin app over a real config file for backend route contracts."""
+    cfg = cl.GatewayConfig.model_validate(
+        {"backends": [{"name": "b", "transport": "stdio", "command": "/bin/x"}]}
+    )
+    path = tmp_path / "config.toml"
+    cl.save(cfg, str(path))
+    app = Starlette()
+    admin.register(app, str(path), structlog.get_logger("test"), {}, {})
+    return app
+
+
+def _stub_capture_defaults(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(admin, "DEFAULTS_DIR", tmp_path / "defaults")
+
+    async def fake_capture(b):
+        return {"backend": b.name, "instructions": None, "tools": []}
+
+    monkeypatch.setattr(admin, "capture_defaults", fake_capture)
+
+
+def test_add_backend_persists_env_verbatim(tmp_path, monkeypatch):
+    """#284: backend add round-trips a stdio env mapping — ${ENV} references
+    are stored raw (resolved only when the client config is built), never
+    expanded at the API boundary or logged."""
+    _stub_capture_defaults(monkeypatch, tmp_path)
+    r = TestClient(_backend_admin_app(tmp_path)).post(
+        "/admin/api/backend",
+        json={
+            "name": "envd",
+            "transport": "stdio",
+            "command": "/bin/envd",
+            "env": {"API_TOKEN": "${ENVD_TOKEN}", "HOME": "/tmp/envd-home"},
+        },
+    )
+    assert r.status_code == 200
+    b = cl.load(str(tmp_path / "config.toml")).backends[-1]
+    assert b.name == "envd"
+    assert b.env == {"API_TOKEN": "${ENVD_TOKEN}", "HOME": "/tmp/envd-home"}
+
+
+@pytest.mark.parametrize(
+    "bad_env",
+    [
+        ["A=1", "B=2"],  # JSON array, not an object
+        [],  # falsy array — must not silently become {}
+        "",  # falsy string
+        0,  # falsy number
+        False,  # falsy boolean
+        None,  # explicit null is still a provided non-object
+        {"A": 1},  # non-string value
+        {"A": None},  # null value
+    ],
+)
+def test_add_backend_rejects_malformed_env(tmp_path, monkeypatch, bad_env):
+    """#284: strict env validation — anything that is not an object of string
+    values is a clean 400 and nothing is persisted."""
+    _stub_capture_defaults(monkeypatch, tmp_path)
+    r = TestClient(_backend_admin_app(tmp_path)).post(
+        "/admin/api/backend",
+        json={
+            "name": "envd",
+            "transport": "stdio",
+            "command": "/bin/envd",
+            "env": bad_env,
+        },
+    )
+    assert r.status_code == 400
+    names = [b.name for b in cl.load(str(tmp_path / "config.toml")).backends]
+    assert names == ["b"]
+
+
+# --- credential-like header/env values must be ${ENV_VAR} refs ---------------
+# (CLI-CREDENTIAL-ARGV-003) The Backend model boundary rejects raw credentials
+# under credential-like keys for headers AND env; the add API surfaces the
+# ConfigError as a clean 400 naming the field/key but never the value, and
+# nothing is persisted.
+
+
+def test_add_backend_rejects_raw_credential_header(tmp_path, monkeypatch):
+    _stub_capture_defaults(monkeypatch, tmp_path)
+    r = TestClient(_backend_admin_app(tmp_path)).post(
+        "/admin/api/backend",
+        json={
+            "name": "envd",
+            "transport": "http",
+            "url": "https://h/mcp",
+            "headers": {"Authorization": "Bearer hunter2", "X-Tenant": "acme"},
+        },
+    )
+    assert r.status_code == 400
+    assert "header 'Authorization'" in r.json()["error"]
+    assert "hunter2" not in r.json()["error"]
+    names = [b.name for b in cl.load(str(tmp_path / "config.toml")).backends]
+    assert names == ["b"]  # nothing persisted
+
+
+def test_add_backend_rejects_raw_credential_env(tmp_path, monkeypatch):
+    _stub_capture_defaults(monkeypatch, tmp_path)
+    r = TestClient(_backend_admin_app(tmp_path)).post(
+        "/admin/api/backend",
+        json={
+            "name": "envd",
+            "transport": "stdio",
+            "command": "/bin/envd",
+            "env": {"API_TOKEN": "raw-secret", "HOME": "/tmp/envd-home"},
+        },
+    )
+    assert r.status_code == 400
+    assert "env 'API_TOKEN'" in r.json()["error"]
+    assert "raw-secret" not in r.json()["error"]
+    names = [b.name for b in cl.load(str(tmp_path / "config.toml")).backends]
+    assert names == ["b"]  # nothing persisted
+
+
+def test_add_backend_accepts_credential_header_env_refs(tmp_path, monkeypatch):
+    """Env-ref and prefixed-ref values under credential-like keys pass the
+    boundary untouched, alongside ordinary literal headers (X-Tenant)."""
+    _stub_capture_defaults(monkeypatch, tmp_path)
+    r = TestClient(_backend_admin_app(tmp_path)).post(
+        "/admin/api/backend",
+        json={
+            "name": "envd",
+            "transport": "http",
+            "url": "https://h/mcp",
+            "headers": {
+                "Authorization": "Bearer ${HTTP_TOKEN}",
+                "X-API-Key": "${API_KEY}",
+                "X-Tenant": "acme",
+            },
+        },
+    )
+    assert r.status_code == 200
+    b = cl.load(str(tmp_path / "config.toml")).backends[-1]
+    assert b.headers == {
+        "Authorization": "Bearer ${HTTP_TOKEN}",
+        "X-API-Key": "${API_KEY}",
+        "X-Tenant": "acme",
+    }
+
+
+def test_add_backend_rejects_raw_plus_ref_bypass_header(tmp_path, monkeypatch):
+    """A raw credential smuggled next to an unrelated ${REF} is still a 400:
+    the contains-anywhere bypass is closed at the model boundary."""
+    _stub_capture_defaults(monkeypatch, tmp_path)
+    r = TestClient(_backend_admin_app(tmp_path)).post(
+        "/admin/api/backend",
+        json={
+            "name": "envd",
+            "transport": "http",
+            "url": "https://h/mcp",
+            "headers": {"Authorization": "Bearer hunter2 ${HOME}"},
+        },
+    )
+    assert r.status_code == 400
+    assert "header 'Authorization'" in r.json()["error"]
+    assert "hunter2" not in r.json()["error"]
+    assert "${HOME}" not in r.json()["error"]
+    names = [b.name for b in cl.load(str(tmp_path / "config.toml")).backends]
+    assert names == ["b"]  # nothing persisted
+
+
+def test_add_backend_rejects_raw_database_url_env(tmp_path, monkeypatch):
+    _stub_capture_defaults(monkeypatch, tmp_path)
+    r = TestClient(_backend_admin_app(tmp_path)).post(
+        "/admin/api/backend",
+        json={
+            "name": "envd",
+            "transport": "stdio",
+            "command": "/bin/envd",
+            "env": {"DATABASE_URL": "raw-database-credential"},
+        },
+    )
+    assert r.status_code == 400
+    assert "env 'DATABASE_URL'" in r.json()["error"]
+    assert "raw-database-credential" not in r.json()["error"]
+    names = [b.name for b in cl.load(str(tmp_path / "config.toml")).backends]
+    assert names == ["b"]  # nothing persisted
+
+
+def test_add_backend_accepts_basic_and_access_key_refs(tmp_path, monkeypatch):
+    _stub_capture_defaults(monkeypatch, tmp_path)
+    r = TestClient(_backend_admin_app(tmp_path)).post(
+        "/admin/api/backend",
+        json={
+            "name": "envd",
+            "transport": "http",
+            "url": "https://h/mcp",
+            "headers": {
+                "Authorization": "Basic ${BASIC_AUTH}",
+                "X-Access-Key": "${ACCESS_KEY}",
+                "X-Tenant": "acme",
+            },
+        },
+    )
+    assert r.status_code == 200
+    b = cl.load(str(tmp_path / "config.toml")).backends[-1]
+    assert b.headers == {
+        "Authorization": "Basic ${BASIC_AUTH}",
+        "X-Access-Key": "${ACCESS_KEY}",
+        "X-Tenant": "acme",
+    }
+
+
+def test_add_backend_accepts_literal_credential_store_path_env(tmp_path, monkeypatch):
+    """Env keys naming a credential STORE (PASSWORD_STORE_DIR,
+    TOKEN_CACHE_DIR) may carry a literal filesystem path — valid nonsecret
+    metadata, not a raw credential."""
+    _stub_capture_defaults(monkeypatch, tmp_path)
+    r = TestClient(_backend_admin_app(tmp_path)).post(
+        "/admin/api/backend",
+        json={
+            "name": "envd",
+            "transport": "stdio",
+            "command": "/bin/envd",
+            "env": {
+                "PASSWORD_STORE_DIR": "/home/u/.password-store",
+                "TOKEN_CACHE_DIR": "/var/cache/tokens",
+            },
+        },
+    )
+    assert r.status_code == 200
+    b = cl.load(str(tmp_path / "config.toml")).backends[-1]
+    assert b.env == {
+        "PASSWORD_STORE_DIR": "/home/u/.password-store",
+        "TOKEN_CACHE_DIR": "/var/cache/tokens",
+    }
+
+
+def test_add_backend_rejects_unknown_payload_key(tmp_path, monkeypatch):
+    """A typo'd field (statless) is a clean 400 BEFORE any work — nothing is
+    persisted and no capture/probe runs."""
+    _stub_capture_defaults(monkeypatch, tmp_path)
+    r = TestClient(_backend_admin_app(tmp_path)).post(
+        "/admin/api/backend",
+        json={
+            "name": "envd",
+            "transport": "stdio",
+            "command": "/bin/envd",
+            "statless": True,  # typo: the real key is `stateless`
+        },
+    )
+    assert r.status_code == 400
+    assert "statless" in r.json()["error"]
+    names = [b.name for b in cl.load(str(tmp_path / "config.toml")).backends]
+    assert names == ["b"]  # config untouched
+    assert not (tmp_path / "defaults").exists()  # capture never ran

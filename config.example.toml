@@ -1,6 +1,8 @@
 # mcp-gateway config — annotated schema/template.
 # Copy to config.toml and edit. Secrets are never hardcoded: write ${ENV_VAR}
-# and the loader resolves it from the environment (injected by the LaunchAgent).
+# and the loader resolves it from the process environment first, then the
+# gateway secrets file (~/.config/mcp-gateway/secrets.env, overridable with
+# MCP_GATEWAY_SECRETS).
 
 host = "127.0.0.1"          # loopback by default. A non-loopback bind (e.g. a
                             # Tailscale IP) REQUIRES bearer_token or a complete
@@ -73,10 +75,15 @@ name = "exa"                       # routing identity: drives the /exa/mcp
 transport = "http"
 url = "https://your-exa-endpoint/mcp"
 auth_header = "Authorization"      # optional; set BOTH or NEITHER
-auth_value = "Bearer ${EXA_TOKEN}" # ${ENV} resolved at startup
+auth_value = "Bearer ${EXA_TOKEN}" # exactly ${VAR} or Bearer|Basic|Token ${VAR}
+                                   # (never a literal or raw/ref mix)
 # Richer auth (#6), all optional. Precedence on a same-name header clash:
 # auth_header/auth_value pair > headers table > headers_helper output.
-# headers = { "X-Client-Id" = "${MY_ID}" }  # extra static headers, ${ENV} ok
+# headers = { "X-Client-Id" = "${MY_ID}" }  # extra static headers; a value
+#                                   # under a credential-like key (token,
+#                                   # secret, password, api-key, …) must be
+#                                   # exactly ${VAR} or Bearer|Basic|Token
+#                                   # ${VAR} — ordinary keys may be literal
 # auth = "oauth"                     # OAuth-protected remote MCP: FastMCP runs
 #                                    # the flow (browser consent on first
 #                                    # connect, cached tokens after)
@@ -89,8 +96,10 @@ auth_value = "Bearer ${EXA_TOKEN}" # ${ENV} resolved at startup
 #   str  -> run via the shell (for $()/pipes); FULL shell privilege, same trust
 #           as a stdio `command`:
 # headers_helper = "printf '{\"Authorization\": \"Bearer %s\"}' \"$(get-token)\""
-stateless = true                   # parsed; shared-session reuse is a
-                                   # tier-2 optimisation (see README)
+stateless = true                   # fresh session per call. false (warm,
+                                   # default) keeps one persistent connection
+                                   # reused across calls and auto-repaired if
+                                   # it dies (see docs/configuration.md)
 # init_timeout = 30.0              # backend initialize handshake, seconds
 # request_timeout = 300.0          # each forwarded backend request, seconds
 # always_load = true               # pin ALL this backend's tools to load upfront
@@ -169,7 +178,12 @@ stateless = true                   # parsed; shared-session reuse is a
 # transport = "stdio"
 # command = "uvx"
 # args = ["serena-mcp"]
-# env = { SOME_KEY = "${SOME_ENV}" }
+# env = { SOME_KEY = "${SOME_ENV}" }  # values under credential-like keys
+#                                   # (DB_PASSWORD, API_KEY, …) must be
+#                                   # exactly ${VAR} or Bearer|Basic|Token
+#                                   # ${VAR}; ordinary keys may be literal;
+#                                   # -file/-path/-dir/-directory env keys
+#                                   # are exempt metadata paths (headers never)
 # stateless = false
 
 # ===========================================================================

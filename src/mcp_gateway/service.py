@@ -24,7 +24,7 @@ import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, TextIO
+from typing import Any
 
 from mcp_gateway import updates
 
@@ -555,7 +555,9 @@ def install_service(
         prior=(prior_wrapper, prior_plist),
     )
 
-    _write_if_changed(actual.prompted_marker, b"installed\n", mode=0o600)
+    # Legacy first-run prompt marker (pre-#284 installs): never created by
+    # installs anymore, but sweep a stale one left by an older installation.
+    actual.prompted_marker.unlink(missing_ok=True)
     removed_legacy_link = False
     if actual.legacy_link.is_symlink():
         actual.legacy_link.unlink()
@@ -794,34 +796,6 @@ def refresh_installed_service(
     _write_if_changed(actual.wrapper, expected_wrapper, mode=0o700)
     _write_if_changed(actual.plist, _plist_bytes(actual, captured_path), mode=0o600)
     return True
-
-
-def mark_prompt_declined(paths: ServicePaths | None = None) -> None:
-    """Persist an explicit first-run decline so the prompt is shown only once."""
-
-    actual = paths or service_paths()
-    _atomic_write(actual.prompted_marker, b"declined\n", mode=0o600)
-
-
-def should_offer_service_install(
-    *,
-    paths: ServicePaths | None = None,
-    platform: str | None = None,
-    stdin: TextIO | None = None,
-    stdout: TextIO | None = None,
-) -> bool:
-    """Return whether this invocation may ask the one-time interactive prompt."""
-
-    actual = paths or service_paths()
-    source = stdin or sys.stdin
-    sink = stdout or sys.stdout
-    return (
-        (platform or sys.platform) == "darwin"
-        and not actual.prompted_marker.exists()
-        and not actual.plist.exists()
-        and source.isatty()
-        and sink.isatty()
-    )
 
 
 def uninstall_service(

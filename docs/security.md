@@ -127,6 +127,55 @@ then fetches is challenged).
 **How the admin UI handles it.** On the first `401`, the UI prompts you for the
 token and stores it in the browser's local storage, so you enter it once.
 
+### The CLI and the bearer token
+
+The `mcp-gateway` control CLI is just another client of `/admin/api/*` and is
+gated identically. It never accepts a token as a command-line argument (that
+would leak into shell history and process listings) and never prints a resolved
+secret. Instead it resolves the token in this order:
+
+1. The variable named by `--token-env NAME` — the variable must be set, or the
+   command fails rather than silently falling back.
+2. `MCP_GATEWAY_ADMIN_TOKEN`.
+3. The configured `bearer_token` (or `oauth.admin_bearer_token`) `${ENV}`
+   reference, resolved with the same environment-then-secrets-file precedence
+   the daemon uses: the process environment wins, then the gateway secrets
+   file (`MCP_GATEWAY_SECRETS`, default `~/.config/mcp-gateway/secrets.env`).
+   The explicit `--token-env` variable and `MCP_GATEWAY_ADMIN_TOKEN` are read
+   from the process environment only.
+
+Two rules bound where that token can go:
+
+- **An explicit `--url` receives no implicit token.** If you pass `--url`,
+  neither `MCP_GATEWAY_ADMIN_TOKEN` nor the configured token reference is
+  applied — authenticating against that explicit endpoint requires
+  `--token-env NAME`.
+- **Transport follows the token.** A token is sent over plain HTTP only
+  toward a verified loopback address (`localhost`, `127/8`, `::1`); any
+  other token-bearing target must use HTTPS, and **all** redirects are
+  refused — the `Authorization` header never follows a redirect. The default
+  config-derived loopback URL is therefore safe with the implicit token; a
+  remote gateway needs HTTPS plus an explicit `--token-env`.
+
+If the CLI shows the token setting at all (for example `settings show`), it
+prints the stored `${ENV}` reference, never the resolved value, and `--json` output contains no credential material. Requests carry no `Origin`, so the
+Origin guard passes them like any non-browser client. Human (non-`--json`)
+output — including error messages on stderr — escapes terminal control
+characters from remote data so a hostile description or log line cannot
+spoof the terminal; `--json` preserves the data structurally. File output is protected too: `settings export -o FILE`
+refuses to overwrite an existing path unless `--force`, replaces only regular
+files (never follows symlinks), and writes atomically with `0600`
+permissions.
+
+`check` is the deliberate exception: it probes the auth-exempt `/ready`
+endpoint and neither resolves nor sends an Admin bearer token, so
+`--token-env` does not apply to it — a secrets-only deployment or an unset
+`--token-env` never blocks a liveness probe. For automation, `--json` makes
+every finite control/query/mutation command emit exactly one JSON value;
+`--help` and a foreground `run` are normal terminal behaviors and print no
+JSON, and the streaming `logs follow --json` emits one JSON object per line
+(NDJSON).
+
 **Client registration.** Every client registration must carry the configured
 credential or its calls return `401`. The gateway does not register endpoints
 for you — add each `/<backend>/mcp` endpoint in the client you run, using that
@@ -197,7 +246,10 @@ Be clear-eyed about the boundaries:
 
 Dedicated credential fields never accept raw values: `bearer_token` and
 `oauth.admin_bearer_token` must each be one `${ENV_VAR}` reference, while a
-backend `auth_value` must contain one. The gateway resolves references from:
+backend `auth_value` must be exactly one `${ENV_VAR}` reference or a
+`Bearer`/`Basic`/`Token` prefix followed by one — the same exact template
+rule applies to `headers`/`env` values under credential-like keys. The
+gateway resolves references from:
 
 1. the process environment, or
 2. the gateway secrets file `~/.config/mcp-gateway/secrets.env` (`KEY=VALUE` per
@@ -216,11 +268,31 @@ backend's auth reference still resolves from the same file, so:
 - **Never** point `MCP_GATEWAY_SECRETS` at a global key store — you would be
   exposing unrelated secrets to the gateway's resolution path.
 
-Arbitrary URLs, headers, arguments, and subprocess environment values cannot be
-classified reliably, so never place credentials there as literals. On POSIX
-systems, config and secrets files are created or repaired with user-only `0600`
-permissions; the macOS resident service keeps its config, state, and wrapper
-directories at `0700`.
+Backend `headers` and `env` values under a **recognized credential-like key**
+(`authorization`, `proxy-authorization`, `cookie`, `token`, `secret`,
+`password`, `passwd`, `api-key`, `apikey`, `private-key`, `credential`,
+`access-key`, `dsn`, `database-url`, `redis-url`, `mongodb-uri`,
+`connection-string` — matched case-insensitively after normalizing `_` to
+`-`, so `API_KEY`, `X-Api-Key`, `DB_PASSWORD`, `DATABASE_URL`, and
+`client_secret` all classify) MUST be exactly one `${ENV_VAR}` reference or a
+`Bearer|Basic|Token ${VAR}` template — a raw literal, or a reference mixed
+with any other raw text, is rejected with `400`. An **env** key whose
+normalized name ends in `-file`, `-path`, `-dir`, or `-directory` (for
+example `PASSWORD_FILE`, `PASSWORD_STORE_DIR`, `TOKEN_CACHE_DIR`) is treated
+as non-secret metadata and may be literal — headers never get this
+exemption. A composite connection string (a full DSN, `DATABASE_URL` with
+embedded credentials, …) still classifies as credential-like: store the
+complete value in one environment variable and reference it. Ordinary names
+(`HOME`, `LANG`, `X-Tenant`) never match and may stay literal. This
+classifier is a guardrail, not a guarantee: arbitrary innocuous names cannot
+be perfectly classified, and a credential hidden under an unrecognized name
+would not be caught. Never rely on classification to make a credential safe
+— if a value could be a secret, reference it. Arbitrary URLs, arguments, and
+other subprocess environment values cannot be classified reliably either, so
+never place credentials there as literals. On POSIX systems, config and
+secrets files are created or repaired with user-only `0600` permissions; the
+macOS resident service keeps its config, state, and wrapper directories at
+`0700`.
 Treat `config.toml` as sensitive operational data even though its dedicated
 credential fields hold references. The secrets file must never be committed or
 shared.

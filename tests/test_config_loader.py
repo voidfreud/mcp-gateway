@@ -783,6 +783,27 @@ def test_remote_backend_rejects_raw_auth_value():
         )
 
 
+@pytest.mark.parametrize("value", ["${T}", "Bearer ${T}", "Basic ${T}", "Token ${T}"])
+def test_auth_value_accepts_safe_templates(value):
+    b = _http_backend(auth_header="Authorization", auth_value=value)
+    assert b.auth_value == value
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "Bearer raw-secret ${HOME}",  # contains-ref bypass
+        "${A} ${B}",
+        "Bearer ${A} ${B}",
+        "raw-secret",
+        "Bearer",
+    ],
+)
+def test_auth_value_rejects_unsafe_templates(value):
+    with pytest.raises(cl.ConfigError, match="raw credentials"):
+        _http_backend(auth_header="Authorization", auth_value=value)
+
+
 def test_sse_backend_requires_url():
     with pytest.raises(cl.ConfigError):
         cl.GatewayConfig.model_validate(
@@ -876,9 +897,10 @@ def test_multiple_headers_expand_env(monkeypatch):
 
 def test_legacy_pair_wins_over_headers_on_clash(monkeypatch):
     monkeypatch.setenv("PAIR_TOKEN", "from-pair")
+    monkeypatch.setenv("DICT_TOKEN", "from-dict")
     e = cl.backend_entry(
         _http_backend(
-            headers={"Authorization": "from-dict", "X-C": "keep"},
+            headers={"Authorization": "${DICT_TOKEN}", "X-C": "keep"},
             auth_header="Authorization",
             auth_value="${PAIR_TOKEN}",
         )
@@ -893,12 +915,13 @@ def test_oauth_passes_through():
         _http_backend(auth="basic")  # only "oauth" is a valid literal
 
 
-def test_headers_helper_merges_lowest_precedence():
+def test_headers_helper_merges_lowest_precedence(monkeypatch):
+    monkeypatch.setenv("DICT_AUTH", "dict-auth")
     helper = "echo '" + '{"X-H": "helper", "Authorization": "helper-auth"}' + "'"
     e = cl.backend_entry(
         _http_backend(
             headers_helper=helper,
-            headers={"Authorization": "dict-auth"},
+            headers={"Authorization": "${DICT_AUTH}"},
         )
     )
     assert e["headers"] == {"X-H": "helper", "Authorization": "dict-auth"}
@@ -948,6 +971,296 @@ def test_headers_helper_list_roundtrips_toml():
     )
     reparsed = cl.GatewayConfig.model_validate(tomllib.loads(cl.dump_toml(cfg)))
     assert reparsed.backends[0].headers_helper == ["emit-headers", "--json"]
+
+
+# --- credential-like header/env values must be safe credential templates -----
+# (CLI-CREDENTIAL-ARGV-003) The ``auth_value`` rule now covers headers/env at
+# the model boundary: a value under a credential-like key must be exactly
+# ${ENV_VAR} or one public scheme (Bearer/Basic/Token) followed by one
+# reference — any raw literal, or a raw secret mixed with an unrelated ${REF},
+# fails validation (TOML load, Admin API backend add, and CLI --file all flow
+# through Backend).
+
+_CREDENTIAL_LIKE_KEYS = [
+    "Authorization",
+    "Proxy-Authorization",
+    "Cookie",
+    "X-API-Key",
+    "apikey",
+    "API_KEY",
+    "GITHUB_TOKEN",
+    "DB_PASSWORD",
+    "passwd",
+    "client_secret",
+    "private_key",
+    "credentials",
+    "DATABASE_URL",
+    "X-Access-Key",
+    "REDIS_URL",
+    "MONGODB_URI",
+    "DSN",
+    "CONNECTION_STRING",
+]
+
+
+@pytest.mark.parametrize("key", _CREDENTIAL_LIKE_KEYS)
+def test_credential_like_headers_accept_env_refs(key):
+    b = _http_backend(headers={key: "Bearer ${T}"})
+    assert b.headers[key] == "Bearer ${T}"  # stored verbatim, never expanded
+
+
+@pytest.mark.parametrize("key", _CREDENTIAL_LIKE_KEYS)
+def test_credential_like_headers_reject_raw_literals(key):
+    with pytest.raises(cl.ConfigError, match="raw credentials"):
+        _http_backend(headers={key: "hunter2"})
+
+
+@pytest.mark.parametrize("key", _CREDENTIAL_LIKE_KEYS)
+def test_credential_like_env_accept_refs_and_reject_raw(key):
+    kw = {"name": "b", "transport": "stdio", "command": "/bin/x"}
+    b = cl.Backend.model_validate({**kw, "env": {key: "${T}"}})
+    assert b.env[key] == "${T}"
+    with pytest.raises(cl.ConfigError, match="raw credentials"):
+        cl.Backend.model_validate({**kw, "env": {key: "hunter2"}})
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "${A}",  # bare ref
+        "Bearer ${A}",  # public scheme + one ref
+        "Basic ${A}",
+        "Token ${A}",
+        "bearer ${A}",  # scheme case-insensitive
+        "  ${A}  ",  # incidental outer whitespace
+    ],
+)
+def test_credential_like_headers_accept_safe_templates(value):
+    b = _http_backend(headers={"Authorization": value})
+    assert b.headers["Authorization"] == value  # stored verbatim
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "raw-secret",  # plain literal
+        "Bearer raw-secret ${HOME}",  # contains-ref bypass: raw + unrelated ref
+        "${A} ${B}",  # ref mixed with a second ref
+        "Bearer ${A} ${B}",
+        "${A} literal",  # ref + literal mix
+        "Bearer",  # scheme with no ref
+        "Bearer${A}",  # scheme without the separator space
+        "Basic ${A}x",  # trailing literal after the ref
+    ],
+)
+def test_credential_like_headers_reject_unsafe_templates(value):
+    with pytest.raises(cl.ConfigError, match="raw credentials"):
+        _http_backend(headers={"Authorization": value})
+
+
+@pytest.mark.parametrize("value", ["${T}", "Bearer ${T}", "Basic ${T}", "Token ${T}"])
+def test_credential_like_env_accept_safe_templates(value):
+    b = cl.Backend.model_validate(
+        {
+            "name": "b",
+            "transport": "stdio",
+            "command": "/bin/x",
+            "env": {"API_TOKEN": value},
+        }
+    )
+    assert b.env["API_TOKEN"] == value
+
+
+def test_credential_like_env_rejects_raw_plus_ref_bypass():
+    with pytest.raises(cl.ConfigError, match="raw credentials"):
+        cl.Backend.model_validate(
+            {
+                "name": "b",
+                "transport": "stdio",
+                "command": "/bin/x",
+                "env": {"API_TOKEN": "sk-live raw ${HOME}"},
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "PASSWORD_STORE_DIR",
+        "PASSWORD_FILE",
+        "TOKEN_CACHE_DIR",
+        "CLIENT_SECRET_PATH",
+        "GITHUB_TOKEN_FILE",
+        "DSN_DIR",
+    ],
+)
+def test_env_credential_store_paths_may_be_literal(key):
+    # These keys name WHERE a credential lives, not the credential itself: a
+    # literal filesystem path is valid nonsecret metadata (correctness
+    # review), so no ${ENV_VAR} is required.
+    b = cl.Backend.model_validate(
+        {
+            "name": "b",
+            "transport": "stdio",
+            "command": "/bin/x",
+            "env": {key: "/home/u/.secrets/cred"},
+        }
+    )
+    assert b.env[key] == "/home/u/.secrets/cred"
+
+
+@pytest.mark.parametrize(
+    "key", ["PASSWORD", "TOKEN_CACHE", "PASSWORD_FILE_BAK", "API_KEY"]
+)
+def test_env_credential_store_path_suffix_is_exact(key):
+    # the exemption is suffix-exact on the normalized name: a plain credential
+    # key or a non-matching suffix still rejects a raw literal
+    with pytest.raises(cl.ConfigError, match="raw credentials"):
+        cl.Backend.model_validate(
+            {
+                "name": "b",
+                "transport": "stdio",
+                "command": "/bin/x",
+                "env": {key: "hunter2"},
+            }
+        )
+
+
+def test_headers_stay_strict_for_path_suffixed_names():
+    # headers use the GENERIC classifier: a path-suffixed credential name in
+    # a header is still credential-like (headers carry credentials, not paths)
+    with pytest.raises(cl.ConfigError, match="raw credentials"):
+        _http_backend(headers={"X-Password-File": "/tmp/creds"})
+    b = _http_backend(headers={"X-Password-File": "${CRED_FILE}"})
+    assert b.headers["X-Password-File"] == "${CRED_FILE}"
+
+
+def test_composite_database_url_multiref_rejected():
+    # operators store the FULL URL as one ${DATABASE_URL} secret ref;
+    # composing it from several refs is intentionally rejected
+    with pytest.raises(cl.ConfigError, match="raw credentials"):
+        cl.Backend.model_validate(
+            {
+                "name": "b",
+                "transport": "stdio",
+                "command": "/bin/x",
+                "env": {"DATABASE_URL": "${DB_USER}:${DB_PASS}@${DB_HOST}/db"},
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "raw-postgres-credential",
+        "raw-redis-credential",
+        "raw-mongodb-credential",
+    ],
+)
+def test_container_connection_literals_rejected(value):
+    # URL-style credentials are the classic container leak: a raw DSN/URI
+    # must be rejected just like any other raw secret.
+    kw = {"name": "b", "transport": "stdio", "command": "/bin/x"}
+    with pytest.raises(cl.ConfigError, match="raw credentials"):
+        cl.Backend.model_validate({**kw, "env": {"DATABASE_URL": value}})
+    with pytest.raises(cl.ConfigError, match="raw credentials"):
+        cl.Backend.model_validate({**kw, "env": {"DSN": value}})
+    with pytest.raises(cl.ConfigError, match="raw credentials"):
+        _http_backend(headers={"X-Access-Key": value})
+
+
+def test_credential_error_names_field_and_key_never_value():
+    with pytest.raises(cl.ConfigError, match=r"header 'Authorization'") as exc:
+        _http_backend(headers={"Authorization": "hunter2"})
+    assert "hunter2" not in str(exc.value)
+    with pytest.raises(cl.ConfigError, match=r"env 'API_TOKEN'") as exc:
+        cl.Backend.model_validate(
+            {
+                "name": "b",
+                "transport": "stdio",
+                "command": "/bin/x",
+                "env": {"API_TOKEN": "raw-secret"},
+            }
+        )
+    assert "raw-secret" not in str(exc.value)
+
+
+def test_nonsecret_literals_remain_allowed():
+    # HOME/LANG and X-Tenant/X-Client-Id are NOT credential-like: plain
+    # literals must keep working (no false positives on ordinary names).
+    b = cl.Backend.model_validate(
+        {
+            "name": "b",
+            "transport": "stdio",
+            "command": "/bin/x",
+            "env": {"HOME": "/tmp/envd-home", "LANG": "en_US.UTF-8"},
+        }
+    )
+    assert b.env == {"HOME": "/tmp/envd-home", "LANG": "en_US.UTF-8"}
+    h = _http_backend(headers={"X-Tenant": "acme", "X-Client-Id": "widget-42"})
+    assert h.headers == {"X-Tenant": "acme", "X-Client-Id": "widget-42"}
+
+
+def test_credential_refs_stored_verbatim_and_roundtrip_toml():
+    # refs are never expanded or rewritten during validation
+    cfg = cl.GatewayConfig.model_validate(
+        {
+            "backends": [
+                {
+                    "name": "b",
+                    "transport": "http",
+                    "url": "https://h/mcp",
+                    "headers": {
+                        "Authorization": "Bearer ${A}",
+                        "X-API-Key": "${K}",
+                    },
+                },
+                {
+                    "name": "c",
+                    "transport": "stdio",
+                    "command": "/bin/c",
+                    "env": {"API_TOKEN": "${ENVD_TOKEN}", "HOME": "/tmp/x"},
+                },
+            ]
+        }
+    )
+    reparsed = cl.GatewayConfig.model_validate(tomllib.loads(cl.dump_toml(cfg)))
+    assert reparsed.backends[0].headers == {
+        "Authorization": "Bearer ${A}",
+        "X-API-Key": "${K}",
+    }
+    assert reparsed.backends[1].env == {
+        "API_TOKEN": "${ENVD_TOKEN}",
+        "HOME": "/tmp/x",
+    }
+
+
+def test_raw_credential_header_rejected_from_toml(tmp_path):
+    p = tmp_path / "config.toml"
+    p.write_text(
+        'host = "127.0.0.1"\n'
+        "[[backends]]\n"
+        'name = "b"\n'
+        'transport = "http"\n'
+        'url = "https://h/mcp"\n'
+        'headers = { Authorization = "Bearer hunter2" }\n'
+    )
+    with pytest.raises(cl.ConfigError, match="raw credentials"):
+        cl.load(str(p))
+
+
+def test_raw_credential_env_rejected_from_toml(tmp_path):
+    p = tmp_path / "config.toml"
+    p.write_text(
+        'host = "127.0.0.1"\n'
+        "[[backends]]\n"
+        'name = "b"\n'
+        'transport = "stdio"\n'
+        'command = "/bin/x"\n'
+        'env = { API_TOKEN = "raw-secret" }\n'
+    )
+    with pytest.raises(cl.ConfigError, match="raw credentials"):
+        cl.load(str(p))
 
 
 # --- #81 backend-name validation ------------------------------------------

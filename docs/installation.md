@@ -35,20 +35,23 @@ mcp-gateway
 
 The distribution name differs because another project already owns
 `mcp-gateway` on PyPI. Package installation itself never changes services or
-user state. On the first interactive no-argument launch on macOS, the program
-offers to install its resident LaunchAgent once; accepting completes setup.
-Declining records the choice and starts in the foreground. Use
-`mcp-gateway --foreground` to bypass the offer explicitly.
+user state: the first `mcp-gateway` run starts the gateway in the foreground
+and does not prompt to install anything. The macOS resident service is opt-in
+and explicit:
+
+```bash
+mcp-gateway service install
+```
 
 The macOS application-owned lifecycle creates config/state directories, an
 atomic versioned LaunchAgent plist, and a stable wrapper under
 `~/.local/libexec/mcp-gateway/`. It captures the installing shell's `PATH`,
 starts the service, and requires `/health` and `/ready`. A failed replacement
-restores the prior plist/wrapper and service. Inspect gateway plus backend-child
-resources on demand:
+restores the prior plist/wrapper and service. Inspect gateway plus
+backend-child resources on demand:
 
 ```bash
-mcp-gateway --service-status
+mcp-gateway service status
 ```
 
 Resident mode keeps one gateway process alive. Warm `stdio` backends can remain
@@ -78,7 +81,7 @@ logs, and backups are unchanged. On macOS, complete the cutover and verify the
 resident service with:
 
 ```bash
-mcp-gateway --install-service
+mcp-gateway service install
 ```
 
 On Linux and Windows, start `mcp-gateway` in the foreground as usual.
@@ -140,13 +143,26 @@ reference.
 ### Credential references on upgrade
 
 Current releases reject literal values in `bearer_token`,
-`oauth.admin_bearer_token`, and backend `auth_value`. Before updating an older
-config that stored a token directly, move the token to
+`oauth.admin_bearer_token`, backend `auth_value`, and any backend
+`headers`/`env` value under a credential-like key (names matching
+`authorization`, `token`, `secret`, `password`, `api-key`, …). Before
+updating an older config that stored such a value directly, move the value to
 `~/.config/mcp-gateway/secrets.env` and leave only a reference in
-`config.toml`, for example `bearer_token = "${MCP_GATEWAY_TOKEN}"` or
-`auth_value = "Bearer ${EXA_TOKEN}"`. On POSIX systems, the gateway creates the
-config at `0600` and repairs existing config and secrets files to that mode when
-it reads them.
+`config.toml`, for example:
+
+```toml
+bearer_token = "${MCP_GATEWAY_TOKEN}"
+auth_value = "Bearer ${EXA_TOKEN}"
+headers = { "X-API-Key" = "${API_KEY}" }
+env = { DB_PASSWORD = "${DB_PASSWORD}" }
+```
+
+An `env` key ending in `-file`, `-path`, `-dir`, or `-directory` (metadata
+paths such as `PASSWORD_FILE`) may stay literal; headers never get that
+exemption.
+
+On POSIX systems, the gateway creates the config at `0600` and repairs
+existing config and secrets files to that mode when it reads them.
 
 ## Updating and rollback
 
@@ -185,7 +201,8 @@ install or rollback time; the GitHub checksum and SBOM verify the gateway
 release artifacts, not a byte-for-byte restoration of the prior tool
 environment.
 
-For a contributor checkout deployment, `just update` remains the guarded path:
+For a contributor checkout deployment, the `just update` recipe remains the
+guarded path (contributor tooling, not the user control interface):
 
 ```bash
 cd /path/to/mcp-gateway
@@ -208,20 +225,19 @@ install that checkout's code as the current tool version.
 Remove the login service through the installed application:
 
 ```bash
-mcp-gateway --uninstall-service
+mcp-gateway service uninstall --yes
 ```
 
-An interactive uninstall explains that the plist, wrapper, prompt marker, and
-legacy checkout artifacts will be removed, then asks whether to keep config,
-logs, backups, and state. Non-interactive callers must make retention explicit:
+Uninstall explains what will be removed (plist, wrapper, and legacy checkout
+artifacts), boots out the service before deleting its files, and is idempotent.
+`--yes` confirms removal — the CLI never prompts. Config, logs, backups, and
+state are **retained** by default; delete them too with:
 
 ```bash
-mcp-gateway --uninstall-service --keep-data
-mcp-gateway --uninstall-service --purge-data
+mcp-gateway service uninstall --yes --purge-data
 ```
 
-Removal boots out the service before deleting its files and is idempotent. The
-checkout compatibility forms `./install.sh --uninstall` and
+The checkout compatibility forms `./install.sh --uninstall` and
 `./install.sh --uninstall --purge` delegate to the same application command;
 add `--dry-run` to preview the delegation.
 

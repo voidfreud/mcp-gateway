@@ -26,6 +26,7 @@ import subprocess
 import sys
 import tempfile
 import tomllib
+from collections.abc import Callable
 from copy import deepcopy
 from pathlib import Path
 from typing import Literal
@@ -45,8 +46,14 @@ from pydantic import (
 
 from mcp_gateway import hooks as hooks_mod
 from mcp_gateway import logging_setup
+from mcp_gateway.credential_policy import (
+    ENV_REFERENCE_PATTERN,
+    is_credential_like_env_key,
+    is_credential_like_key,
+    is_safe_credential_value,
+)
 
-_ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+_ENV_PATTERN = ENV_REFERENCE_PATTERN
 
 DEFAULT_SECRETS_PATH = "~/.config/mcp-gateway/secrets.env"
 
@@ -316,6 +323,28 @@ DEFAULT_BACKEND_INIT_TIMEOUT = 30.0
 DEFAULT_BACKEND_REQUEST_TIMEOUT = 300.0
 
 
+def _check_no_raw_credentials(
+    values: dict[str, str],
+    what: str,
+    is_credential_key: Callable[[str], bool],
+) -> None:
+    """Reject raw credential literals in a headers/env mapping.
+
+    *what* names the mapping for the error ("header" or "env");
+    *is_credential_key* is that mapping's classifier (headers use
+    :func:`is_credential_like_key`, env uses :func:`is_credential_like_env_key`
+    so credential-store path keys may stay literal). The offending VALUE is
+    never included in the message: it may be the secret itself.
+    """
+    for key, value in values.items():
+        if is_credential_key(key) and not is_safe_credential_value(value):
+            raise ConfigError(
+                f"backend {what} {key!r} must be a ${{ENV_VAR}} reference or "
+                "Bearer/Basic/Token followed by one reference; "
+                "raw credentials do not belong in config.toml"
+            )
+
+
 class Backend(BaseModel, extra="forbid"):
     """One backend MCP server and its per-tool text overrides."""
 
@@ -336,8 +365,10 @@ class Backend(BaseModel, extra="forbid"):
     url: str | None = None
     auth_header: str | None = None
     auth_value: str | None = None
-    # Extra static headers (#6) — values may reference ${ENV}. Merged with the
-    # legacy auth_header/auth_value pair (the pair wins on a same-name clash).
+    # Extra static headers (#6) — values may reference ${ENV} and MUST under a
+    # credential-like key (is_credential_like_key); ordinary keys may stay
+    # literal. Merged with the legacy auth_header/auth_value pair (the pair
+    # wins on a same-name clash).
     headers: dict[str, str] = Field(default_factory=dict)
     # OAuth-protected remote MCP (#6): "oauth" is passed straight through to
     # FastMCP's client config (RemoteMCPServer.auth), which runs the OAuth flow
@@ -359,9 +390,11 @@ class Backend(BaseModel, extra="forbid"):
     # stdio
     command: str | None = None
     args: list[str] = Field(default_factory=list)
+    # stdio environment (#284) — same ${ENV}-reference rule under credential-
+    # like keys as headers; ordinary keys (HOME, LANG) may stay literal.
     env: dict[str, str] = Field(default_factory=dict)
-    # efficiency knob (parsed; shared-session reuse is a tier-2 optimisation,
-    # see README "Session strategy" — default per-request sessions for now)
+    # Session strategy: false reuses one warm client per backend; true creates
+    # a fresh upstream client for each request.
     stateless: bool = False
     # Bound every upstream handshake and request so one backend cannot retain
     # a mount or downstream request forever.
@@ -389,11 +422,28 @@ class Backend(BaseModel, extra="forbid"):
     @field_validator("auth_value")
     @classmethod
     def _auth_value_uses_env(cls, value: str | None) -> str | None:
-        if value is not None and not _ENV_PATTERN.search(value):
+        if value is not None and not is_safe_credential_value(value):
             raise ConfigError(
-                "backend auth_value must contain an ${ENV_VAR} reference; "
+                "backend auth_value must be a ${ENV_VAR} reference or "
+                "Bearer/Basic/Token followed by one reference; "
                 "raw credentials do not belong in config.toml"
             )
+        return value
+
+    @field_validator("headers")
+    @classmethod
+    def _headers_must_reference_env_for_credentials(
+        cls, value: dict[str, str]
+    ) -> dict[str, str]:
+        _check_no_raw_credentials(value, "header", is_credential_like_key)
+        return value
+
+    @field_validator("env")
+    @classmethod
+    def _env_must_reference_env_for_credentials(
+        cls, value: dict[str, str]
+    ) -> dict[str, str]:
+        _check_no_raw_credentials(value, "env", is_credential_like_env_key)
         return value
 
     @model_validator(mode="after")

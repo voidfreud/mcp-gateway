@@ -69,7 +69,7 @@ def _write_config(tmp_path: Path, *, disabled: bool = False) -> Path:
                 'transport = "stdio"',
                 'command = "never-render-this"',
                 'args = ["--secret", "local-secret"]',
-                'env = { TOKEN = "local-secret" }',
+                'env = { TOKEN = "${LOCAL_TOKEN}" }',
             ]
         ),
         encoding="utf-8",

@@ -10,8 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from mcp_gateway import __main__ as cli
-from mcp_gateway import service
+from mcp_gateway import cli, service
 
 
 class FakeLaunchctl:
@@ -73,7 +72,7 @@ def test_install_renders_versioned_atomic_service_and_captures_path(tmp_path):
     assert paths.state_dir.stat().st_mode & 0o777 == 0o700
     assert paths.config_dir.stat().st_mode & 0o777 == 0o700
     assert paths.wrapper_dir.stat().st_mode & 0o777 == 0o700
-    assert paths.prompted_marker.read_text() == "installed\n"
+    assert not paths.prompted_marker.exists()  # no first-run prompt marker
     assert paths.wrapper.stat().st_mode & 0o777 == 0o700
     assert paths.plist.stat().st_mode & 0o777 == 0o600
     payload = plistlib.loads(paths.plist.read_bytes())
@@ -251,6 +250,18 @@ def test_install_migrates_checkout_config_and_removes_legacy_symlink(tmp_path):
     assert not paths.legacy_link.exists()
 
 
+def test_install_cleans_legacy_prompt_marker(tmp_path):
+    # #284: installs never create the first-run marker, but a stale one left by
+    # a pre-#284 install is swept so no old prompt state survives
+    paths = _paths(tmp_path)
+    paths.state_dir.mkdir(parents=True)
+    paths.prompted_marker.write_text("declined\n", encoding="utf-8")
+
+    service.install_service(paths=paths, runtime=_runtime(FakeLaunchctl()))
+
+    assert not paths.prompted_marker.exists()
+
+
 def test_missing_binary_wrapper_exits_successfully_without_restart_signal(tmp_path):
     paths = _paths(tmp_path)
     service.install_service(paths=paths, runtime=_runtime(FakeLaunchctl()))
@@ -283,6 +294,21 @@ def test_uninstall_removes_all_service_artifacts_and_keeps_data(tmp_path):
     assert not paths.legacy_link.is_symlink()
     assert paths.config.exists()
     assert paths.state_dir.is_dir()
+
+
+def test_uninstall_removes_legacy_prompt_marker_without_install(tmp_path):
+    # a pre-#284 marker is still cleaned on uninstall even when no install ever
+    # ran in this checkout
+    paths = _paths(tmp_path)
+    paths.state_dir.mkdir(parents=True)
+    paths.prompted_marker.write_text("declined\n", encoding="utf-8")
+
+    result = service.uninstall_service(
+        paths=paths, purge_data=False, runtime=_runtime(FakeLaunchctl())
+    )
+
+    assert not paths.prompted_marker.exists()
+    assert paths.prompted_marker in result.removed
 
 
 def test_uninstall_purges_data_only_when_explicit(tmp_path):
@@ -324,36 +350,70 @@ class TTY(io.StringIO):
         return True
 
 
-def test_first_run_decline_is_prompted_once_then_runs_foreground(tmp_path, monkeypatch):
+def test_no_args_starts_foreground_without_prompt_or_marker(tmp_path, monkeypatch):
+    # #284: the first-run service-install prompt is gone — a bare invocation
+    # refreshes the installed service (if any) and runs the gateway in the
+    # foreground, writing no prompt and no state marker even on a TTY.
     paths = _paths(tmp_path)
+    refreshes: list[dict] = []
+    monkeypatch.setattr(
+        service,
+        "refresh_installed_service",
+        lambda **kwargs: refreshes.append(kwargs) or False,
+    )
     starts: list[bool] = []
-    monkeypatch.setattr(service, "service_paths", lambda: paths)
-    monkeypatch.setattr(service.sys, "platform", "darwin")
-    monkeypatch.setattr(cli, "_run_foreground", lambda: starts.append(True))
-    first_output = TTY()
+    monkeypatch.setattr(
+        "mcp_gateway.server.run_foreground", lambda: starts.append(True)
+    )
+    output = TTY()
 
-    cli.main([], stdin=TTY("n\n"), stdout=first_output, stderr=io.StringIO())
+    cli.main([], stdin=TTY(), stdout=output, stderr=io.StringIO())
 
-    assert "resident macOS login service" in first_output.getvalue()
-    assert paths.prompted_marker.read_text() == "declined\n"
+    assert refreshes == [{}]
     assert starts == [True]
-
-    second_output = TTY()
-    cli.main([], stdin=TTY("y\n"), stdout=second_output, stderr=io.StringIO())
-    assert "resident macOS login service" not in second_output.getvalue()
-    assert starts == [True, True]
+    assert "login service" not in output.getvalue()
+    assert not paths.prompted_marker.exists()
+    assert not paths.state_dir.exists()
 
 
-def test_noninteractive_uninstall_requires_explicit_retention_choice():
+def test_service_uninstall_requires_yes():
+    # #284: destructive operations gate on --yes and never prompt, even on a TTY.
     stderr = io.StringIO()
     with pytest.raises(SystemExit, match="1"):
         cli.main(
-            ["--uninstall-service"],
-            stdin=io.StringIO(),
-            stdout=io.StringIO(),
+            ["service", "uninstall"],
+            stdin=TTY(),
+            stdout=TTY(),
             stderr=stderr,
         )
-    assert "requires --keep-data or --purge-data" in stderr.getvalue()
+    assert "requires --yes (refusing to prompt)" in stderr.getvalue()
+
+
+@pytest.mark.parametrize("extra,purge", [([], False), (["--purge-data"], True)])
+def test_legacy_uninstall_flag_implies_yes(monkeypatch, extra, purge):
+    # the pre-#284 flag was itself explicit consent: it maps onto the new tree
+    # carrying --yes, so it keeps working without a data-retention prompt
+    calls: list[dict] = []
+
+    def uninstall(**kwargs):
+        calls.append(kwargs)
+        return service.UninstallResult(True, (Path("plist"),), purge)
+
+    monkeypatch.setattr(service, "uninstall_service", uninstall)
+    output = io.StringIO()
+
+    cli.main(
+        ["--uninstall-service", *extra],
+        stdin=io.StringIO(),
+        stdout=output,
+        stderr=io.StringIO(),
+    )
+
+    assert calls == [{"purge_data": purge}]
+    text = output.getvalue()
+    expected = "config and state deleted" if purge else "config and state kept"
+    assert "resident service removed;" in text
+    assert expected in text
 
 
 def test_service_install_is_polite_off_macos(tmp_path):
@@ -650,16 +710,27 @@ def test_update_cli_supports_latest_and_exact_version(monkeypatch):
 
 
 def test_help_aliases_print_command_guide_to_stdout():
+    # the legacy --install-service/--uninstall-service/--service-status flags
+    # are hidden aliases now, so the guide lists the new command tree instead
     for alias in ("-h", "--help"):
         out = io.StringIO()
         err = io.StringIO()
-        cli.main([alias], stdin=io.StringIO(), stdout=out, stderr=err)
+        with pytest.raises(SystemExit) as excinfo:
+            cli.main([alias], stdin=io.StringIO(), stdout=out, stderr=err)
+        assert excinfo.value.code == 0
         text = out.getvalue()
         assert text.startswith("usage: mcp-gateway")
-        assert "--install-service" in text
-        assert "--uninstall-service" in text
-        assert "--service-status" in text
-        assert "update [--version X.Y.Z]" in text
+        for command in (
+            "run",
+            "version",
+            "update",
+            "service",
+            "status",
+            "check",
+            "restart",
+            "logs",
+        ):
+            assert command in text
         assert "-h, --help" in text
         assert err.getvalue() == ""
 
@@ -679,17 +750,15 @@ def test_invalid_argument_prints_usage_to_stderr_and_exits_2():
     assert err.getvalue().startswith("usage: mcp-gateway")
 
 
-def test_help_alias_with_extra_args_still_exits_2():
+def test_help_flag_wins_over_trailing_args():
+    # argparse exits 0 as soon as --help is parsed; trailing tokens are ignored
+    out = io.StringIO()
     err = io.StringIO()
     with pytest.raises(SystemExit) as excinfo:
-        cli.main(
-            ["--help", "extra"],
-            stdin=io.StringIO(),
-            stdout=io.StringIO(),
-            stderr=err,
-        )
-    assert excinfo.value.code == 2
-    assert err.getvalue().startswith("usage: mcp-gateway")
+        cli.main(["--help", "extra"], stdin=io.StringIO(), stdout=out, stderr=err)
+    assert excinfo.value.code == 0
+    assert out.getvalue().startswith("usage: mcp-gateway")
+    assert err.getvalue() == ""
 
 
 def test_first_successful_service_install_mentions_future_update_command(
