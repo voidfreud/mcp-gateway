@@ -4,6 +4,19 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project aims to
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0](https://github.com/voidfreud/mcp-gateway/compare/v1.2.1...v1.3.0) (2026-08-04)
+
+
+### Features
+
+* complete public release readiness ([#271](https://github.com/voidfreud/mcp-gateway/issues/271)) ([eaf341d](https://github.com/voidfreud/mcp-gateway/commit/eaf341d8ba24b558978fb939a1f85d0e6cda9561))
+* show update command after service install ([#273](https://github.com/voidfreud/mcp-gateway/issues/273)) ([43ec530](https://github.com/voidfreud/mcp-gateway/commit/43ec530d94098eb85212374941753da1a36d6f8d))
+
+
+### Documentation
+
+* record A8 public release receipt ([#260](https://github.com/voidfreud/mcp-gateway/issues/260)) ([5c76baf](https://github.com/voidfreud/mcp-gateway/commit/5c76baf7e13b4488edfa86ee774370cd1b34e557))
+
 ## [1.2.1](https://github.com/voidfreud/mcp-gateway/compare/v1.2.0...v1.2.1) (2026-08-03)
 
 
