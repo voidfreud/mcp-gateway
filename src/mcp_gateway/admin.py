@@ -2197,7 +2197,7 @@ def _virtual_routes(ctx: _AdminCtx) -> list[Route]:
     return admin_routes_virtual.virtual_routes(ctx, deps)
 
 
-def register(  # noqa: PLR0913 — public API; callers pass the lifespan plumbing
+def register(  # noqa: PLR0913, PLR0917 — public API; callers pass the lifespan plumbing
     app,
     config_path: str,
     log,
