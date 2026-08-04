@@ -725,7 +725,7 @@ async def _health(_request: Request) -> PlainTextResponse:
     return PlainTextResponse(f"ok mcp-gateway {admin.gateway_version()} @ {here}")
 
 
-async def _mount_backend(  # noqa: PLR0913 — the mount needs the full lifespan plumbing; a param object would just rename the coupling
+async def _mount_backend(  # noqa: PLR0913, PLR0917 — the mount needs the full lifespan plumbing; a param object would just rename the coupling
     app: Starlette,
     stack: AsyncExitStack,
     b: config_loader.Backend,
@@ -848,7 +848,7 @@ async def _mount_backend(  # noqa: PLR0913 — the mount needs the full lifespan
 # ---------------------------------------------------------------------------
 
 
-def _build_app(  # noqa: PLR0913, PLR0915 — composition root; takes what it wires, and its lifespan owns the per-runner anyio scope rules (splitting would scatter them)
+def _build_app(  # noqa: PLR0913, PLR0915, PLR0917 — composition root; takes what it wires, and its lifespan owns the per-runner anyio scope rules (splitting would scatter them)
     cfg: config_loader.GatewayConfig,
     log,
     all_tools: runtime.CapturedTools,

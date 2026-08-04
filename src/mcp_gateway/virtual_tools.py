@@ -378,7 +378,7 @@ def _clip(value: Any, limit: int = 128) -> str:
     return text if len(text) <= limit else f"{text[: max(0, limit - 1)]}…"
 
 
-def _aggregate_result(  # noqa: PLR0913 - exact wire-result accounting inputs
+def _aggregate_result(  # noqa: PLR0913, PLR0917 - exact wire-result accounting inputs
     tool: cl.VirtualTool,
     content: list,
     members: list[dict],
@@ -683,7 +683,7 @@ def build_virtual_tool(
     return _VirtualRuntimeTool(tool, cfg_source, registry, log, status_store)
 
 
-def replace_tools(  # noqa: PLR0913 - explicit lifecycle dependencies
+def replace_tools(  # noqa: PLR0913, PLR0917 - explicit lifecycle dependencies
     server: FastMCP,
     cfg: cl.GatewayConfig,
     cfg_source: cl.GatewayConfig | Callable[[], cl.GatewayConfig],
@@ -704,7 +704,7 @@ def replace_tools(  # noqa: PLR0913 - explicit lifecycle dependencies
     server.local_provider._components = staged.local_provider._components  # noqa: SLF001
 
 
-def build_virtual_server(  # noqa: PLR0913 - explicit lifecycle and auth dependencies
+def build_virtual_server(  # noqa: PLR0913, PLR0917 - explicit lifecycle and auth dependencies
     cfg: cl.GatewayConfig,
     cfg_source: cl.GatewayConfig | Callable[[], cl.GatewayConfig],
     registry: Mapping[str, FastMCPProxy],

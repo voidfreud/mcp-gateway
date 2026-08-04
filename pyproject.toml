@@ -51,15 +51,15 @@ only-include = ["src/mcp_gateway", "README.md", "LICENSE", "pyproject.toml"]
 
 [dependency-groups]
 dev = [
-    "httpx2>=2.5.0",
-    "hypothesis>=6.155.7",
+    "httpx2>=2.9.1",
+    "hypothesis>=6.164.0",
     "jsonschema>=4.26.0",
-    "pip-audit==2.9.0",
+    "pip-audit==2.10.1",
     "pytest>=9.1.1",
-    "ruff==0.15.22",
-    # Advisory only until the tracked type-debt Issue is resolved.  Keep the
-    # baseline reproducible without adding suppressions or source exclusions.
-    "ty==0.0.61",
+    "ruff==0.16.1",
+    # Advisory type-debt baseline; keep it reproducible without adding
+    # suppressions or source exclusions.
+    "ty==0.0.63",
 ]
 
 [tool.ruff]
@@ -82,8 +82,8 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 # Tests: local imports keep optional/slow deps out of collection; fixture
-# factories legitimately take many keyword params.
-"tests/*" = ["PLC0415", "PLR0913", "PLR0912"]
+# factories and wire helpers legitimately take many keyword/positional params.
+"tests/*" = ["PLC0415", "PLR0912", "PLR0913", "PLR0917"]
 # Skill scripts are CLI report tools: docstring usage examples overflow 88
 # cols, and the print tree is one long cohesive walk.
 ".agents/skills/*" = ["E501", "PLR0912", "PLR0915"]

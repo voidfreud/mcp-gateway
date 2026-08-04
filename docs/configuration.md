@@ -181,11 +181,13 @@ and the string is imported, never evaluated.
 ```python
 # ~/.config/mcp-gateway/hooks/myhooks.py
 
+
 def check_query(args: dict) -> None:
     """validate: runs BEFORE the call is forwarded. Raise ValueError to
     reject; the message is returned to the caller as the tool error."""
     if len(args.get("query", "")) > 500:
         raise ValueError("query too long (max 500 chars)")
+
 
 def trim_output(result):
     """post_process: runs AFTER the backend answered. `result` is a FastMCP
