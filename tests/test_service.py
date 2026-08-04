@@ -690,3 +690,36 @@ def test_help_alias_with_extra_args_still_exits_2():
         )
     assert excinfo.value.code == 2
     assert err.getvalue().startswith("usage: mcp-gateway")
+
+
+def test_first_successful_service_install_mentions_future_update_command(
+    monkeypatch,
+):
+    fresh = service.InstallResult(
+        changed=True, reloaded=True, migrated_config=False, removed_legacy_link=False
+    )
+    monkeypatch.setattr(service, "install_service", lambda **_kwargs: fresh)
+    output = io.StringIO()
+
+    cli.main(["--install-service"], stdout=output, stderr=io.StringIO())
+
+    assert "resident service installed and started" in output.getvalue()
+    assert "future updates: run `mcp-gateway update`" in output.getvalue()
+
+
+@pytest.mark.parametrize("reloaded", [False, True])
+def test_unchanged_service_install_does_not_repeat_update_command(
+    monkeypatch, reloaded
+):
+    unchanged = service.InstallResult(
+        changed=False,
+        reloaded=reloaded,
+        migrated_config=False,
+        removed_legacy_link=False,
+    )
+    monkeypatch.setattr(service, "install_service", lambda **_kwargs: unchanged)
+    output = io.StringIO()
+
+    cli.main(["--install-service"], stdout=output, stderr=io.StringIO())
+
+    assert "mcp-gateway update" not in output.getvalue()
