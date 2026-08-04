@@ -89,6 +89,7 @@ jobs:
       # astral-sh/setup-uv v8.3.2
       - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990
         with:
+          version: "0.10.9"
           enable-cache: true
           cache-dependency-glob: uv.lock
       - name: Prepare the locked audit environment
@@ -103,6 +104,17 @@ jobs:
         run: |
           uv run pip-audit \
             --requirement "$RUNNER_TEMP/runtime-requirements.txt" \
+            --disable-pip \
+            --require-hashes \
+            --vulnerability-service osv
+      - name: Export locked development and build dependencies
+        run: |
+          uv export --locked --all-groups --no-emit-project --format requirements.txt \
+            --output-file "$RUNNER_TEMP/development-requirements.txt"
+      - name: Audit locked development and build dependencies
+        run: |
+          uv run pip-audit \
+            --requirement "$RUNNER_TEMP/development-requirements.txt" \
             --disable-pip \
             --require-hashes \
             --vulnerability-service osv

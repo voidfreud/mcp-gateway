@@ -32,7 +32,7 @@ accept a `BREAKING CHANGE` footer alone as a major signal. Approved changes are
 squash-merged; do not push directly to `main`.
 
 [The release guide](docs/releases.md) is the canonical policy for versioning,
-Release Please, release pull-request review, correction, and private release
+Release Please, release pull-request review, correction, and verified release
 consumption. Do not manually bump ordinary versions or duplicate its workflow.
 Use the [testing and verification guide](docs/testing.md) to distinguish
 required CI from advisory checks and machine-specific release receipts.

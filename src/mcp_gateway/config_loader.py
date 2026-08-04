@@ -21,8 +21,10 @@ import json
 import math
 import os
 import re
+import stat
 import subprocess
 import sys
+import tempfile
 import tomllib
 from copy import deepcopy
 from pathlib import Path
@@ -70,6 +72,29 @@ class ConfigError(RuntimeError):
     """Raised for any malformed or unresolvable configuration."""
 
 
+_PRIVATE_FILE_MODE = 0o600
+
+
+def _harden_private_file(path: Path, what: str) -> None:
+    """Require a user-owned POSIX file and remove group/other access."""
+
+    if os.name == "nt":
+        return
+    try:
+        details = path.lstat()
+        if not stat.S_ISREG(details.st_mode):
+            raise ConfigError(f"{what} is not a regular file: {path}")
+        getuid = getattr(os, "getuid", None)
+        if getuid is not None and details.st_uid != getuid():
+            raise ConfigError(f"{what} is not owned by the current user: {path}")
+        if stat.S_IMODE(details.st_mode) != _PRIVATE_FILE_MODE:
+            path.chmod(_PRIVATE_FILE_MODE)
+    except ConfigError:
+        raise
+    except OSError as exc:
+        raise ConfigError(f"could not secure {what} {path}: {exc}") from exc
+
+
 def secrets_path() -> Path:
     """The gateway-scoped secrets file (``MCP_GATEWAY_SECRETS`` overrides)."""
     return Path(
@@ -96,6 +121,7 @@ def load_secrets() -> dict[str, str]:
     path = secrets_path()
     if not path.is_file():
         return {}
+    _harden_private_file(path, "secrets file")
     ckey = str(path)
     mtime = path.stat().st_mtime
     cached = _secrets_cache.get(ckey)
@@ -359,6 +385,16 @@ class Backend(BaseModel, extra="forbid"):
     # prompts (keyed by original name) — the same diff-vs-default model as tools.
     resources: list[ResourceOverride] = Field(default_factory=list)
     prompts: list[PromptOverride] = Field(default_factory=list)
+
+    @field_validator("auth_value")
+    @classmethod
+    def _auth_value_uses_env(cls, value: str | None) -> str | None:
+        if value is not None and not _ENV_PATTERN.search(value):
+            raise ConfigError(
+                "backend auth_value must contain an ${ENV_VAR} reference; "
+                "raw credentials do not belong in config.toml"
+            )
+        return value
 
     @model_validator(mode="after")
     def _check_transport(self) -> Backend:
@@ -954,6 +990,18 @@ class GatewayConfig(BaseModel, extra="forbid"):
     backends: list[Backend] = Field(default_factory=list)
     virtual_tools: list[VirtualTool] = Field(default_factory=list)
 
+    @field_validator("bearer_token")
+    @classmethod
+    def _bearer_token_uses_env(cls, value: str | None) -> str | None:
+        if value == "":
+            raise ConfigError("bearer_token must not be empty")
+        if value is not None and not _ENV_PATTERN.fullmatch(value.strip()):
+            raise ConfigError(
+                "bearer_token must be one ${ENV_VAR} reference; "
+                "raw credentials do not belong in config.toml"
+            )
+        return value
+
     @model_validator(mode="after")
     def _check_backends(self) -> GatewayConfig:
         # An empty gateway is valid: the permanent Virtual Tools endpoint still
@@ -974,8 +1022,6 @@ class GatewayConfig(BaseModel, extra="forbid"):
         duplicate_ids = {value for value in backend_ids if backend_ids.count(value) > 1}
         if duplicate_ids:
             raise ConfigError(f"duplicate backend id(s): {sorted(duplicate_ids)}")
-        if self.bearer_token == "":
-            raise ConfigError("bearer_token must not be empty")
         if self.bearer_token is not None and self.oauth is not None:
             raise ConfigError(
                 "bearer_token and oauth are mutually exclusive; choose one "
@@ -1035,14 +1081,29 @@ def ensure_config(path: str | Path) -> None:
     """
     p = Path(path).expanduser()
     if p.is_file():
+        _harden_private_file(p, "config file")
         return
     default = Path(__file__).resolve().parent / "config.default.toml"
     if not default.is_file():
         raise ConfigError(
             f"no {p} and no config.default.toml to seed it from ({default})"
         )
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(default.read_text(encoding="utf-8"), encoding="utf-8")
+    p.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_EXCL, _PRIVATE_FILE_MODE)
+    except FileExistsError:
+        if not p.is_file():
+            raise ConfigError(f"config path is not a file: {p}") from None
+        _harden_private_file(p, "config file")
+        return
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(default.read_text(encoding="utf-8"))
+            fh.flush()
+            os.fsync(fh.fileno())
+    except Exception:
+        p.unlink(missing_ok=True)
+        raise
 
 
 def load(path: str | Path) -> GatewayConfig:
@@ -1309,7 +1370,7 @@ class ResourcePromptTransform(Transform):
     """Rewrites resource / resource-template / prompt broadcast text for ONE
     backend's endpoint (#15).
 
-    FastMCP 3.4.4 has no config-driven analog of ``ToolTransform`` for
+    FastMCP 3.4.5 has no config-driven analog of ``ToolTransform`` for
     resources and prompts, but its ``Transform`` base class exposes the same
     list/get hooks — so the gateway supplies its own:
 
@@ -1744,23 +1805,39 @@ def dump_toml(cfg: GatewayConfig) -> str:
 def save(cfg: GatewayConfig, path: str | Path) -> None:
     """Write *cfg* to *path* as TOML, atomically and durably.
 
-    Writes a temp file, fsyncs it, atomically renames over the target, then
-    fsyncs the directory — so an unexpected crash/power-loss after this returns
-    leaves the config intact (never a partial file).
+    The temporary file is created beside the destination so ``os.replace`` is
+    atomic on one filesystem. Both file and directory metadata are synced; an
+    interrupted write leaves the prior config intact.
     """
+
     p = Path(path).expanduser()
-    tmp = p.with_suffix(p.suffix + ".tmp")
+    if p.exists() or p.is_symlink():
+        _harden_private_file(p, "config file")
+    p.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     data = dump_toml(cfg)
-    with open(tmp, "w", encoding="utf-8") as fh:
-        fh.write(data)
-        fh.flush()
-        os.fsync(fh.fileno())
-    os.replace(tmp, p)
-    dir_fd = os.open(str(p.parent), os.O_RDONLY)
+    fd, raw_tmp = tempfile.mkstemp(prefix=f".{p.name}.", dir=p.parent)
+    tmp = Path(raw_tmp)
     try:
-        os.fsync(dir_fd)
-    finally:
-        os.close(dir_fd)
+        if hasattr(os, "fchmod"):
+            os.fchmod(fd, _PRIVATE_FILE_MODE)
+        handle = os.fdopen(fd, "w", encoding="utf-8")
+        fd = -1
+        with handle as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, p)
+        _harden_private_file(p, "config file")
+        dir_fd = os.open(str(p.parent), os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    except BaseException:
+        if fd >= 0:
+            os.close(fd)
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 if __name__ == "__main__":

@@ -47,7 +47,7 @@ checks** in Gateway settings) to eliminate those requests.
 The explicit `mcp-gateway update` command also fixes its package source to
 public PyPI and ignores ambient `uv`/`pip` index, find-links, constraint, and
 override settings. HTTPS proxy and custom certificate environment settings
-remain available; use the verified private-release fallback when public PyPI is
+remain available; use the verified GitHub Release fallback when public PyPI is
 not reachable.
 
 
@@ -194,15 +194,16 @@ Be clear-eyed about the boundaries:
 
 ## Secrets handling
 
-Secrets never live in `config.toml`. You write `${ENV_VAR}` references, and the
-gateway resolves them from:
+Dedicated credential fields never accept raw values: `bearer_token` and
+`oauth.admin_bearer_token` must each be one `${ENV_VAR}` reference, while a
+backend `auth_value` must contain one. The gateway resolves references from:
 
 1. the process environment, or
 2. the gateway secrets file `~/.config/mcp-gateway/secrets.env` (`KEY=VALUE` per
    line; path overridable with `MCP_GATEWAY_SECRETS`).
 
-The environment wins on a conflict, and a missing reference fails startup loudly
-rather than sending an empty credential.
+The environment wins on a conflict, and a missing or empty reference fails
+startup loudly rather than sending an empty credential.
 
 Values from the secrets file are deliberately kept **out** of the process
 environment. This matters when you run local `stdio` backends: those run as
@@ -214,8 +215,14 @@ backend's auth reference still resolves from the same file, so:
 - **Never** point `MCP_GATEWAY_SECRETS` at a global key store — you would be
   exposing unrelated secrets to the gateway's resolution path.
 
-Because the config holds only references and public endpoints, it is safe to
-commit or share. The secrets file is not.
+Arbitrary URLs, headers, arguments, and subprocess environment values cannot be
+classified reliably, so never place credentials there as literals. On POSIX
+systems, config and secrets files are created or repaired with user-only `0600`
+permissions; the macOS resident service keeps its config, state, and wrapper
+directories at `0700`.
+Treat `config.toml` as sensitive operational data even though its dedicated
+credential fields hold references. The secrets file must never be committed or
+shared.
 
 ## Keeping dangerous tools off
 

@@ -173,6 +173,14 @@ def service_paths(home: Path | None = None) -> ServicePaths:
     return ServicePaths((home or Path.home()).expanduser().resolve())
 
 
+def _harden_app_directories(paths: ServicePaths) -> None:
+    """Create app-owned directories and restrict them to the current user."""
+
+    for directory in (paths.state_dir, paths.config_dir, paths.wrapper_dir):
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        directory.chmod(0o700)
+
+
 def _require_macos(platform: str | None = None) -> None:
     if (platform or sys.platform) != "darwin":
         raise ServiceError(
@@ -513,11 +521,10 @@ def install_service(
             "`uv tool install <package-or-checkout>`"
         )
 
-    # launchd opens these log paths before exec, so create state first.
-    actual.state_dir.mkdir(parents=True, exist_ok=True)
-    actual.config_dir.mkdir(parents=True, exist_ok=True)
+    # launchd opens these log paths before exec, so create state first. The
+    # app-owned directories can contain credentials or backend output.
+    _harden_app_directories(actual)
     actual.agents_dir.mkdir(parents=True, exist_ok=True)
-    actual.wrapper_dir.mkdir(parents=True, exist_ok=True)
 
     migrated_config = _migrate_legacy_config(actual)
     captured_path = _captured_path(
@@ -767,6 +774,7 @@ def refresh_installed_service(
     actual = paths or service_paths()
     if not actual.plist.exists():
         return False
+    _harden_app_directories(actual)
     environment = _stored_environment(actual)
     expected_wrapper = _wrapper_bytes(
         actual, (binary or actual.binary).expanduser().resolve()
@@ -781,8 +789,8 @@ def refresh_installed_service(
     captured_path = _captured_path(
         actual, environment.get("PATH") or os.environ.get("PATH")
     )
-    actual.state_dir.mkdir(parents=True, exist_ok=True)
-    actual.config_dir.mkdir(parents=True, exist_ok=True)
+    # App-owned directories were created and permission-hardened above even
+    # when the installed template itself was already current.
     _write_if_changed(actual.wrapper, expected_wrapper, mode=0o700)
     _write_if_changed(actual.plist, _plist_bytes(actual, captured_path), mode=0o600)
     return True

@@ -4,6 +4,11 @@
 **Scope:** 97 read-only agents covering all source, test, tool, config, CI, and documentation files
 **Result:** ~200 findings — 9 serious, 28 moderate, remainder minor/clean
 
+**Current status (2026-08-04):** The A0–A8 release-readiness plan below is
+complete. The detailed findings that follow are preserved as point-in-time
+audit evidence, not an automatically current backlog; revalidate a finding
+against the present code and tests before acting on it.
+
 ---
 
 ## Recommended Action Plan (2026-08-03) — First Things To Be Done
@@ -52,11 +57,11 @@ Priority-ordered hardening plan derived from the compliance audit (#322–#358) 
 
 | # | Requirement | Ref | Acceptance |
 |---|-------------|-----|------------|
-| 1 | **[DONE] Auth-free distribution** — the public distribution is `mcp-local-gateway`; the command/import remain `mcp-gateway` / `mcp_gateway`. Tagged releases publish the verified wheel and sdist through OIDC; private checksummed GitHub artifacts are fallback-only. | Release.3/4 | Package metadata, clean-wheel install receipt, pinned publish job, GitHub `pypi` environment, Trusted Publisher, and public v1.2.1 upload verified |
+| 1 | **[DONE] Auth-free distribution** — the public distribution is `mcp-local-gateway`; the command/import remain `mcp-gateway` / `mcp_gateway`. Tagged releases publish the verified wheel and sdist through OIDC; public checksummed GitHub artifacts remain a fallback. | Release.3/4 | Package metadata, clean-wheel install receipt, pinned publish job, GitHub `pypi` environment, Trusted Publisher, and public v1.2.1 upload verified |
 | 2 | **[DONE] `mcp-gateway update` command** — resolves/validates a stable PyPI version, installs that exact version with `uv`, verifies the shim, restarts an existing resident service through the application-owned lifecycle, and requires health/readiness. | A7 req 2; justfile update | Focused success, no-op, unpublished-refusal, resident-restart, and CLI contracts green |
 | 3 | **[DONE] Notify, don't auto-apply** — one immediate/daily bounded request, offline-tolerant status/logging, conditional Admin badge, and strict `update_check` opt-out. | README network-behavior note | Disabled lifespan starts zero monitors; enabled starts one; Admin/config/UI contracts green |
-| 4 | **[DONE] Deterministic rollback** — activation failure reinstalls/verifies the old exact PyPI version and restarts the previous resident service; `update --version X.Y.Z` is the deliberate rollback path. Package changes never touch user config/state. | backups (#172), recovery path | Failure-path package/service rollback contract green |
-| 5 | **[DONE] New-user narrative documented** — auth-free install, resident setup, update notice, one-command apply, exact rollback, uninstall, privacy, and fallback artifacts are covered by the owning guides. | README | README + installation/operations/releases/security/config/Admin/API docs updated |
+| 4 | **[DONE] Version-pinned rollback** — activation failure reinstalls/verifies the old exact gateway package version and restarts the previous resident service; `update --version X.Y.Z` is the deliberate rollback path. Compatible dependencies are resolved from PyPI at install time, so this is not a byte-for-byte environment restore. Package changes never touch user config/state. | backups (#172), recovery path | Failure-path package/service rollback contract green |
+| 5 | **[DONE] New-user narrative documented** — auth-free install, resident setup, update notice, one-command apply, version-pinned rollback, uninstall, privacy, and fallback artifacts are covered by the owning guides. | README | README + installation/operations/releases/security/config/Admin/API docs updated |
 | 6 | **[DONE] Availability-model interaction** — ADR-0010 chooses the resident daemon and records controlled restart plus readiness verification after binary swaps. | A7 decision block | Decision rationale and implementation agree |
 
 **Release receipt:** [v1.2.1](https://github.com/voidfreud/mcp-gateway/releases/tag/v1.2.1) published through the
@@ -462,6 +467,6 @@ The prior audit's performance coverage was incidental (#11, #16, #19, #31, #34, 
 
 ### Conformance coverage (C5)
 
-The CI mcp-contract smoke runs **4 of the official suite's ~31 server scenarios** (server-initialize, ping, tools-list, dns-rebinding-protection) against one stdio fixture with a single tool. **Zero automated coverage** for: all tools/call variants (text/image/audio/mixed/embedded-resource/error/progress/logging/sampling), resources (list/read/templates/subscribe), prompts (get/args/image), completion, logging/setLevel, error codes (-32601/-32602/-32002/-32603), SSE stream/polling, session headers (missing/invalid MCP-Session-Id, DELETE), pagination beyond page 1, JSON-Schema 2020-12 dialect, all 10 OAuth scenarios, and initialize-response CONTENT (capability truthfulness, serverInfo identity — i.e. every ⚠️ in this section is untested by the current gate). The synthetic wire-schema check passes only because ServerCapabilities tolerates the extra `extensions`/`experimental` keys.
+At the time of this audit, the CI mcp-contract smoke ran **4 of the official suite's ~31 server scenarios** (server-initialize, ping, tools-list, dns-rebinding-protection) against one stdio fixture with a single tool. It had **zero automated coverage** for: all tools/call variants (text/image/audio/mixed/embedded-resource/error/progress/logging/sampling), resources (list/read/templates/subscribe), prompts (get/args/image), completion, logging/setLevel, error codes (-32601/-32602/-32002/-32603), SSE stream/polling, session headers (missing/invalid MCP-Session-Id, DELETE), pagination beyond page 1, JSON-Schema 2020-12 dialect, all 10 OAuth scenarios, and initialize-response content (capability truthfulness, serverInfo identity — i.e. every ⚠️ in this section was untested by that gate). The audit-time synthetic wire-schema check passed only because ServerCapabilities tolerated the extra `extensions`/`experimental` keys.
 
-**Summary:** 76 contracts checked → **9 ❌ violations, 23 ⚠️ deviations, 5 optional-missing, rest ✅**. The gateway's own authored violations (322/325/326/327) are the ones worth fixing first — they're config/user-reachable; the SDK-inherited ones (328–330, 322–324) need a fastmcp/mcp-SDK upgrade or gateway-side middleware. The current CI conformance gate would not catch ANY of them.
+**Original audit summary (2026-07-27):** 76 contracts checked → **9 ❌ violations, 23 ⚠️ deviations, 5 optional-missing, rest ✅**. At that point, the gateway-authored violations (322/325/326/327) were the first priorities, SDK-inherited violations (328–330, 322–324) required an SDK upgrade or gateway middleware, and the then-current conformance gate caught none of them. The A0–A8 status table at the top records the subsequent remediation and expanded gate.

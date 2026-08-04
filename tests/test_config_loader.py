@@ -234,10 +234,22 @@ def test_load_secrets_reloads_on_mtime_change(monkeypatch, tmp_path):
     p.write_text("A=one\n")
     monkeypatch.setenv("MCP_GATEWAY_SECRETS", str(p))
     assert cl.load_secrets() == {"A": "one"}
+    assert p.stat().st_mode & 0o777 == 0o600
     p.write_text("A=two\nB=three\n")
     st = p.stat()
     os.utime(p, (st.st_atime, st.st_mtime + 5))  # force a newer mtime
     assert cl.load_secrets() == {"A": "two", "B": "three"}
+
+
+def test_load_secrets_rejects_symlink(monkeypatch, tmp_path):
+    target = tmp_path / "actual.env"
+    target.write_text("A=one\n")
+    link = tmp_path / "secrets.env"
+    link.symlink_to(target)
+    monkeypatch.setenv("MCP_GATEWAY_SECRETS", str(link))
+
+    with pytest.raises(cl.ConfigError, match="regular file"):
+        cl.load_secrets()
 
 
 @pytest.mark.anyio
@@ -577,6 +589,11 @@ def test_bearer_token_roundtrips_toml():
     assert reparsed.bearer_token == "${MCP_GATEWAY_TOKEN}"
 
 
+def test_bearer_token_rejects_raw_secret():
+    with pytest.raises(cl.ConfigError, match="raw credentials"):
+        cl.GatewayConfig.model_validate({"bearer_token": "literal-token"})
+
+
 def test_bearer_token_omitted_when_unset():
     # default None -> the key never lands in config.toml (config stays minimal)
     cfg = _one_backend()
@@ -624,6 +641,15 @@ def test_non_loopback_host_with_token_is_allowed():
 # --- durable save ----------------------------------------------------------
 
 
+def test_ensure_config_seeds_private_file(tmp_path):
+    path = tmp_path / "nested" / "config.toml"
+
+    cl.ensure_config(path)
+
+    assert path.is_file()
+    assert path.stat().st_mode & 0o777 == 0o600
+
+
 def test_save_then_load_roundtrips(tmp_path):
     cfg = cl.GatewayConfig.model_validate(
         {
@@ -640,8 +666,36 @@ def test_save_then_load_roundtrips(tmp_path):
     p = tmp_path / "config.toml"
     cl.save(cfg, p)
     assert p.is_file()
-    assert not (tmp_path / "config.toml.tmp").exists()  # temp cleaned up
+    assert list(tmp_path.glob(".config.toml.*")) == []
+    assert p.stat().st_mode & 0o777 == 0o600
     assert cl.to_raw(cl.load(p)) == cl.to_raw(cfg)
+
+
+def test_save_rejects_symlink_target(tmp_path):
+    target = tmp_path / "actual.toml"
+    target.write_text("backends = []\n")
+    link = tmp_path / "config.toml"
+    link.symlink_to(target)
+
+    with pytest.raises(cl.ConfigError, match="regular file"):
+        cl.save(cl.GatewayConfig(), link)
+
+
+def test_save_replace_failure_preserves_existing_file(tmp_path, monkeypatch):
+    path = tmp_path / "config.toml"
+    original = b"backends = []\n"
+    path.write_bytes(original)
+    path.chmod(0o600)
+
+    def fail_replace(_source, _target):
+        raise OSError("simulated replace failure")
+
+    monkeypatch.setattr(cl.os, "replace", fail_replace)
+    with pytest.raises(OSError, match="simulated replace failure"):
+        cl.save(cl.GatewayConfig(port=9200), path)
+
+    assert path.read_bytes() == original
+    assert list(tmp_path.glob(".config.toml.*")) == []
 
 
 # --- validation ------------------------------------------------------------
@@ -693,19 +747,28 @@ def test_streamable_http_backend_validates_and_maps():
     }
 
 
-def test_remote_backend_entry_includes_auth_header():
+def test_remote_backend_entry_includes_auth_header(monkeypatch):
+    monkeypatch.setenv("REMOTE_TOKEN", "tok")
     b = cl.Backend(
         name="b",
         transport="sse",
         url="https://h/sse",
         auth_header="Authorization",
-        auth_value="Bearer tok",
+        auth_value="Bearer ${REMOTE_TOKEN}",
     )
     assert cl.backend_entry(b) == {
         "url": "https://h/sse",
         "transport": "sse",
         "headers": {"Authorization": "Bearer tok"},
     }
+
+
+def test_remote_backend_rejects_raw_auth_value():
+    with pytest.raises(cl.ConfigError, match="raw credentials"):
+        _http_backend(
+            auth_header="Authorization",
+            auth_value="Bearer literal-token",
+        )
 
 
 def test_sse_backend_requires_url():
@@ -799,12 +862,13 @@ def test_multiple_headers_expand_env(monkeypatch):
     assert e["headers"] == {"X-A": "one", "X-B": "Bearer sec"}
 
 
-def test_legacy_pair_wins_over_headers_on_clash():
+def test_legacy_pair_wins_over_headers_on_clash(monkeypatch):
+    monkeypatch.setenv("PAIR_TOKEN", "from-pair")
     e = cl.backend_entry(
         _http_backend(
             headers={"Authorization": "from-dict", "X-C": "keep"},
             auth_header="Authorization",
-            auth_value="from-pair",
+            auth_value="${PAIR_TOKEN}",
         )
     )
     assert e["headers"] == {"Authorization": "from-pair", "X-C": "keep"}

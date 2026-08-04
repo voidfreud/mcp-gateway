@@ -13,7 +13,7 @@ It runs one local HTTP service with an admin UI at
 independent clients: each backend keeps its own `/<backend>/mcp` endpoint.
 
 ![The admin UI's backend view — live status, grouped controls, stale-override
-repair, and inline tool editing (follows your system's light/dark theme)](docs/img/admin-backend-dark.png)
+repair, and inline tool editing (follows your system's light/dark theme)](https://raw.githubusercontent.com/voidfreud/mcp-gateway/main/docs/img/admin-backend-dark.png)
 
 ## At a glance
 
@@ -45,7 +45,7 @@ The distribution is named `mcp-local-gateway` because the unrelated
 `mcp-gateway` name was already occupied on PyPI. The command and Python package
 remain `mcp-gateway` and `mcp_gateway`.
 Existing `uv` tool installs of v1.1.0 or earlier need the one-time
-[renamed-distribution migration](docs/installation.md#upgrading-from-v110-or-earlier).
+[renamed-distribution migration](https://github.com/voidfreud/mcp-gateway/blob/main/docs/installation.md#upgrading-from-v110-or-earlier).
 
 
 On macOS, the first interactive run offers to install the resident LaunchAgent;
@@ -70,10 +70,11 @@ update, tolerates offline failure, and exposes an `update_check` toggle in
 Gateway settings. Remove the sample backends and disable that toggle before
 starting if the environment must be network-silent.
 
-The [installation guide](docs/installation.md) covers the verified private
-GitHub Release fallback, checkout development, configuration selection, and
-complete service lifecycle. See the [Admin guide](docs/admin-guide.md) for
-client registration.
+The [installation guide](https://github.com/voidfreud/mcp-gateway/blob/main/docs/installation.md)
+covers the verified GitHub Release fallback, checkout development,
+configuration selection, and complete service lifecycle. See the
+[Admin guide](https://github.com/voidfreud/mcp-gateway/blob/main/docs/admin-guide.md)
+for client registration.
 
 ## Running and updating
 
@@ -127,26 +128,24 @@ only suitable for an equivalent unprotected test instance.
 
 ## Documentation
 
-- [Installation](docs/installation.md) — foreground and macOS service paths,
-  upgrades, moves, and uninstalling.
-- [Releases](docs/releases.md) — versioning, PyPI publishing, and verified
-  fallback artifacts.
-- [Admin guide](docs/admin-guide.md) — editing, registration, and Virtual Tools.
-- [Configuration reference](docs/configuration.md) — `config.toml`, backends,
-  secrets, and behavior hooks.
-- [Operations](docs/operations.md) — readiness, logs, recovery, and local
-  verification boundaries.
-- [Security](docs/security.md) — network exposure, bearer tokens, OAuth, and
-  local trust boundaries.
-- [Admin API](docs/api.md) — scripting interface and API contracts.
+- [Installation](https://github.com/voidfreud/mcp-gateway/blob/main/docs/installation.md) — foreground and macOS service paths, upgrades, moves, and uninstalling.
+- [Releases](https://github.com/voidfreud/mcp-gateway/blob/main/docs/releases.md) — versioning, PyPI publishing, and verified fallback artifacts.
+- [Admin guide](https://github.com/voidfreud/mcp-gateway/blob/main/docs/admin-guide.md) — editing, registration, and Virtual Tools.
+- [Configuration reference](https://github.com/voidfreud/mcp-gateway/blob/main/docs/configuration.md) — `config.toml`, backends, secrets, and behavior hooks.
+- [Operations](https://github.com/voidfreud/mcp-gateway/blob/main/docs/operations.md) — readiness, logs, recovery, and local verification boundaries.
+- [Security](https://github.com/voidfreud/mcp-gateway/blob/main/docs/security.md) — network exposure, bearer tokens, OAuth, and local trust boundaries.
+- [Security policy](https://github.com/voidfreud/mcp-gateway/blob/main/.github/SECURITY.md) — private vulnerability reporting and supported versions.
+- [Admin API](https://github.com/voidfreud/mcp-gateway/blob/main/docs/api.md) — scripting interface and API contracts.
 
 ## Contributing
 
 Work through pull requests, with CI as the shared baseline. Start with
-[CONTRIBUTING.md](CONTRIBUTING.md) and the repository's
-[agent instructions](AGENTS.md); they define the development workflow,
-validation expectations, and where to record deferred work.
+[CONTRIBUTING.md](https://github.com/voidfreud/mcp-gateway/blob/main/CONTRIBUTING.md)
+and the repository's
+[agent instructions](https://github.com/voidfreud/mcp-gateway/blob/main/AGENTS.md);
+they define the development workflow, validation expectations, and where to
+record deferred work.
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT. See [LICENSE](https://github.com/voidfreud/mcp-gateway/blob/main/LICENSE).

@@ -22,7 +22,7 @@ tool-specific instruction files.
 | Package metadata and current version | [pyproject.toml](pyproject.toml) |
 | Release history | [CHANGELOG.md](CHANGELOG.md) |
 | Automated checks and releases | [.github/workflows/](.github/workflows/) |
-| Versioning, release automation, and private release use | [docs/releases.md](docs/releases.md) |
+| Versioning, release automation, and verified release use | [docs/releases.md](docs/releases.md) |
 | Verification tiers and local release receipts | [docs/testing.md](docs/testing.md) |
 | Accepted architecture decisions and their process | [docs/decisions/](docs/decisions/README.md) |
 | Advertised MCP surface and safe gateway tuning | [.agents/skills/mcp-tool-design/SKILL.md](.agents/skills/mcp-tool-design/SKILL.md) |
