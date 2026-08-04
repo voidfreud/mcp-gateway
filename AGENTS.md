@@ -11,6 +11,8 @@ documented public behavior.
 This file is the canonical manual for people and coding agents working in this
 repository. Read it before changing the project. Do not copy its policy into
 tool-specific instruction files.
+Repository-owned agent guidance lives only in `AGENTS.md` and `.agents/`.
+Client-specific product documentation remains in the owning `docs/` pages.
 
 ## Where truth lives
 

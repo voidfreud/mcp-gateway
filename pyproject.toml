@@ -71,9 +71,10 @@ required-version = "==0.10.9"
 # corpus/ stores retained source pointers and provenance records rather than
 # lintable project code; our own code — including .agents/ skill scripts —
 # stays in scope.
-# .claude/worktrees holds agent checkouts (gitignored) — each runs its own
-# gate; linting them from the parent tree double-reports their WIP.
-extend-exclude = ["corpus", ".claude/worktrees"]
+# Agent worktrees are gitignored and run their own gates; linting them from the
+# parent tree double-reports their work in progress. Keep the provider-specific
+# compatibility path excluded until existing clients stop creating it.
+extend-exclude = ["corpus", ".agents/worktrees", ".claude/worktrees"]
 
 [tool.ruff.lint]
 # Extended set adopted in #89. Complexity leftovers carry per-line noqa with

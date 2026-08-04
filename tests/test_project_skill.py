@@ -169,16 +169,6 @@ def _write_skill_check_fixture(root: Path) -> None:
         "*\n!.gitignore\n!ABOUT.md\n", encoding="utf-8"
     )
     (research / "ABOUT.md").write_text("# Local research receipts\n", encoding="utf-8")
-    adapter = root / ".claude/skills/mcp-tool-design"
-    adapter.mkdir(parents=True)
-    (adapter / "SKILL.md").write_text(
-        "---\n"
-        "name: mcp-tool-design\n"
-        "description: A short valid adapter description.\n"
-        "---\n\n"
-        "# Claude Code adapter\n",
-        encoding="utf-8",
-    )
     corpus = root / "corpus"
     corpus.mkdir()
     (corpus / "RETENTION.md").write_text(
@@ -535,15 +525,11 @@ def test_skill_self_check_passes_from_an_unrelated_cwd(tmp_path: Path) -> None:
     assert check.main(cwd=tmp_path) == 0
 
 
-def test_skill_self_check_rejects_nested_adapter_file(tmp_path: Path) -> None:
-    check = _module(CHECK_PATH, "project_skill_check_nested_adapter")
+def test_skill_self_check_needs_only_canonical_agent_skill(tmp_path: Path) -> None:
+    check = _module(CHECK_PATH, "project_skill_check_canonical_agent")
     _write_skill_check_fixture(tmp_path)
-    nested = tmp_path / ".claude/skills/mcp-tool-design/anything/SKILL.md"
-    nested.parent.mkdir()
-    nested.write_text("not an adapter\n", encoding="utf-8")
     _init_git_repository(tmp_path)
-    diagnostics = check.check(tmp_path)
-    assert any(": claude-adapter:" in diagnostic for diagnostic in diagnostics)
+    assert check.check(tmp_path) == []
 
 
 def test_skill_self_check_allows_ignored_local_research_receipt(tmp_path: Path) -> None:
