@@ -74,7 +74,7 @@ of this — but it is here when you want it.
 |--------|------|------|----------|
 | POST | `/admin/api/backend` | `{name, transport, url?/command?/args?, auth_header?, auth_value?, headers?, auth?, headers_helper?, stateless?}` | Validates, connects, captures a baseline, and saves a new backend. When lifecycle mount hooks are available, it mounts live with `reloaded: "hot-add"`; a mount failure leaves the saved backend and returns `"mount-failed"` for repair/restart. Without those hooks it returns normal restart semantics (`"restarting"` when launchd-managed, otherwise `"dev-no-restart"`). `400` on a name clash, invalid fields, or a failed initial connection. |
 | DELETE | `/admin/api/backend/{name}` | — | Removes the backend and prunes its captured defaults. Returns normal restart semantics: `"restarting"` when launchd-managed, otherwise `"dev-no-restart"`. |
-| POST | `/admin/api/backend/{name}/rename` | `{value: "<new name>"}` | Hard rename (endpoint, config key, defaults, registration all move). With live mount hooks, it mounts the new route as `"hot-rename"`; a failed mount returns HTTP 500 as `"mount-failed-rolled-back"` after restoring the old configuration. Without those hooks it returns normal restart semantics. External MCP-client registrations still need updating. Response includes `old_endpoint`, `new_endpoint`, `old_registration`, `new_registration`. |
+| POST | `/admin/api/backend/{name}/rename` | `{value: "<new name>"}` | Hard rename (endpoint, config key, defaults, and registration name all move). With live mount hooks, it mounts the new route as `"hot-rename"`; a failed mount returns HTTP 500 as `"mount-failed-rolled-back"` after restoring the old configuration. Without those hooks it returns normal restart semantics. External MCP-client registrations still need updating. Response includes `old_endpoint`, `new_endpoint`, `old_registration`, `new_registration`. |
 | POST | `/admin/api/backend/{name}/display-name` | `{value: "<label>"}` | Sets the cosmetic display label (empty clears it). `{ok}`. No restart. |
 | POST | `/admin/api/backend/{name}/enabled` | `{value: bool}` | Enable (mount live) or disable (unmount) the backend. `{ok, reloaded: "in-process"}`. |
 | POST | `/admin/api/enabled` | `{value: bool}` | Master switch: enable/disable every backend, mounting or unmounting each. `{ok, reloaded: "in-process"}`. |
@@ -105,43 +105,12 @@ and `log_level`. It displays the two retention values read-only; set
 [configuration.md](configuration.md). All six values take effect after the
 managed restart, or after the next real restart in foreground/development mode.
 
-## Claude Code registration
+## Client registration
 
-These shell out to the `claude` CLI. A CLI *failure* is reported as `{ok:false}`
-at HTTP `200` (the HTTP call itself succeeded) with the command output; a missing
-`claude` binary or bad scope returns `400`. The bearer token, when present, is
-added to the registration and redacted from the response.
-
-| Method | Path | Body | Response |
-|--------|------|------|----------|
-| POST | `/admin/api/backend/{name}/register` | `{scope: "local"\|"user"\|"project"}` (default `local`) | Runs `claude mcp add` for `gateway-<name>` pointing at the backend's endpoint. `{ok, exit, stdout, stderr, command, note}`. |
-| POST | `/admin/api/backend/{name}/deregister` | `{scope}` | Runs `claude mcp remove gateway-<name>`. Works even if the backend is already gone (post-remove cleanup). Same response shape. |
-| GET | `/admin/api/cc-registrations` | — (`?fresh=1` busts the 60s cache) | Which configured backends are registered in Claude Code, parsed from `claude mcp list`. `{available, registered: {<backend>: bool}}`; `{available:false}` without the CLI. |
-| POST | `/admin/api/cc-reregister-all` | `{scope}` | Deregister + register every **enabled** backend, sequentially; one failure doesn't stop the rest. `{ok, count, ok_count, backends: [...]}`. |
-
-## Codex registration
-
-These routes use the `codex` CLI and keep every backend as a separate MCP
-server. Codex has no Claude-style registration scope. When gateway bearer auth
-is enabled, the configured token must be a single `${ENV_VAR}` reference; only
-the variable name is stored in Codex configuration.
-
-The register and deregister routes return `{ok, exit, stdout, stderr, command,
-note}` on every completed CLI invocation. A non-zero Codex exit is therefore
-an HTTP `200` response with `ok:false`, so callers can use the captured CLI
-receipt. If the CLI is unavailable, those mutation routes return `400` instead.
-`GET /admin/api/codex-registrations` always returns HTTP `200`: it returns
-`{available:false}` when the CLI is unavailable, `{available:true, ok:false,
-error}` when listing or parsing registrations fails, and `{available:true,
-ok:true, registered}` on success.
-
-| Method | Path | Body | Response |
-|--------|------|------|----------|
-| POST | `/admin/api/backend/{name}/codex/register` | `{}` | Runs `codex mcp add gateway-<name> --url <backend endpoint>`, with `--bearer-token-env-var` when applicable. The backend must exist. |
-| POST | `/admin/api/backend/{name}/codex/deregister` | `{}` | Runs `codex mcp remove gateway-<name>`. Works after the backend has been removed so cleanup remains possible. |
-| POST | `/admin/api/virtual/codex/register` | `{}` | Runs `codex mcp add gateway-virtual --url <virtual endpoint>`, with `--bearer-token-env-var` when applicable. |
-| POST | `/admin/api/virtual/codex/deregister` | `{}` | Runs `codex mcp remove gateway-virtual`. |
-| GET | `/admin/api/codex-registrations` | — (`?fresh=1` busts the 60s cache) | Exact registration state parsed from `codex mcp list --json`; see the response cases above. |
+The gateway does not register endpoints in MCP clients; registration happens in
+each client using its supported configuration or CLI. Every backend is served
+at its own `/<backend>/mcp` endpoint and the shared `/virtual/mcp` endpoint is
+independent of them. See the [admin guide](admin-guide.md).
 
 ## Virtual Tools
 

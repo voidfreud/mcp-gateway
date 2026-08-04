@@ -115,8 +115,8 @@ deployments but cannot be combined with `[oauth]`.
 
 | Key | Type | Default | Meaning |
 |-----|------|---------|---------|
-| `name` | string | required | The backend's route identity. Drives the `/<name>/mcp` endpoint, the config key, the captured-defaults file, and the `gateway-<name>` client registration. Letters, digits, `_`, `-`, up to 64 characters. `virtual`, `admin`, `health`, and `ready` are reserved (built-in routes) and rejected. A live rename hot-mounts the new route; registered clients still need re-registration. Stable Virtual Tool identity is the separate auto-managed `id`. |
-| `display_name` | string or unset | unset | Cosmetic label shown in the admin UI only. Does not affect routing, the endpoint, or registration. Empty falls back to `name`. |
+| `name` | string | required | The backend's route identity. Drives the `/<name>/mcp` endpoint, the config key, the captured-defaults file, and the `gateway-<name>` server name clients register it under. Letters, digits, `_`, `-`, up to 64 characters. `virtual`, `admin`, `health`, and `ready` are reserved (built-in routes) and rejected. A live rename hot-mounts the new route; registered clients still need re-registration. Stable Virtual Tool identity is the separate auto-managed `id`. |
+| `display_name` | string or unset | unset | Cosmetic label shown in the admin UI only. Does not affect routing, the endpoint, or the registered server name. Empty falls back to `name`. |
 | `transport` | `"http"` \| `"streamable-http"` \| `"sse"` \| `"stdio"` | required | How to reach the backend. `http` and `streamable-http` are the same modern remote transport; `sse` is the legacy remote transport; `stdio` runs a local command. |
 | `url` | string or unset | unset | The backend's URL. **Required for `http`/`streamable-http`/`sse`.** May contain `${ENV}` references. |
 | `auth_header` | string or unset | unset | Name of an auth header to send (for example `Authorization`). Set **both** `auth_header` and `auth_value` or neither. |

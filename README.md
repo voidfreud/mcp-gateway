@@ -58,9 +58,9 @@ mcp-gateway --service-status
 mcp-gateway --uninstall-service
 ```
 
-Open <http://127.0.0.1:9100/admin> to import or edit backends. If the relevant
-client CLI is installed, the Admin UI can register independent endpoints in
-Claude Code and Codex; otherwise register `/<backend>/mcp` manually.
+Open <http://127.0.0.1:9100/admin> to import or edit backends. Each backend is
+served at its own `/<backend>/mcp` endpoint; register that endpoint using the
+MCP client's supported configuration or CLI.
 
 A fresh run normally creates `~/.config/mcp-gateway/config.toml`. The bundled
 DeepWiki and Context7 examples make outbound requests while capturing their
@@ -74,7 +74,7 @@ The [installation guide](https://github.com/voidfreud/mcp-gateway/blob/main/docs
 covers the verified GitHub Release fallback, checkout development,
 configuration selection, and complete service lifecycle. See the
 [Admin guide](https://github.com/voidfreud/mcp-gateway/blob/main/docs/admin-guide.md)
-for client registration.
+for registering endpoints in MCP clients.
 
 ## Running and updating
 
@@ -110,7 +110,8 @@ swap. Contributors deploying a checkout can continue to use guarded
 
 - Tool, parameter, resource, prompt, and server-instruction text.
 - Visibility, injected defaults, output budgets, and per-tool behavior hooks.
-- Backend configuration and independent client registrations.
+- Backend configuration and the independent per-backend `/<backend>/mcp`
+  endpoints clients register.
 - Gateway-owned Virtual Tools that compose or route backend tools at
   `/virtual/mcp`.
 
@@ -130,7 +131,7 @@ only suitable for an equivalent unprotected test instance.
 
 - [Installation](https://github.com/voidfreud/mcp-gateway/blob/main/docs/installation.md) — foreground and macOS service paths, upgrades, moves, and uninstalling.
 - [Releases](https://github.com/voidfreud/mcp-gateway/blob/main/docs/releases.md) — versioning, PyPI publishing, and verified fallback artifacts.
-- [Admin guide](https://github.com/voidfreud/mcp-gateway/blob/main/docs/admin-guide.md) — editing, registration, and Virtual Tools.
+- [Admin guide](https://github.com/voidfreud/mcp-gateway/blob/main/docs/admin-guide.md) — editing, registering endpoints in MCP clients, and Virtual Tools.
 - [Configuration reference](https://github.com/voidfreud/mcp-gateway/blob/main/docs/configuration.md) — `config.toml`, backends, secrets, and behavior hooks.
 - [Operations](https://github.com/voidfreud/mcp-gateway/blob/main/docs/operations.md) — readiness, logs, recovery, and local verification boundaries.
 - [Security](https://github.com/voidfreud/mcp-gateway/blob/main/docs/security.md) — network exposure, bearer tokens, OAuth, and local trust boundaries.

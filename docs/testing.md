@@ -48,7 +48,7 @@ manual review concern.
 ### Required local release receipt, when applicable
 
 CI cannot validate a developer's machine. For a release that touches the
-daemon, installer, registration, credentials, or live backend behavior, obtain
+daemon, installer, credentials, or live backend behavior, obtain
 authorization and attach a redacted receipt to the release-acceptance Issue.
 Do not run stateful commands merely to fill out the receipt.
 
@@ -60,8 +60,6 @@ Scope: <what was authorized>; credentials/backends: <available | unavailable | n
 
 - install/update/uninstall: PASS | FAIL | NOT RUN | NOT APPLICABLE — <redacted evidence>
 - daemon lifecycle and /health,/ready: PASS | FAIL | NOT RUN | NOT APPLICABLE — <redacted evidence>
-- Claude Code registration: PASS | FAIL | NOT RUN | NOT APPLICABLE — <redacted evidence>
-- Codex registration: PASS | FAIL | NOT RUN | NOT APPLICABLE — <redacted evidence>
 - live backend or harness integration: PASS | FAIL | NOT RUN | NOT APPLICABLE — <redacted evidence>
 
 Secrets omitted: yes

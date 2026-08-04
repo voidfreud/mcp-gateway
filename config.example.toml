@@ -34,7 +34,8 @@ log_file = "~/.local/state/mcp-gateway/gateway.log"
 # MCP endpoint AND the admin API (/health, /ready and the bare GET /admin page
 # stay open; the UI prompts once and keeps the token in localStorage). The bind is loopback-only
 # already; this additionally shuts out curious local processes. ${ENV} ref,
-# resolved once at startup. Claude Code passes it at registration:
+# resolved once at startup. Clients pass it when registering the endpoint,
+# e.g. Claude Code:
 #   claude mcp add --transport http --header "Authorization: Bearer ${MCP_GATEWAY_TOKEN}" gateway-<name> http://127.0.0.1:9100/<name>/mcp
 # bearer_token = "${MCP_GATEWAY_TOKEN}"
 
@@ -63,11 +64,12 @@ log_file = "~/.local/state/mcp-gateway/gateway.log"
 # id = "1d78c28d-9cb5-4b69-b6ca-efdc17862822" # stable Virtual Tool identity;
                                    # assigned/persisted automatically on first use
 name = "exa"                       # routing identity: drives the /exa/mcp
-                                   # endpoint + the gateway-exa Claude Code
-                                   # registration. Renaming it is a topology
-                                   # change (admin "Rename…", #44): restart +
-                                   # CC re-registration. Cosmetic label ->
-                                   # display_name instead (#42).
+                                   # endpoint and the gateway-exa server name
+                                   # clients register it under. Renaming it is
+                                   # a topology change (admin "Rename…", #44):
+                                   # restart + client re-registration.
+                                   # Cosmetic label -> display_name instead
+                                   # (#42).
 transport = "http"
 url = "https://your-exa-endpoint/mcp"
 auth_header = "Authorization"      # optional; set BOTH or NEITHER

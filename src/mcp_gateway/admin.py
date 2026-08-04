@@ -17,7 +17,6 @@ import asyncio
 import json
 import os
 import re
-import shutil
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -32,14 +31,10 @@ from starlette.routing import Route
 
 from mcp_gateway import (
     admin_routes_backend,
-    admin_routes_claude,
-    admin_routes_codex,
     admin_routes_logs,
     admin_routes_ops,
     admin_routes_settings,
     admin_routes_virtual,
-    claude_client,
-    codex_client,
     logging_setup,
     runtime,
     updates,
@@ -47,19 +42,6 @@ from mcp_gateway import (
 from mcp_gateway import config_loader as cl
 from mcp_gateway import hooks as hooks_mod
 from mcp_gateway import virtual_tools as virtual_mod
-from mcp_gateway.claude_client import (
-    CC_REG_CACHE_TTL,
-    CLAUDE_CLI_TIMEOUT,
-    claude_mcp_command,
-    parse_cc_registrations,
-)
-from mcp_gateway.codex_client import (
-    CODEX_CLI_TIMEOUT,
-    CODEX_REG_CACHE_TTL,
-    codex_bearer_env_var,
-    codex_mcp_command,
-    parse_codex_registrations,
-)
 from mcp_gateway.config_loader import (
     Backend,
     GatewayConfig,
@@ -1694,28 +1676,6 @@ def restart_daemon(log) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Claude Code + Codex registration state (#45/#46)
-# ---------------------------------------------------------------------------
-
-# The client modules own the CLI contracts.  Caches remain in this composition
-# root because route dependencies intentionally resolve them dynamically: old
-# integrations and tests can still replace ``mcp_gateway.admin._*_reg_cache``.
-CLAUDE_SCOPES = claude_client.CLAUDE_SCOPES
-_cc_reg_cache: dict[str, Any] = {"ts": 0.0, "output": None}
-_codex_reg_cache: dict[str, Any] = {"ts": 0.0, "output": None}
-
-
-def claude_cli_path() -> str | None:
-    """Compatibility seam that keeps Admin's ``shutil.which`` patchable."""
-    return claude_client.claude_cli_path(which=shutil.which)
-
-
-def codex_cli_path() -> str | None:
-    """Compatibility seam that keeps Admin's ``shutil.which`` patchable."""
-    return codex_client.codex_cli_path(which=shutil.which)
-
-
-# ---------------------------------------------------------------------------
 # Route registration
 # ---------------------------------------------------------------------------
 
@@ -2118,53 +2078,6 @@ async def admin_refresh(ctx: _AdminCtx, b: Backend, *, force: bool = False) -> d
     )
 
 
-def _claude_routes(ctx: _AdminCtx) -> list[Route]:
-    """Compatibility facade for the independently testable Claude route group."""
-
-    def deps() -> admin_routes_claude.ClaudeRouteDeps:
-        # Resolve facade globals at request time so existing callers and tests
-        # can continue to monkeypatch mcp_gateway.admin collaborators.
-        return admin_routes_claude.ClaudeRouteDeps(
-            cli_path=claude_cli_path,
-            command=claude_mcp_command,
-            parse_registrations=parse_cc_registrations,
-            error=_err,
-            needs_json=_needs_json,
-            cache=_cc_reg_cache,
-            cache_ttl=CC_REG_CACHE_TTL,
-            monotonic=time.monotonic,
-            subprocess_run=subprocess.run,
-            cli_timeout=CLAUDE_CLI_TIMEOUT,
-        )
-
-    return admin_routes_claude.claude_routes(ctx, deps)
-
-
-def _codex_routes(ctx: _AdminCtx) -> list[Route]:
-    """Compatibility facade for the independently testable Codex route group."""
-
-    def deps() -> admin_routes_codex.CodexRouteDeps:
-        # Resolve these facade globals at request time. Existing callers and
-        # tests patch ``mcp_gateway.admin`` directly, including replacing the
-        # cache dictionary, so capturing any of them here would be a regression.
-        return admin_routes_codex.CodexRouteDeps(
-            cli_path=codex_cli_path,
-            command=codex_mcp_command,
-            bearer_env_var=codex_bearer_env_var,
-            parse_registrations=parse_codex_registrations,
-            error=_err,
-            needs_json=_needs_json,
-            cache=_codex_reg_cache,
-            cache_ttl=CODEX_REG_CACHE_TTL,
-            monotonic=time.monotonic,
-            subprocess_run=subprocess.run,
-            cli_timeout=CODEX_CLI_TIMEOUT,
-            virtual_route=virtual_mod.VIRTUAL_ROUTE,
-        )
-
-    return admin_routes_codex.codex_routes(ctx, deps)
-
-
 def _ops_routes(ctx: _AdminCtx) -> list[Route]:
     """Compatibility facade for the independently testable operational routes."""
 
@@ -2229,8 +2142,6 @@ def register(  # noqa: PLR0913, PLR0917 — public API; callers pass the lifespa
             *_settings_routes(ctx),
             *_gateway_settings_routes(ctx),
             *_backend_routes(ctx),
-            *_claude_routes(ctx),
-            *_codex_routes(ctx),
             *_virtual_routes(ctx),
             *_ops_routes(ctx),
         ]
