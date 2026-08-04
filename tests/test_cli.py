@@ -537,6 +537,7 @@ def patched_service(monkeypatch):
     The returned log compares like a plain list (``== [("install", ...)]``)
     and exposes ``.results`` so a test can swap a canned return value.
     """
+    monkeypatch.setattr(cli.sys, "platform", "darwin")
     calls = _ServiceCallLog(
         {
             "install": service.InstallResult(True, True, False, False),
@@ -632,6 +633,14 @@ def test_service_status_subcommand(patched_service):
     assert rc == 0
     assert patched_service == [("status", (), {})]
     assert "service: loaded" in out
+
+
+def test_service_status_rejects_non_macos(monkeypatch):
+    monkeypatch.setattr(cli.sys, "platform", "linux")
+    rc, out, err = run_cli(["service", "status"])
+    assert rc == 1
+    assert out == ""
+    assert "available only for the macOS resident service" in err
 
 
 def test_service_uninstall_requires_yes(patched_service):
