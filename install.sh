@@ -47,7 +47,7 @@ if [ "$UNINSTALL" -eq 1 ]; then
 fi
 
 if [ "$DRY_RUN" -eq 1 ]; then
-    echo "[dry-run] uv tool install --force $REPO_ROOT"
+    echo "[dry-run] uv tool install --force --no-cache $REPO_ROOT"
     echo "[dry-run] $TOOL --install-service --restart"
     echo "dry run complete — nothing was changed."
     exit 0
@@ -58,7 +58,7 @@ if ! command -v uv >/dev/null 2>&1; then
     exit 1
 fi
 
-uv tool install --force "$REPO_ROOT"
+uv tool install --force --no-cache "$REPO_ROOT"
 if [ ! -x "$TOOL" ]; then
     echo "error: uv did not create the stable shim at $TOOL" >&2
     exit 1
