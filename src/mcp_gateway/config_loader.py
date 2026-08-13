@@ -26,6 +26,7 @@ import subprocess
 import sys
 import tempfile
 import tomllib
+import weakref
 from collections.abc import Callable
 from copy import deepcopy
 from pathlib import Path
@@ -40,6 +41,7 @@ from pydantic import (
     BaseModel,
     Field,
     TypeAdapter,
+    ValidationInfo,
     field_validator,
     model_validator,
 )
@@ -198,6 +200,136 @@ def expand_env_required(value: str, what: str) -> str:
 # Models
 # ---------------------------------------------------------------------------
 
+# #286: configurable UTF-8 byte caps on the metadata the gateway broadcasts
+# (server instructions + tool descriptions). Claude Code truncates each MCP
+# server's ``instructions`` at ~2KB and applies its own tool-description
+# budget, so operators can pin these explicitly. The instructions cap defaults
+# to 2048 and is NEVER unbounded; the tool-description cap defaults to None =
+# unbounded (the gateway global is the only level where None means unbounded —
+# at backend/tool level None means "inherit").
+DEFAULT_SERVER_INSTRUCTIONS_MAX_BYTES = 2_048
+# Strict ceiling shared by every metadata byte cap (1 MiB): larger values are
+# configuration errors, not "very generous limits".
+MAX_METADATA_LIMIT_BYTES = 1_048_576
+
+
+# Metadata byte budgets are counted in UTF-8 bytes (the unit MCP clients and
+# Claude Code enforce), not characters.
+
+
+def utf8_byte_len(text: str) -> int:
+    """The UTF-8 byte length of *text*."""
+    return len(text.encode("utf-8"))
+
+
+def utf8_truncate(text: str, limit: int) -> str:
+    """Return *text* truncated to at most *limit* UTF-8 bytes.
+
+    The cut lands on a code-point boundary: a partial multi-byte sequence at
+    the end is dropped, never emitted (issue #93's byte-boundary rule). A
+    string already within *limit* is returned unchanged.
+    """
+    if utf8_byte_len(text) <= limit:
+        return text
+    return text.encode("utf-8")[:limit].decode("utf-8", errors="ignore")
+
+
+def sanitize_captured_text(text: str) -> tuple[str, int]:
+    """Replace surrogate-range scalars in *text* with U+FFFD.
+
+    Captured upstream metadata may carry lone surrogates (invalid UTF-8 that
+    would raise ``UnicodeEncodeError`` when broadcast). Every surrogate scalar
+    (U+D800-U+DFFF — JSON combines real pairs before this point) becomes one
+    U+FFFD. Returns ``(sanitized, replaced)`` where *replaced* counts the
+    exchanged surrogate scalars; clean text returns ``(text, 0)`` unchanged.
+    Never raises and never echoes the text anywhere.
+    """
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        pass
+    else:
+        return text, 0
+    replaced = 0
+    parts = []
+    for ch in text:
+        if "\ud800" <= ch <= "\udfff":
+            parts.append("\ufffd")
+            replaced += 1
+        else:
+            parts.append(ch)
+    return "".join(parts), replaced
+
+
+def _warn_captured_metadata_sanitized(  # noqa: PLR0913 - one named field per event contract
+    *,
+    backend: str,
+    kind: Literal["tool_description", "server_instructions"],
+    sanitized_scalars: int,
+    captured_bytes: int,
+    tool: str | None = None,
+    limit_bytes: int | None = None,
+    truncated_bytes: int | None = None,
+) -> None:
+    """Content-free structured warning: captured metadata was sanitized.
+
+    Only identities and counts — never the text, positions, or code points.
+    """
+    fields: dict[str, object] = {
+        "backend": backend,
+        "kind": kind,
+        "sanitized_scalars": sanitized_scalars,
+        "captured_bytes": captured_bytes,
+    }
+    if tool is not None:
+        fields["tool"] = tool
+    if limit_bytes is not None:
+        fields["limit_bytes"] = limit_bytes
+    if truncated_bytes is not None:
+        fields["truncated_bytes"] = truncated_bytes
+    structlog.get_logger("mcp-gateway").warning("captured_metadata_sanitized", **fields)
+
+
+def _check_authored_text_encodable(value: str, field: str) -> None:
+    """Reject a lone surrogate in AUTHORED text with a content-free error.
+
+    Authored config text must be valid UTF-8 (it is byte-counted and written
+    verbatim); captured text is sanitized instead (see
+    :func:`sanitize_captured_text`). The ``ConfigError`` names *field* and the
+    surrogate's character position — never the text itself.
+    """
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ConfigError(
+            f"{field} contains an unpaired surrogate at position {exc.start}"
+        ) from exc
+
+
+def _check_metadata_byte_limit(v, field: str) -> int | None:
+    """Strict optional byte-limit check: an ``int`` in ``1..MAX_METADATA_LIMIT_BYTES``
+    or ``None``.
+
+    Rejects bools (an int subclass) and anything pydantic's lax coercion could
+    launder into an int; callers use ``mode="before"`` so this sees the raw
+    value. ``None`` is the "inherit/unbounded" marker and passes through.
+    """
+    if v is None:
+        return None
+    if isinstance(v, bool) or not isinstance(v, int):
+        # report only the input TYPE, never the value: the raw text (or
+        # whatever the caller passed) must not leak into error output
+        raise ConfigError(
+            f"{field} must be an integer byte limit between 1 and "
+            f"{MAX_METADATA_LIMIT_BYTES} (got {type(v).__name__})"
+        )
+    if not 1 <= v <= MAX_METADATA_LIMIT_BYTES:
+        raise ConfigError(
+            f"{field} must be an integer byte limit between 1 and "
+            f"{MAX_METADATA_LIMIT_BYTES}"
+        )
+    return v
+
 
 class ParamOverride(BaseModel, extra="forbid"):
     """Rewrite (or hide) one parameter of a backend tool."""
@@ -237,6 +369,9 @@ class ToolOverride(BaseModel, extra="forbid", populate_by_name=True):
     # for text content — raise it for bulk readers, lower it for chatty tools.
     # None = no cap override (the client default applies).
     max_result_chars: int | None = None
+    # #286: per-tool cap on the broadcast description's UTF-8 bytes (precedence
+    # tool > backend > gateway). None = inherit the backend/gateway cap.
+    description_max_bytes: int | None = None
     # #16: behavior hooks — "module:function" specs resolved in the hooks dir
     # (see hooks.py; NEVER evaluated as code). The TOML key is `validate`; the
     # field is aliased because `validate` shadows a pydantic BaseModel attr.
@@ -260,6 +395,34 @@ class ToolOverride(BaseModel, extra="forbid", populate_by_name=True):
                 f"max_result_chars must be a positive integer (got {v!r})"
             )
         return v
+
+    @field_validator("description_max_bytes", mode="before")
+    @classmethod
+    def _check_description_max_bytes(cls, v) -> int | None:
+        return _check_metadata_byte_limit(v, "description_max_bytes")
+
+    @model_validator(mode="after")
+    def _check_description_byte_limit(self) -> ToolOverride:
+        # Standalone guard: an authored description over THIS tool's own cap is
+        # always invalid, wherever the override was constructed. The full
+        # effective (tool > backend > gateway) check runs in GatewayConfig
+        # validation, where the other levels are visible.
+        if self.description is not None:
+            # Lone surrogates can't be byte-counted or written as UTF-8;
+            # reject with the field name + position, never the text.
+            _check_authored_text_encodable(
+                self.description, f"tool {self.original!r} description"
+            )
+            if (
+                self.description_max_bytes is not None
+                and utf8_byte_len(self.description) > self.description_max_bytes
+            ):
+                raise ConfigError(
+                    f"tool {self.original!r}: description is "
+                    f"{utf8_byte_len(self.description)} UTF-8 bytes; the tool cap "
+                    f"is {self.description_max_bytes} bytes"
+                )
+        return self
 
     @field_validator("validate_", "post_process")
     @classmethod
@@ -413,11 +576,22 @@ class Backend(BaseModel, extra="forbid"):
     # (see admin defaults); a string replaces it in the gateway's composed
     # instructions. Set even when the backend sends none, to add your own.
     instructions: str | None = None
+    # #286: optional per-backend caps overriding the gateway globals
+    # (backend > gateway). None = inherit the gateway value.
+    server_instructions_max_bytes: int | None = None
+    tool_description_max_bytes: int | None = None
     tools: list[ToolOverride] = Field(default_factory=list)
     # #15: broadcast-text overrides for resources/templates (keyed by uri) and
     # prompts (keyed by original name) — the same diff-vs-default model as tools.
     resources: list[ResourceOverride] = Field(default_factory=list)
     prompts: list[PromptOverride] = Field(default_factory=list)
+
+    @field_validator(
+        "server_instructions_max_bytes", "tool_description_max_bytes", mode="before"
+    )
+    @classmethod
+    def _check_metadata_byte_limit(cls, v, info: ValidationInfo) -> int | None:
+        return _check_metadata_byte_limit(v, info.field_name)
 
     @field_validator("auth_value")
     @classmethod
@@ -429,6 +603,29 @@ class Backend(BaseModel, extra="forbid"):
                 "raw credentials do not belong in config.toml"
             )
         return value
+
+    @model_validator(mode="after")
+    def _check_instructions_byte_limit(self) -> Backend:
+        # Standalone guard: an authored override over THIS backend's own cap is
+        # always invalid. The effective (backend > gateway) check runs in
+        # GatewayConfig validation, where the gateway global is visible.
+        if self.instructions is not None:
+            # Lone surrogates can't be byte-counted or written as UTF-8;
+            # reject with the field name + position, never the text.
+            _check_authored_text_encodable(
+                self.instructions, f"backend {self.name!r} instructions"
+            )
+            if (
+                self.server_instructions_max_bytes is not None
+                and utf8_byte_len(self.instructions)
+                > self.server_instructions_max_bytes
+            ):
+                raise ConfigError(
+                    f"backend {self.name!r}: instructions are "
+                    f"{utf8_byte_len(self.instructions)} UTF-8 bytes; the backend "
+                    f"cap is {self.server_instructions_max_bytes} bytes"
+                )
+        return self
 
     @field_validator("headers")
     @classmethod
@@ -764,10 +961,24 @@ class VirtualTool(BaseModel, extra="forbid"):
         le=MAX_VIRTUAL_ROUTING_INPUT_CHARS,
     )
     max_result_bytes: int = Field(default=262_144, ge=1_024, le=16_777_216)
+    # #286: cap on this Virtual Tool's broadcast description UTF-8 bytes.
+    # None = inherit the gateway-global tool_description_max_bytes (None there
+    # means unbounded).
+    description_max_bytes: int | None = None
     failure_policy: Literal["partial", "strict"] = "partial"
+
+    @field_validator("description_max_bytes", mode="before")
+    @classmethod
+    def _check_description_max_bytes(cls, v) -> int | None:
+        return _check_metadata_byte_limit(v, "description_max_bytes")
 
     @model_validator(mode="after")
     def _check(self) -> VirtualTool:  # noqa: PLR0912 - cohesive model invariants
+        # Lone surrogates can't be byte-counted or written as UTF-8; reject
+        # with the field name + position, never the text.
+        _check_authored_text_encodable(
+            self.description, f"virtual tool {self.name!r} description"
+        )
         if not re.fullmatch(_VIRTUAL_NAME_RE, self.name):
             raise ConfigError(
                 f"invalid virtual tool name {self.name!r}: use only letters, "
@@ -775,6 +986,15 @@ class VirtualTool(BaseModel, extra="forbid"):
             )
         if not self.description.strip():
             raise ConfigError(f"virtual tool {self.name!r}: description is required")
+        if (
+            self.description_max_bytes is not None
+            and utf8_byte_len(self.description) > self.description_max_bytes
+        ):
+            raise ConfigError(
+                f"virtual tool {self.name!r}: description is "
+                f"{utf8_byte_len(self.description)} UTF-8 bytes; the tool cap "
+                f"is {self.description_max_bytes} bytes"
+            )
         if not self.members:
             raise ConfigError(
                 f"virtual tool {self.name!r}: at least one member is required"
@@ -1037,8 +1257,34 @@ class GatewayConfig(BaseModel, extra="forbid"):
     # endpoint and /virtual/mcp gets its own audience and RFC 9728 metadata.
     # The legacy bearer_token and OAuth profile are mutually exclusive.
     oauth: OAuthConfig | None = None
+    # #286: UTF-8 byte caps on the metadata the gateway broadcasts. The
+    # server-instructions cap defaults to 2048 and is NEVER unbounded; the
+    # tool-description cap defaults to None = unbounded. Backend/tool-level
+    # None means inherit — the gateway global is the only level where None
+    # means unbounded.
+    server_instructions_max_bytes: int = Field(
+        default=DEFAULT_SERVER_INSTRUCTIONS_MAX_BYTES
+    )
+    tool_description_max_bytes: int | None = None
     backends: list[Backend] = Field(default_factory=list)
     virtual_tools: list[VirtualTool] = Field(default_factory=list)
+
+    @field_validator("server_instructions_max_bytes", mode="before")
+    @classmethod
+    def _check_server_instructions_max_bytes(cls, v) -> int:
+        checked = _check_metadata_byte_limit(v, "server_instructions_max_bytes")
+        if checked is None:
+            raise ConfigError(
+                f"server_instructions_max_bytes must be an integer byte limit "
+                f"between 1 and {MAX_METADATA_LIMIT_BYTES} (got "
+                f"{type(v).__name__})"
+            )
+        return checked
+
+    @field_validator("tool_description_max_bytes", mode="before")
+    @classmethod
+    def _check_tool_description_max_bytes(cls, v) -> int | None:
+        return _check_metadata_byte_limit(v, "tool_description_max_bytes")
 
     @field_validator("bearer_token")
     @classmethod
@@ -1051,6 +1297,45 @@ class GatewayConfig(BaseModel, extra="forbid"):
                 "raw credentials do not belong in config.toml"
             )
         return value
+
+    def _check_authored_metadata_limits(self) -> None:
+        """Reject authored metadata outside its effective UTF-8 byte cap."""
+        for backend in self.backends:
+            instructions_limit = effective_server_instructions_limit(self, backend)
+            if (
+                backend.instructions is not None
+                and utf8_byte_len(backend.instructions) > instructions_limit
+            ):
+                raise ConfigError(
+                    f"backend {backend.name!r}: instructions are "
+                    f"{utf8_byte_len(backend.instructions)} UTF-8 bytes; the "
+                    f"effective cap is {instructions_limit} bytes"
+                )
+            for tool in backend.tools:
+                description_limit = effective_tool_description_limit(
+                    self, backend, tool
+                )
+                if (
+                    description_limit is not None
+                    and tool.description is not None
+                    and utf8_byte_len(tool.description) > description_limit
+                ):
+                    raise ConfigError(
+                        f"backend {backend.name!r} tool {tool.original!r}: "
+                        f"description is {utf8_byte_len(tool.description)} UTF-8 "
+                        f"bytes; the effective cap is {description_limit} bytes"
+                    )
+        for tool in self.virtual_tools:
+            description_limit = effective_virtual_description_limit(self, tool)
+            if (
+                description_limit is not None
+                and utf8_byte_len(tool.description) > description_limit
+            ):
+                raise ConfigError(
+                    f"virtual tool {tool.name!r}: description is "
+                    f"{utf8_byte_len(tool.description)} UTF-8 bytes; the "
+                    f"effective cap is {description_limit} bytes"
+                )
 
     @model_validator(mode="after")
     def _check_backends(self) -> GatewayConfig:
@@ -1093,6 +1378,9 @@ class GatewayConfig(BaseModel, extra="forbid"):
                         f"virtual tool {tool.name!r}: member references unknown "
                         f"backend id {member.backend_id!r}"
                     )
+        # Authored values are rejected; captured upstream values are truncated
+        # only at their outgoing transformation points.
+        self._check_authored_metadata_limits()
         # #18: a non-loopback bind exposes config writes and tool execution to
         # the network, so it is refused without static bearer or OAuth auth.
         if (
@@ -1114,6 +1402,85 @@ class GatewayConfig(BaseModel, extra="forbid"):
                 "oauth.admin_bearer_token to protect the Admin API"
             )
         return self
+
+
+def _resolve_backend(cfg: GatewayConfig, backend: Backend | str) -> Backend:
+    """Accept a ``Backend`` or a backend NAME (the Admin API works by name)."""
+    if isinstance(backend, str):
+        found = next((x for x in cfg.backends if x.name == backend), None)
+        if found is None:
+            raise ConfigError(f"unknown backend {backend!r}")
+        return found
+    return backend
+
+
+# #286: effective metadata byte limits. These are the single source of truth
+# for the precedence rules (backend > gateway for instructions; tool > backend
+# > gateway for descriptions; None = inherit except at the gateway top level,
+# where None = unbounded). Validation, the Admin API/state, the CLI, and the
+# outgoing transforms all resolve caps through these helpers.
+
+
+def effective_server_instructions_limit(
+    cfg: GatewayConfig, backend: Backend | str
+) -> int:
+    """The UTF-8 byte cap on ONE backend's composed server instructions.
+
+    The backend override wins over the gateway global; the gateway global
+    defaults to :data:`DEFAULT_SERVER_INSTRUCTIONS_MAX_BYTES` and is never
+    unbounded.
+    """
+    b = _resolve_backend(cfg, backend)
+    if b.server_instructions_max_bytes is not None:
+        return b.server_instructions_max_bytes
+    return cfg.server_instructions_max_bytes
+
+
+def _resolve_description_limit(
+    tool_cap: int | None, backend: Backend, cfg: GatewayConfig
+) -> int | None:
+    """Description-cap resolution below the tool level (backend > gateway)."""
+    if backend.tool_description_max_bytes is not None:
+        return backend.tool_description_max_bytes
+    return cfg.tool_description_max_bytes
+
+
+def effective_tool_description_limit(
+    cfg: GatewayConfig,
+    backend: Backend | str,
+    tool: ToolOverride | str,
+) -> int | None:
+    """The UTF-8 byte cap on ONE backend tool's broadcast description.
+
+    Precedence: tool > backend > gateway. ``None`` at the tool/backend level
+    means inherit the next level up; a ``None`` gateway global means no cap at
+    all (the default — unbounded). *tool* may be a ``ToolOverride`` or an
+    original tool NAME (a tool without an override entry uses only the
+    backend/gateway caps).
+    """
+    b = _resolve_backend(cfg, backend)
+    if isinstance(tool, str):
+        override = next((x for x in b.tools if x.original == tool), None)
+        tool_cap = override.description_max_bytes if override is not None else None
+    else:
+        tool_cap = tool.description_max_bytes
+    if tool_cap is not None:
+        return tool_cap
+    return _resolve_description_limit(None, b, cfg)
+
+
+def effective_virtual_description_limit(
+    cfg: GatewayConfig, tool: VirtualTool
+) -> int | None:
+    """The UTF-8 byte cap on ONE Virtual Tool's broadcast description.
+
+    ``None`` means inherit the gateway-global tool cap; a ``None`` global
+    means unbounded (the default). Virtual-tool descriptions are authored, so
+    this limit is enforced by rejection at validation, never truncation.
+    """
+    if tool.description_max_bytes is not None:
+        return tool.description_max_bytes
+    return cfg.tool_description_max_bytes
 
 
 # ---------------------------------------------------------------------------
@@ -1286,7 +1653,39 @@ def tool_hook_fn(backend_name: str, tool: ToolOverride):
 
 
 class _SchemaPreservingToolTransform(ToolTransform):
-    """Keep proxied root definitions that FastMCP's transform inlines."""
+    """Keep proxied root definitions that FastMCP's transform inlines, and
+    enforce #286 description byte caps on CAPTURED upstream descriptions.
+
+    Authored override descriptions were validated against the effective cap at
+    config load, so they pass through untouched; only descriptions captured
+    from the upstream catalog are sanitized (lone surrogates become U+FFFD
+    before byte counting) and truncated here — at a UTF-8 boundary, with
+    structured warnings that never include the text. The truncation warning
+    fires at most once per (backend, original tool, cap, captured size)
+    signature per broadcast session (the transform instance); it re-fires
+    only when the captured description or the cap changes.
+    """
+
+    def __init__(
+        self,
+        transforms: dict[str, ToolTransformConfig],
+        description_caps: dict[str, int | None] | None = None,
+        backend_name: str | None = None,
+        default_description_cap: int | None = None,
+    ) -> None:
+        super().__init__(transforms)
+        # original tool name -> effective description byte cap (None = unbounded)
+        self._description_caps = description_caps or {}
+        # Live catalogs can gain tools before captured defaults refresh. Such
+        # tools inherit the backend/gateway cap rather than bypassing it.
+        self._default_description_cap = default_description_cap
+        self._backend_name = backend_name
+        # #286 dedup: one `tool_description_truncated` warning per broadcast
+        # session and per (backend, original tool, cap, captured size)
+        # signature — repeated tools/list and tools/get calls on the same
+        # captured description must not spam the log. The memo stores the
+        # captured (sanitized) text so a changed description or cap re-warns.
+        self._truncation_warned: dict[tuple[str | None, str, int, int], str] = {}
 
     @staticmethod
     def _restore_definitions(tool):
@@ -1301,13 +1700,101 @@ class _SchemaPreservingToolTransform(ToolTransform):
         tool.parameters["$defs"] = definitions
         return tool
 
+    def _cap_captured_description(self, tool):
+        """Sanitize and truncate a captured (non-authored) description.
+
+        Lone surrogates in the upstream text are replaced with U+FFFD BEFORE
+        byte counting, so the byte budget applies to the sanitized length.
+        Sanitization and truncation both warn content-free.
+
+        Identity is the RAW source tool name — the name the tool carried when
+        it entered this transform (``TransformedTool.parent_tool``), never a
+        reverse lookup from the broadcast name a rename override emitted. A
+        reverse lookup misattributes a native live tool whose name collides
+        with a stale rename target (``old -> new`` while the catalog natively
+        gained ``new``) to the stale entry: its authored description would
+        skip capping entirely and its per-tool cap would displace the
+        backend/global fallback.
+        """
+        parent = getattr(tool, "parent_tool", None)
+        original = parent.name if parent is not None else tool.name
+        config = self._transforms.get(original)
+        if config is not None and config.description is not None:
+            return tool  # authored override — rejected at load if over limit
+        cap = self._description_caps.get(original, self._default_description_cap)
+        text = tool.description or ""
+        try:
+            # Single encode in the clean common path; the buffer feeds the
+            # size check, the UTF-8-boundary truncation, and the byte counts.
+            buf = text.encode("utf-8")
+            sanitized, replaced = text, 0
+        except UnicodeEncodeError:
+            # Lone surrogates: sanitize first, then byte-count the sanitized
+            # text so the budget applies to what is actually broadcast.
+            sanitized, replaced = sanitize_captured_text(text)
+            buf = sanitized.encode("utf-8")
+        if cap is None:
+            if not replaced:
+                return tool
+            size = len(buf)
+            _warn_captured_metadata_sanitized(
+                backend=self._backend_name,
+                kind="tool_description",
+                tool=original,
+                sanitized_scalars=replaced,
+                captured_bytes=size,
+            )
+            return tool.model_copy(update={"description": sanitized})
+        size = len(buf)
+        if size > cap:
+            truncated = buf[:cap].decode("utf-8", errors="ignore")
+            truncated_bytes = len(truncated.encode("utf-8"))
+            if replaced:
+                _warn_captured_metadata_sanitized(
+                    backend=self._backend_name,
+                    kind="tool_description",
+                    tool=original,
+                    sanitized_scalars=replaced,
+                    limit_bytes=cap,
+                    captured_bytes=size,
+                    truncated_bytes=truncated_bytes,
+                )
+            signature = (self._backend_name, original, cap, size)
+            if self._truncation_warned.get(signature) != sanitized:
+                self._truncation_warned[signature] = sanitized
+                structlog.get_logger("mcp-gateway").warning(
+                    "tool_description_truncated",
+                    backend=self._backend_name,
+                    tool=original,
+                    limit_bytes=cap,
+                    captured_bytes=size,
+                    truncated_bytes=truncated_bytes,
+                )
+            return tool.model_copy(update={"description": truncated})
+        if replaced:
+            _warn_captured_metadata_sanitized(
+                backend=self._backend_name,
+                kind="tool_description",
+                tool=original,
+                sanitized_scalars=replaced,
+                limit_bytes=cap,
+                captured_bytes=size,
+            )
+            return tool.model_copy(update={"description": sanitized})
+        return tool
+
     async def list_tools(self, tools):
         transformed = await super().list_tools(tools)
-        return [self._restore_definitions(tool) for tool in transformed]
+        return [
+            self._restore_definitions(self._cap_captured_description(tool))
+            for tool in transformed
+        ]
 
     async def get_tool(self, name, call_next, *, version=None):
         tool = await super().get_tool(name, call_next, version=version)
-        return self._restore_definitions(tool)
+        if tool is None:
+            return None
+        return self._restore_definitions(self._cap_captured_description(tool))
 
 
 def build_transforms(  # noqa: PLR0912 — one branch per override field; splitting would scatter the transform assembly
@@ -1337,6 +1824,21 @@ def build_transforms(  # noqa: PLR0912 — one branch per override field; splitt
     index: dict[str, str] = {}
     b = backend
     bmeta = (captured_meta or {}).get(b.name, {})
+
+    # #286: explicit per-tool description byte caps (None = unbounded), enforced
+    # on CAPTURED upstream descriptions at outgoing time. Only tools that PIN a
+    # cap get an entry: configured tools inheriting (None) and tools with no
+    # override entry — including any discovered live after this transform was
+    # built — resolve through default_description_cap below (backend > gateway),
+    # so this map never duplicates the fallback. Authored override descriptions
+    # are validated at config load; a transform entry that supplies one is
+    # skipped by _cap_captured_description.
+    description_caps: dict[str, int | None] = {}
+    for tool in b.tools:
+        if tool.description_max_bytes is not None:
+            description_caps[tool.original] = effective_tool_description_limit(
+                cfg, b, tool
+            )
 
     def pin_meta(original: str) -> dict:
         # #91: pinning must MERGE the alwaysLoad flag into the backend's captured
@@ -1413,7 +1915,15 @@ def build_transforms(  # noqa: PLR0912 — one branch per override field; splitt
                     enabled=True, meta=pin_meta(original)
                 )
                 index[original] = b.name
-    return _SchemaPreservingToolTransform(transforms), index
+    return (
+        _SchemaPreservingToolTransform(
+            transforms,
+            description_caps,
+            b.name,
+            default_description_cap=_resolve_description_limit(None, b, cfg),
+        ),
+        index,
+    )
 
 
 class ResourcePromptTransform(Transform):
@@ -1610,8 +2120,48 @@ def build_resource_prompt_transform(
     return ResourcePromptTransform(backend)
 
 
+# #286 dedup: `server_instructions_truncated` fires at most once per
+# (backend, cap, captured size) signature per broadcast session, where the
+# session is the cfg object the mount/hot-reload belongs to — repeated calls
+# for the same over-cap captured blurb stay quiet, while a changed blurb,
+# cap, or a fresh config (new session) warns again. Keyed by id(cfg) with a
+# weakref guard: a retired config object (with its urls/headers) is never
+# retained in memory, and dead sessions are swept before a new one is added
+# (id reuse can never inherit a dead session's memo).
+_SERVER_INSTRUCTIONS_TRUNCATION_WARNED: dict[
+    int, tuple[weakref.ReferenceType, dict[tuple[str, int, int], str]]
+] = {}
+
+
+class _NoCfg:
+    """Module-lifetime sentinel session for no-cfg backend_instructions calls."""
+
+
+_NO_CFG = _NoCfg()
+
+
+def _instructions_warn_session(
+    cfg: GatewayConfig | None,
+) -> dict[tuple[str, int, int], str]:
+    """The per-session truncation-warning memo for *cfg* (``None`` = the
+    backwards-compat no-cfg path)."""
+    target = cfg if cfg is not None else _NO_CFG
+    key = id(target)
+    entry = _SERVER_INSTRUCTIONS_TRUNCATION_WARNED.get(key)
+    if entry is not None and entry[0]() is target:
+        return entry[1]
+    for dead_key, (ref, _) in list(_SERVER_INSTRUCTIONS_TRUNCATION_WARNED.items()):
+        if ref() is None:
+            del _SERVER_INSTRUCTIONS_TRUNCATION_WARNED[dead_key]
+    memo: dict[tuple[str, int, int], str] = {}
+    _SERVER_INSTRUCTIONS_TRUNCATION_WARNED[key] = (weakref.ref(target), memo)
+    return memo
+
+
 def backend_instructions(
-    backend: Backend, captured: dict[str, str | None]
+    backend: Backend,
+    captured: dict[str, str | None],
+    cfg: GatewayConfig | None = None,
 ) -> str | None:
     """The server-level ``instructions`` for ONE backend's endpoint.
 
@@ -1625,6 +2175,17 @@ def backend_instructions(
     all disabled via transforms (#38), and its instructions must go too — nil,
     not just tool-less. Both serving paths (mount + hot-reload) call this, and
     the enable toggle hot-reloads, so the blurb comes and goes live.
+
+    #286: an AUTHORED override was validated against the effective byte cap at
+    config load and passes through untouched. A captured upstream original may
+    contain lone surrogates (replaced with U+FFFD here, before byte counting)
+    or exceed the cap; it is truncated at a UTF-8 boundary HERE (the outgoing
+    point), with structured warnings that never include the text. The
+    truncation warning fires at most once per (backend, cap, captured size)
+    signature per config session (see the memo below); it re-fires only when
+    the captured blurb or the cap changes, or a fresh config starts a new
+    session. *cfg* supplies the gateway-global cap (backend override wins);
+    when omitted, only a backend-level override cap is enforced.
     """
     if not backend.enabled:
         return None
@@ -1633,7 +2194,60 @@ def backend_instructions(
         if backend.instructions is not None
         else captured.get(backend.name)
     )
-    return eff.strip() if (eff and eff.strip()) else None
+    if not (eff and eff.strip()):
+        return None
+    eff = eff.strip()
+    if backend.instructions is not None:
+        return eff
+    limit = (
+        effective_server_instructions_limit(cfg, backend)
+        if cfg is not None
+        else backend.server_instructions_max_bytes
+    )
+    # Encode the captured text once (clean common path); the buffer feeds the
+    # size check, the UTF-8-boundary truncation, and the warning's byte
+    # counts. Lone surrogates are replaced with U+FFFD BEFORE byte counting
+    # so the budget applies to what is actually broadcast.
+    try:
+        buf = eff.encode("utf-8")
+        sanitized, replaced = eff, 0
+    except UnicodeEncodeError:
+        sanitized, replaced = sanitize_captured_text(eff)
+        buf = sanitized.encode("utf-8")
+    size = len(buf)
+    if limit is not None and size > limit:
+        truncated = buf[:limit].decode("utf-8", errors="ignore")
+        truncated_bytes = len(truncated.encode("utf-8"))
+        if replaced:
+            _warn_captured_metadata_sanitized(
+                backend=backend.name,
+                kind="server_instructions",
+                sanitized_scalars=replaced,
+                limit_bytes=limit,
+                captured_bytes=size,
+                truncated_bytes=truncated_bytes,
+            )
+        signature = (backend.name, limit, size)
+        session = _instructions_warn_session(cfg)
+        if session.get(signature) != sanitized:
+            session[signature] = sanitized
+            structlog.get_logger("mcp-gateway").warning(
+                "server_instructions_truncated",
+                backend=backend.name,
+                limit_bytes=limit,
+                captured_bytes=size,
+                truncated_bytes=truncated_bytes,
+            )
+        return truncated
+    if replaced:
+        _warn_captured_metadata_sanitized(
+            backend=backend.name,
+            kind="server_instructions",
+            sanitized_scalars=replaced,
+            limit_bytes=limit,
+            captured_bytes=size,
+        )
+    return sanitized
 
 
 def to_raw(cfg: GatewayConfig) -> dict:  # noqa: PLR0915 — field-by-field TOML serialization; nested helpers already factored
@@ -1675,6 +2289,11 @@ def to_raw(cfg: GatewayConfig) -> dict:  # noqa: PLR0915 — field-by-field TOML
             d["enabled"] = False
         if b.instructions is not None:
             d["instructions"] = b.instructions
+        # #286: backend metadata-limit overrides — None (inherit) is omitted.
+        if b.server_instructions_max_bytes is not None:
+            d["server_instructions_max_bytes"] = b.server_instructions_max_bytes
+        if b.tool_description_max_bytes is not None:
+            d["tool_description_max_bytes"] = b.tool_description_max_bytes
         tools = [_tool(t) for t in b.tools]
         if tools:
             d["tools"] = tools
@@ -1699,6 +2318,8 @@ def to_raw(cfg: GatewayConfig) -> dict:  # noqa: PLR0915 — field-by-field TOML
             d["always_load"] = True
         if t.max_result_chars is not None:  # #162: per-tool output cap
             d["max_result_chars"] = t.max_result_chars
+        if t.description_max_bytes is not None:  # #286: per-tool description cap
+            d["description_max_bytes"] = t.description_max_bytes
         if t.validate_ is not None:  # #16: TOML key is `validate` (field aliased)
             d["validate"] = t.validate_
         if t.post_process is not None:
@@ -1760,6 +2381,8 @@ def to_raw(cfg: GatewayConfig) -> dict:  # noqa: PLR0915 — field-by-field TOML
         }
         if tool.always_load:
             item["always_load"] = True
+        if tool.description_max_bytes is not None:  # #286
+            item["description_max_bytes"] = tool.description_max_bytes
         if tool.inputs:
             item["inputs"] = [
                 {
@@ -1815,6 +2438,11 @@ def to_raw(cfg: GatewayConfig) -> dict:  # noqa: PLR0915 — field-by-field TOML
         out["introspect_interval"] = cfg.introspect_interval
     if cfg.baseline_max_age != DEFAULT_BASELINE_MAX_AGE:  # persist non-default (#157)
         out["baseline_max_age"] = cfg.baseline_max_age
+    # #286: metadata byte caps — defaults (2048 / None) are omitted.
+    if cfg.server_instructions_max_bytes != DEFAULT_SERVER_INSTRUCTIONS_MAX_BYTES:
+        out["server_instructions_max_bytes"] = cfg.server_instructions_max_bytes
+    if cfg.tool_description_max_bytes is not None:
+        out["tool_description_max_bytes"] = cfg.tool_description_max_bytes
     if not cfg.update_check:  # default True — only persist the opt-out (#A8)
         out["update_check"] = False
     if cfg.bearer_token is not None:  # default None — only persist when set (#26)

@@ -207,7 +207,11 @@ def settings_routes(  # noqa: PLR0915
         """Atomic settings import (#136): validate the whole bundle against a
         fresh cfg; persist and hot-reload only if EVERY item passes."""
         payload = await request.json()
-        bundle = payload.get("settings") or payload
+        # #286: select the bundle by KEY PRESENCE, not truthiness — a falsy
+        # nested settings value ([]/false/null/"") must 400 below, never fall
+        # through to treating the envelope itself as the bundle (which would
+        # silently import nothing and report success).
+        bundle = payload["settings"] if "settings" in payload else payload
         if not isinstance(bundle, dict):
             return deps().error("settings must be a JSON object")
         mode = payload.get("mode", "merge")

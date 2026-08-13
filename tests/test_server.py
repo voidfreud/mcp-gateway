@@ -103,6 +103,40 @@ def test_body_limit_allows_small_admin_body():
     assert r.json()["len"] == 512
 
 
+def test_admin_body_limit_allows_maximum_utf8_metadata_json_value():
+    metadata = "\0" * cl.MAX_METADATA_LIMIT_BYTES
+    body = json.dumps(
+        {"tool_description": metadata},
+        ensure_ascii=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+    assert len(metadata.encode("utf-8")) == cl.MAX_METADATA_LIMIT_BYTES
+    assert len(body) <= server.ADMIN_BODY_LIMIT
+
+    client = TestClient(_limited_app(server.ADMIN_BODY_LIMIT))
+    r = client.post(
+        "/admin/api/sink",
+        content=body,
+        headers={"content-type": "application/json"},
+    )
+    assert r.status_code == 200
+    assert r.json()["len"] == len(body)
+
+
+def test_admin_body_limit_rejects_envelope_overflow():
+    body = json.dumps({"padding": "x" * server.ADMIN_BODY_LIMIT}).encode("utf-8")
+    assert len(body) > server.ADMIN_BODY_LIMIT
+
+    client = TestClient(_limited_app(server.ADMIN_BODY_LIMIT))
+    r = client.post(
+        "/admin/api/sink",
+        content=body,
+        headers={"content-type": "application/json"},
+    )
+    assert r.status_code == 413
+
+
 def test_body_limit_ignores_non_admin_paths():
     client = TestClient(_limited_app(1024))
     r = client.post("/other", content=b"x" * 4096)
@@ -1754,6 +1788,164 @@ def test_admin_html_virtual_tools_uses_adr_api_contract():
         assert security_field in text
 
 
+def test_admin_html_metadata_limit_controls_use_utf8_and_api_contract():
+    text = (REPO_ROOT / "src" / "mcp_gateway" / "admin.html").read_text(
+        encoding="utf-8"
+    )
+
+    # Global, backend, tool, and Virtual Tool controls all serialize the exact
+    # config/API field names. Scoped controls explicitly expose inheritance;
+    # only the gateway-level tool limit exposes unlimited.
+    for field in (
+        "server_instructions_max_bytes",
+        "tool_description_max_bytes",
+        "description_max_bytes",
+    ):
+        assert f'name="{field}"' in text
+    assert "/admin/api/backend/${encodeURIComponent(name)}/limits" in text
+    assert "inherit gateway" in text
+    assert "inherit backend" in text
+    assert "tool_description_max_bytes_unlimited" in text
+
+    # Browser-side validation must count encoded bytes, keep the inclusive
+    # boundary valid, and announce both inline and API validation failures.
+    assert "new TextEncoder()" in text
+    assert "bytes > cap" in text
+    assert "bytes <= cap" in text
+    assert "Number.isInteger(value)" in text
+    assert "value <= 1048576" in text
+    assert 'role="status"' in text
+    assert 'aria-live="polite"' in text
+    assert 'role="alert"' in text
+
+    # Effective limits come from state rather than the old hard-coded 2048 B
+    # textarea cap, and every added static limit control has label semantics.
+    assert 'data-cap="2048"' not in text
+    for control in (
+        "vt_description",
+        "vt_description_limit",
+        "set_instructions_limit",
+        "set_tool_limit",
+    ):
+        assert f'for="{control}"' in text
+    assert "effective_server_instructions_max_bytes" in text
+    assert "effective_tool_description_max_bytes" in text
+    assert "effective_description_max_bytes" in text
+
+
+def _extract_admin_js_function(text: str, name: str) -> str:
+    """Verbatim source of `function <name>(...) { ... }` from admin.html."""
+    start = text.index(f"function {name}(")
+    brace = text.index("{", start)
+    depth = 0
+    for i in range(brace, len(text)):
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : i + 1]
+    raise AssertionError(f"unterminated function {name} in admin.html")
+
+
+# Executed by node: drives the REAL parseByteLimit/scopedByteLimit extracted
+# verbatim from admin.html. Fails on the pre-#286 parser, where Number() rounds
+# 0.99999999999999999 -> 1 and 1048576.0000000001 -> 1048576 onto valid limits
+# instead of rejecting the fractional strings.
+_BYTE_LIMIT_PARSER_ASSERTIONS = r"""
+const failures = [];
+function makeInput(value) {
+  return { value: String(value), classList: { toggle() {} }, setAttribute() {} };
+}
+function rejects(raw) {
+  try {
+    parseByteLimit(makeInput(raw), 'Test limit');
+    failures.push('expected rejection: ' + JSON.stringify(raw));
+  } catch (e) {
+    if (!/must be an integer from 1 to 1,048,576 bytes/.test(String(e.message))) {
+      failures.push('unexpected error for ' + JSON.stringify(raw) + ': ' + e.message);
+    }
+  }
+}
+function accepts(raw, expected) {
+  const got = parseByteLimit(makeInput(raw), 'Test limit');
+  if (got !== expected) {
+    failures.push(
+      'expected ' + expected + ', got ' + got + ' for ' + JSON.stringify(raw)
+    );
+  }
+}
+// Fractional strings Number() would round onto valid limits: reject.
+rejects('0.99999999999999999');
+rejects('1048576.0000000001');
+rejects('1.5');
+rejects('1048576.0');
+// NaN/Infinity, empty/whitespace, signs, and out-of-range values stay rejected.
+rejects('');
+rejects('   ');
+rejects('NaN');
+rejects('Infinity');
+rejects('-1');
+rejects('0');
+rejects('1048577');
+// Inclusive 1..1048576 acceptance; surrounding whitespace is trimmed first.
+accepts('1', 1);
+accepts('1048576', 1048576);
+accepts(' 1 ', 1);
+accepts('2048', 2048);
+// Scoped null semantics: inherit checked -> null without parsing; unchecked
+// parses through parseByteLimit and still rejects invalid input.
+const inheritOn = { checked: true };
+const inheritOff = { checked: false };
+if (scopedByteLimit(makeInput('not a number'), inheritOn, 'Test limit') !== null) {
+  failures.push('inherit should yield null without parsing');
+}
+if (scopedByteLimit(makeInput('2048'), inheritOff, 'Test limit') !== 2048) {
+  failures.push('scoped override should parse the limit');
+}
+try {
+  scopedByteLimit(makeInput('1.5'), inheritOff, 'Test limit');
+  failures.push('scoped override should reject invalid input');
+} catch (e) { /* expected */ }
+if (failures.length) {
+  console.error(failures.join('\n'));
+  process.exit(1);
+}
+"""
+
+
+def test_admin_html_byte_limit_parser_rejects_fractional_rounding():
+    # #286: browser limit parsing must require a plain-decimal integer on the
+    # trimmed raw string before any Number() conversion, so fractional strings
+    # that round onto valid limits (0.99999999999999999 -> 1,
+    # 1048576.0000000001 -> 1048576) are rejected. The token assertions in
+    # test_admin_html_metadata_limit_controls_use_utf8_and_api_contract remain
+    # as a static guard; this one executes the shipped functions.
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node not available")
+    text = (REPO_ROOT / "src" / "mcp_gateway" / "admin.html").read_text(
+        encoding="utf-8"
+    )
+    harness = (
+        _extract_admin_js_function(text, "parseByteLimit")
+        + "\n"
+        + _extract_admin_js_function(text, "scopedByteLimit")
+        + "\n"
+        + _BYTE_LIMIT_PARSER_ASSERTIONS
+    )
+    with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as fh:
+        fh.write(harness)
+        js_path = fh.name
+    try:
+        proc = subprocess.run(
+            [node, js_path], capture_output=True, text=True, check=False
+        )
+        assert proc.returncode == 0, proc.stderr or proc.stdout
+    finally:
+        os.unlink(js_path)
+
+
 def test_interval_refresh_loop_sweeps_and_stops(tmp_path, monkeypatch):
     """#43 trigger 4: with an interval set, mounted+enabled backends are swept
     on the clock; close() ends the loop promptly (no shutdown hang)."""
@@ -1862,6 +2054,124 @@ def test_build_app_wires_origin_guard(tmp_path):
         assert client.get("/health").status_code == 200  # no Origin -> open
         r = client.get("/health", headers={"Origin": "http://evil.example"})
         assert r.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# #286 — admin middleware order: bearer auth BEFORE the body cap
+# ---------------------------------------------------------------------------
+
+
+def _stacked_app(tmp_path, monkeypatch):
+    """The REAL parent app from _build_app, driven raw (no lifespan/backends):
+    only the middleware stack is under test. Token resolved from env, exactly
+    like production."""
+    monkeypatch.setenv("GW_TOKEN_286", "sekret")
+    cfg = cl.GatewayConfig.model_validate(
+        {
+            "bearer_token": "${GW_TOKEN_286}",
+            "backends": [{"name": "b", "transport": "stdio", "command": "/bin/x"}],
+        }
+    )
+    path = tmp_path / "config.toml"
+    cl.save(cfg, str(path))
+    return server._build_app(
+        cfg, structlog.get_logger("test"), {}, {}, {}, config_path=str(path)
+    )
+
+
+def _drive_raw(app, *, headers, receive):
+    """Run one raw ASGI request against the app; return the send messages."""
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "http_version": "1.1",
+        "method": "GET",
+        "scheme": "http",
+        "path": "/admin/api/state",
+        "raw_path": b"/admin/api/state",
+        "query_string": b"",
+        "root_path": "",
+        "headers": [(b"host", b"127.0.0.1:8000"), *headers],
+        "client": ("127.0.0.1", 4321),
+        "server": ("127.0.0.1", 8000),
+    }
+    sent = []
+
+    async def send(message):
+        sent.append(message)
+
+    async def go():
+        await app(scope, receive, send)
+
+    anyio.run(go)
+    return sent
+
+
+def _sent_body(sent):
+    return b"".join(
+        m.get("body", b"") for m in sent if m["type"] == "http.response.body"
+    )
+
+
+def test_unauth_admin_api_401_without_buffering_body(tmp_path, monkeypatch):
+    """#286 regression: the bearer gate sits OUTSIDE the body cap, so a
+    missing or invalid token on /admin/api/* answers 401 without the gateway
+    ever calling receive() — a receive that raises proves no body was read or
+    buffered, so an attacker can't make the daemon chew on their payload."""
+    app = _stacked_app(tmp_path, monkeypatch)
+
+    async def never_receive():
+        raise AssertionError("receive() was called before authentication")
+
+    for auth in (None, "Bearer wrong", "Basic sekret"):
+        headers = [(b"authorization", auth.encode())] if auth is not None else []
+        sent = _drive_raw(app, headers=headers, receive=never_receive)
+        assert sent[0]["status"] == 401, auth
+        assert dict(sent[0]["headers"])[b"content-type"] == b"application/json"
+        assert json.loads(_sent_body(sent)) == {
+            "ok": False,
+            "error": "missing or invalid bearer token",
+        }
+
+
+def test_authenticated_oversized_admin_body_still_413(tmp_path, monkeypatch):
+    # behavior-preserving: the body cap still bites for VALID tokens — the
+    # declared Content-Length alone rejects, without buffering (receive must
+    # not run here either).
+    app = _stacked_app(tmp_path, monkeypatch)
+
+    async def never_receive():
+        raise AssertionError("receive() was called for an over-limit body")
+
+    sent = _drive_raw(
+        app,
+        headers=[
+            (b"authorization", b"Bearer sekret"),
+            (b"content-length", str(server.ADMIN_BODY_LIMIT + 1).encode()),
+        ],
+        receive=never_receive,
+    )
+    assert sent[0]["status"] == 413
+    assert json.loads(_sent_body(sent)) == {
+        "ok": False,
+        "error": "request body too large",
+    }
+
+
+def test_authenticated_admin_api_still_200(tmp_path, monkeypatch):
+    # behavior-preserving: a valid token on a normal request still reaches the
+    # handler through the reordered stack.
+    app = _stacked_app(tmp_path, monkeypatch)
+
+    async def empty_receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    sent = _drive_raw(
+        app,
+        headers=[(b"authorization", b"Bearer sekret")],
+        receive=empty_receive,
+    )
+    assert sent[0]["status"] == 200
 
 
 # ---------------------------------------------------------------------------
@@ -2082,6 +2392,8 @@ def test_settings_get_returns_current(tmp_path, monkeypatch):
         "log_level": "INFO",
         "log_max_bytes": 5 * 1024 * 1024,
         "log_backup_count": 5,
+        "server_instructions_max_bytes": 2048,
+        "tool_description_max_bytes": None,
         "update_check": True,
     }
 

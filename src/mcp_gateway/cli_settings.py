@@ -26,9 +26,12 @@ from pathlib import Path
 from typing import Any
 
 from mcp_gateway.cli_common import (
+    LIMIT_MAX_BYTES,
+    UNSET,
     CLIContext,
     CLIError,
     expect_object,
+    limit_flag_type,
     read_json_source,
     require_yes,
 )
@@ -41,6 +44,9 @@ SETTINGS_KEYS = (
     "log_max_bytes",
     "log_backup_count",
     "update_check",
+    # #286: configurable UTF-8 metadata limits.
+    "server_instructions_max_bytes",
+    "tool_description_max_bytes",
 )
 
 # Matches logging_setup.LOG_LEVELS / the GatewayConfig Literal.  Kept local so
@@ -137,6 +143,22 @@ def register_settings_commands(subparsers: argparse._SubParsersAction) -> None:
         metavar="COUNT",
         help=f"rotated log files kept ({LOG_BACKUP_MIN}..{LOG_BACKUP_MAX})",
     )
+    set_parser.add_argument(
+        "--server-instructions-max-bytes",
+        type=limit_flag_type(None, "server_instructions_max_bytes"),
+        metavar="N",
+        help=f"server instructions cap in UTF-8 bytes (1..{LIMIT_MAX_BYTES})",
+    )
+    set_parser.add_argument(
+        "--tool-description-max-bytes",
+        type=limit_flag_type("unlimited", "tool_description_max_bytes"),
+        default=UNSET,
+        metavar="N|unlimited",
+        help=(
+            f"tool description cap in UTF-8 bytes (1..{LIMIT_MAX_BYTES}); "
+            "'unlimited' removes the cap"
+        ),
+    )
     toggle = set_parser.add_mutually_exclusive_group()
     toggle.add_argument(
         "--update-check",
@@ -232,6 +254,11 @@ def _settings_human(settings: dict) -> list[str]:
         f"log_max_bytes: {shown(settings.get('log_max_bytes'))}",
         f"log_backup_count: {shown(settings.get('log_backup_count'))}",
         f"update_check: {shown(settings.get('update_check'), 'false')}",
+        # #286: gateway-wide UTF-8 metadata limits (None tool cap = unbounded).
+        f"server_instructions_max_bytes: "
+        f"{shown(settings.get('server_instructions_max_bytes'))}",
+        f"tool_description_max_bytes: "
+        f"{shown(settings.get('tool_description_max_bytes'), 'unlimited')}",
     ]
     if settings.get("auth_mode") == "oauth_jwt":
         oauth = settings.get("oauth") or {}
@@ -271,6 +298,10 @@ def _settings_set(args: argparse.Namespace, ctx: CLIContext) -> None:
         payload["log_backup_count"] = args.log_backup_count
     if args.update_check is not None:
         payload["update_check"] = args.update_check
+    if args.server_instructions_max_bytes is not None:
+        payload["server_instructions_max_bytes"] = args.server_instructions_max_bytes
+    if args.tool_description_max_bytes is not UNSET:
+        payload["tool_description_max_bytes"] = args.tool_description_max_bytes
 
     if not payload:
         raise CLIError(
@@ -352,6 +383,19 @@ def _validate_log_level(value: Any) -> None:
     _normalize_log_level(value)
 
 
+def _validate_tool_description_max_bytes(value: Any) -> None:
+    """tool_description_max_bytes: an integer in 1..LIMIT_MAX_BYTES, or null
+    (no cap). JSON strings/bools/0 must never coerce into an int (#286)."""
+    if value is None:
+        return
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise CLIError(
+            "tool_description_max_bytes must be an integer between 1 and "
+            f"{LIMIT_MAX_BYTES}, or null"
+        )
+    _require_range("tool_description_max_bytes", value, 1, LIMIT_MAX_BYTES)
+
+
 def _bool_validator(key: str) -> Callable[[Any], None]:
     """Build a strict-boolean validator: JSON strings/integers/null must
     never coerce into a bool (#A8)."""
@@ -397,6 +441,13 @@ _KEY_VALIDATORS: dict[str, Callable[[Any], None]] = {
         f" between {LOG_BACKUP_MIN} and {LOG_BACKUP_MAX}",
     ),
     "update_check": _bool_validator("update_check"),
+    "server_instructions_max_bytes": _int_validator(
+        "server_instructions_max_bytes",
+        1,
+        LIMIT_MAX_BYTES,
+        f" between 1 and {LIMIT_MAX_BYTES}",
+    ),
+    "tool_description_max_bytes": _validate_tool_description_max_bytes,
 }
 
 

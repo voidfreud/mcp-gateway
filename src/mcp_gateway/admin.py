@@ -687,6 +687,9 @@ def build_state(cfg: GatewayConfig) -> dict:
     for b in cfg.backends:
         defaults = load_defaults(b.name)
         default_tools = (defaults or {}).get("tools", [])
+        # #286: default instructions byte count computed once; the effective
+        # count below reuses it unless an authored override replaces the text.
+        default_instructions_bytes = _text_bytes((defaults or {}).get("instructions"))
         tools_state = []
         for dt in default_tools:
             ov = _find_tool_override(b, dt["original"])
@@ -711,6 +714,14 @@ def build_state(cfg: GatewayConfig) -> dict:
                         "default": p.default if p else None,
                     }
                 )
+            # #286: default description byte count computed once; the effective
+            # count reuses it unless an authored override replaces the text.
+            default_description_bytes = _text_bytes(dt.get("description"))
+            effective_description_bytes = (
+                _text_bytes(ov.description)
+                if ov and ov.description is not None
+                else default_description_bytes
+            )
             tools_state.append(
                 {
                     "original": dt["original"],
@@ -725,6 +736,16 @@ def build_state(cfg: GatewayConfig) -> dict:
                     "always_load": ov.always_load if ov else False,
                     # #162: per-tool output cap (chars) — None = client default
                     "max_result_chars": ov.max_result_chars if ov else None,
+                    # #286: description byte limit — stored override (None =
+                    # inherit), the effective cap (tool > backend > gateway;
+                    # None = unbounded), and the UTF-8 byte size of the
+                    # default and effective description text.
+                    "description_max_bytes": (ov.description_max_bytes if ov else None),
+                    "effective_description_max_bytes": (
+                        cl.effective_tool_description_limit(cfg, b.name, dt["original"])
+                    ),
+                    "default_description_bytes": default_description_bytes,
+                    "effective_description_bytes": effective_description_bytes,
                     # #16: behavior hooks — hand-authored in config.toml, shown
                     # read-only (specs + current load status; None = no hooks /
                     # loading fine).
@@ -761,6 +782,27 @@ def build_state(cfg: GatewayConfig) -> dict:
                 "default_instructions": (defaults or {}).get("instructions"),
                 "instructions": b.instructions,
                 "server_info": (defaults or {}).get("server_info"),
+                # #286: metadata byte limits — stored backend overrides (None =
+                # inherit) plus the effective caps (backend > gateway for
+                # instructions; tool > backend > gateway for descriptions), and
+                # the UTF-8 byte size of the instructions text actually sent
+                # (override wins over the captured original).
+                "server_instructions_max_bytes": b.server_instructions_max_bytes,
+                "tool_description_max_bytes": b.tool_description_max_bytes,
+                "effective_server_instructions_max_bytes": (
+                    cl.effective_server_instructions_limit(cfg, b.name)
+                ),
+                "effective_tool_description_max_bytes": (
+                    b.tool_description_max_bytes
+                    if b.tool_description_max_bytes is not None
+                    else cfg.tool_description_max_bytes
+                ),
+                "default_instructions_bytes": default_instructions_bytes,
+                "instructions_bytes": (
+                    _text_bytes(b.instructions)
+                    if b.instructions is not None
+                    else default_instructions_bytes
+                ),
                 # #153: stored overrides whose original no longer matches a
                 # captured tool (backend renamed it upstream) — the UI flags
                 # these for one-click migrate/discard.
@@ -794,6 +836,10 @@ def build_state(cfg: GatewayConfig) -> dict:
         "log_max_bytes": cfg.log_max_bytes,
         "log_backup_count": cfg.log_backup_count,
         "update_check": cfg.update_check,
+        # #286: gateway-wide metadata byte limits — the server-instructions cap
+        # (int, default 2048) and the tool-description cap (None = unbounded).
+        "server_instructions_max_bytes": cfg.server_instructions_max_bytes,
+        "tool_description_max_bytes": cfg.tool_description_max_bytes,
         # #A8: the shared update-check status mapping — the exact process-global
         # cache (current/latest version, availability, check time, error). No
         # paths, credentials, or internals ever cross this boundary.
@@ -889,13 +935,52 @@ def _clean_max_result_chars(v) -> int | None:
     return v
 
 
-_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
-
 # Claude Code truncates each MCP server's `instructions` at ~2KB (issue #29). The
 # admin UI shows a 2048-byte counter; enforce the same cap server-side so an
 # over-cap blurb is rejected (400) rather than silently truncated by Claude Code —
 # a byte-boundary truncation could split a multibyte char (issue #93).
 INSTRUCTIONS_MAX_BYTES = 2048
+
+# #286: configurable metadata byte limits. Strict range shared by the settings
+# API, the per-backend limits endpoint, tool overrides, and settings import.
+# bool is rejected explicitly everywhere: it is an int subclass, and JSON
+# true/false must never coerce into 1/0 (the same trap the model validators
+# guard against for max_result_chars/log_max_bytes).
+LIMIT_MIN_BYTES = 1
+LIMIT_MAX_BYTES = 1_048_576
+
+
+def _clean_limit(v, what: str) -> int | None:
+    """Validate a metadata byte limit: a positive int (1..1_048_576) or None.
+
+    None means "inherit" at scoped levels (backend/tool override) or
+    "unbounded" at the gateway level (tool descriptions). Raises ConfigError
+    (→ 400) for a bool, non-int, or out-of-range value — never silently
+    coerced into a stored config.
+    """
+    if v is None:
+        return None
+    if isinstance(v, bool) or not isinstance(v, int):
+        raise cl.ConfigError(
+            f"{what} must be an integer between {LIMIT_MIN_BYTES} and "
+            f"{LIMIT_MAX_BYTES}, or null (got {type(v).__name__})"
+        )
+    if not LIMIT_MIN_BYTES <= v <= LIMIT_MAX_BYTES:
+        raise cl.ConfigError(
+            f"{what} must be an integer between {LIMIT_MIN_BYTES} and "
+            f"{LIMIT_MAX_BYTES}, or null (got {v!r})"
+        )
+    return v
+
+
+def _text_bytes(v) -> int | None:
+    """UTF-8 byte length of a text value, or None when there is no text."""
+    if v is None:
+        return None
+    return cl.utf8_byte_len(v)
+
+
+_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
 def _validate_name(name: str | None, what: str) -> None:
@@ -927,6 +1012,44 @@ def _override_vs_default(value, default) -> str | None:
     if default is not None and v == default:
         return None
     return v
+
+
+def _tool_param_overrides(
+    override: dict,
+    defaults: dict[str, dict],
+    previous: ToolOverride | None,
+) -> list[ParamOverride]:
+    """Build one tool's parameter overrides, preserving absent partial PUTs."""
+    if "params" not in override:
+        return previous.params if previous is not None else []
+    params: list[ParamOverride] = []
+    for payload in override.get("params", []):
+        original = payload["original"]
+        default = defaults.get(original, {})
+        name = _override_vs_default(payload.get("name"), original)
+        description = _override_vs_default(
+            payload.get("description"), default.get("description")
+        )
+        _validate_name(name, "parameter name")
+        hide = bool(payload.get("hide", False))
+        injected = _clean_param_default(payload.get("default"), original)
+        if hide and default.get("required", False) and injected is None:
+            raise cl.ConfigError(
+                f"parameter {original!r} is required by the backend — hiding it "
+                f"would break the tool; set an injected default value to hide "
+                f"it safely"
+            )
+        if name or description or hide or injected is not None:
+            params.append(
+                ParamOverride(
+                    original=original,
+                    name=name,
+                    description=description,
+                    hide=hide,
+                    default=injected,
+                )
+            )
+    return params
 
 
 def apply_tool_override(cfg: GatewayConfig, backend: str, payload: dict) -> str | None:
@@ -980,39 +1103,7 @@ def apply_tool_override(cfg: GatewayConfig, backend: str, payload: dict) -> str 
     )
     _validate_name(name, "tool name")
 
-    params = []
-    for p in ov.get("params", []):
-        po = p["original"]
-        dp = dparams.get(po, {})
-        # a param's default broadcast name is its original name
-        pname = _override_vs_default(p.get("name"), po)
-        pdesc = _override_vs_default(p.get("description"), dp.get("description"))
-        _validate_name(pname, "parameter name")
-        hide = bool(p.get("hide", False))
-        default = _clean_param_default(p.get("default"), po)
-        # Correctness guardrail (alongside check_no_collision): a param the
-        # backend marks required can't be hidden UNLESS a fixed default is
-        # injected (#35) — without one Claude could never supply it, so every
-        # call would break.
-        if hide and dp.get("required", False) and default is None:
-            raise cl.ConfigError(
-                f"parameter {po!r} is required by the backend — hiding it "
-                f"would break the tool; set an injected default value to hide "
-                f"it safely"
-            )
-        if pname or pdesc or hide or default is not None:
-            params.append(
-                ParamOverride(
-                    original=po,
-                    name=pname,
-                    description=pdesc,
-                    hide=hide,
-                    default=default,
-                )
-            )
-
-    if "params" not in ov and prev is not None:
-        params = prev.params
+    params = _tool_param_overrides(ov, dparams, prev)
     enabled = _field(
         "enabled", lambda: bool(ov["enabled"]), prev.enabled if prev else True
     )
@@ -1026,6 +1117,33 @@ def apply_tool_override(cfg: GatewayConfig, backend: str, payload: dict) -> str 
         lambda: _clean_max_result_chars(ov["max_result_chars"]),
         prev.max_result_chars if prev else None,
     )
+    # #286: per-tool description byte limit. Absent -> keep the stored value
+    # (#139 partial-PUT semantics); explicit null clears it (inherit).
+    description_max_bytes = _field(
+        "description_max_bytes",
+        lambda: _clean_limit(ov["description_max_bytes"], "description_max_bytes"),
+        prev.description_max_bytes if prev else None,
+    )
+    # #286: authored over-limit descriptions are rejected. The cap that will
+    # apply AFTER this save (tool > backend > gateway; None = unbounded) — the
+    # payload may raise the tool's own limit in the same save. Captured
+    # upstream defaults are NOT checked here: they are truncated (never
+    # rejected) at outgoing transform build time.
+    effective_description_limit = description_max_bytes
+    if effective_description_limit is None:
+        effective_description_limit = (
+            b.tool_description_max_bytes
+            if b.tool_description_max_bytes is not None
+            else cfg.tool_description_max_bytes
+        )
+    if description is not None and effective_description_limit is not None:
+        n = cl.utf8_byte_len(description)
+        if n > effective_description_limit:
+            raise cl.ConfigError(
+                f"tool description is {n} bytes; the cap is "
+                f"{effective_description_limit} bytes for this tool — "
+                f"shorten it or raise the limit"
+            )
     new = ToolOverride(
         original=original,
         name=name,
@@ -1034,6 +1152,7 @@ def apply_tool_override(cfg: GatewayConfig, backend: str, payload: dict) -> str 
         enabled=enabled,
         always_load=always_load,
         max_result_chars=max_result_chars,
+        description_max_bytes=description_max_bytes,
         # #16: hooks are hand-authored in config.toml, not admin-editable — a UI
         # save must carry them through unchanged, never silently drop them.
         validate_=prev.validate_ if prev else None,
@@ -1070,6 +1189,7 @@ def apply_tool_override(cfg: GatewayConfig, backend: str, payload: dict) -> str 
         new.name
         or title
         or description
+        or description_max_bytes is not None
         or not enabled
         or always_load
         or max_result_chars is not None
@@ -1323,6 +1443,9 @@ def migrate_override(cfg: GatewayConfig, backend: str, frm: str, to: str) -> dic
         "enabled": src.enabled,
         "always_load": src.always_load,
         "max_result_chars": src.max_result_chars,
+        # #286: the per-tool description cap is authored config too — it must
+        # move with the tuned text, not silently reset to inherit.
+        "description_max_bytes": src.description_max_bytes,
         "params": kept,
     }
     # Drop the dangling entry BEFORE applying, so its (soon-obsolete) transform
@@ -1368,6 +1491,12 @@ def export_settings(  # noqa: PLR0912, PLR0915 — one branch per serialized ove
             entry["always_load"] = True
         if b.instructions is not None:
             entry["instructions"] = b.instructions
+        # #286: backend metadata-limit overrides — None (inherit) is omitted so
+        # an import round-trips with zero loss and no noise.
+        if b.server_instructions_max_bytes is not None:
+            entry["server_instructions_max_bytes"] = b.server_instructions_max_bytes
+        if b.tool_description_max_bytes is not None:
+            entry["tool_description_max_bytes"] = b.tool_description_max_bytes
         tools: dict = {}
         for t in b.tools:
             td: dict = {}
@@ -1380,6 +1509,8 @@ def export_settings(  # noqa: PLR0912, PLR0915 — one branch per serialized ove
                 td["always_load"] = True
             if t.max_result_chars is not None:  # #162
                 td["max_result_chars"] = t.max_result_chars
+            if t.description_max_bytes is not None:  # #286
+                td["description_max_bytes"] = t.description_max_bytes
             if t.params:
                 td["params"] = [
                     {
@@ -1429,11 +1560,163 @@ def export_settings(  # noqa: PLR0912, PLR0915 — one branch per serialized ove
             backends[b.name] = entry
         if full:
             entry["defaults"] = load_defaults(b.name)
-    return {"kind": EXPORT_KIND, "version": EXPORT_VERSION, "backends": backends}
+    out = {"kind": EXPORT_KIND, "version": EXPORT_VERSION, "backends": backends}
+    # #286: gateway-wide limits — only when they differ from the model defaults
+    # (2048 for instructions, None/unbounded for tool descriptions).
+    if cfg.server_instructions_max_bytes != INSTRUCTIONS_MAX_BYTES:
+        out["server_instructions_max_bytes"] = cfg.server_instructions_max_bytes
+    if cfg.tool_description_max_bytes is not None:
+        out["tool_description_max_bytes"] = cfg.tool_description_max_bytes
+    return out
 
 
-def import_settings(  # noqa: PLR0912 — one validation branch per bundle field
-    cfg: GatewayConfig, bundle: dict, mode: str = "merge"
+def _import_shape_error(path: str, value: Any, expected: str = "object") -> str:
+    """Describe one malformed JSON container without inspecting it further."""
+    return f"{path}: must be a JSON {expected} (got {type(value).__name__})"
+
+
+def _validate_import_override_list(
+    override: dict,
+    field: str,
+    path: str,
+    item_label: str,
+    errors: list[str],
+) -> None:
+    """Validate nested parameter/argument arrays used by override applicators."""
+    if field not in override:
+        return
+    items = override[field]
+    if not isinstance(items, list):
+        errors.append(_import_shape_error(f"{path}/{field}", items, "array"))
+        return
+    for index, item in enumerate(items):
+        item_path = f"{path}/{field}[{index}]"
+        if not isinstance(item, dict):
+            errors.append(
+                f"{item_path}: {item_label} must be a JSON object "
+                f"(got {type(item).__name__})"
+            )
+            continue
+        if not isinstance(item.get("original"), str):
+            errors.append(f"{item_path}/original: must be a string")
+
+
+def _validate_import_display_name(name: str, entry: dict, errors: list[str]) -> None:
+    """Validate the one backend text field assigned directly by import."""
+    if "display_name" not in entry:
+        return
+    value = entry["display_name"]
+    if value is None:
+        return
+    if not isinstance(value, str):
+        errors.append(
+            f"{name}/display_name: must be a string or null "
+            f"(got {type(value).__name__})"
+        )
+        return
+    try:
+        _validate_text(value, "display name")
+    except cl.ConfigError as exc:
+        errors.append(f"{name}/display_name: {exc}")
+
+
+def _validate_import_bundle_shapes(bundle: dict) -> list[str]:
+    """Preflight containers so malformed bundles cannot partly reset *cfg*."""
+    backends = bundle.get("backends", {})
+    if not isinstance(backends, dict):
+        return [_import_shape_error("backends", backends)]
+
+    errors: list[str] = []
+    for name, entry in backends.items():
+        if not isinstance(entry, dict):
+            errors.append(
+                f"{name}: backend settings must be a JSON object "
+                f"(got {type(entry).__name__})"
+            )
+            continue
+        _validate_import_display_name(name, entry, errors)
+        for entry_field, item_label in (
+            ("tools", "tool override"),
+            ("resources", "resource override"),
+            ("prompts", "prompt override"),
+        ):
+            if entry_field not in entry:
+                continue
+            overrides = entry[entry_field]
+            if not isinstance(overrides, dict):
+                errors.append(_import_shape_error(f"{name}/{entry_field}", overrides))
+                continue
+            for original, override in overrides.items():
+                path = f"{name}/{original}"
+                if not isinstance(override, dict):
+                    errors.append(
+                        f"{path}: {item_label} must be a JSON object "
+                        f"(got {type(override).__name__})"
+                    )
+                    continue
+                if entry_field == "tools":
+                    _validate_import_override_list(
+                        override,
+                        "params",
+                        path,
+                        "parameter override",
+                        errors,
+                    )
+                elif entry_field == "prompts":
+                    _validate_import_override_list(
+                        override,
+                        "args",
+                        path,
+                        "prompt argument override",
+                        errors,
+                    )
+    return errors
+
+
+def _import_gateway_limits(
+    cfg: GatewayConfig, bundle: dict, errors: list[str], *, replace: bool = False
+) -> bool:
+    """Apply validated gateway-wide metadata limits from a settings bundle.
+
+    Returns True when a gateway global limit changed — or replace mode reset
+    them — so the caller includes EVERY configured backend in ``affected``: a
+    moved global cap shifts every backend's effective cap, so all live proxies
+    must reload, not just the backends the bundle names (#286).
+
+    ``mode="replace"`` first resets BOTH globals to their model defaults
+    (2048 / None), so a default-omitting export (the serializer omits default
+    values) round-trips authoritatively; present bundle keys then apply on
+    top of the reset.
+    """
+    changed = replace
+    if replace:
+        cfg.server_instructions_max_bytes = INSTRUCTIONS_MAX_BYTES
+        cfg.tool_description_max_bytes = None
+    for key, nullable in (
+        ("server_instructions_max_bytes", False),
+        ("tool_description_max_bytes", True),
+    ):
+        if key not in bundle:
+            continue
+        try:
+            value = _clean_limit(bundle[key], key)
+        except cl.ConfigError as exc:
+            errors.append(f"{key}: {exc}")
+            continue
+        if value is None and not nullable:
+            errors.append(
+                f"{key}: must be an integer between {LIMIT_MIN_BYTES} and "
+                f"{LIMIT_MAX_BYTES}"
+            )
+            continue
+        if getattr(cfg, key) != value:
+            changed = True
+        setattr(cfg, key, value)
+    return changed
+
+
+def import_settings(  # noqa: PLR0912, PLR0915 — one validation branch per bundle field
+    cfg: GatewayConfig, bundle: object, mode: str = "merge"
 ) -> tuple[list[str], list[str]]:
     """Apply an exported bundle onto *cfg*. Returns (affected_backends, errors).
 
@@ -1451,18 +1734,30 @@ def import_settings(  # noqa: PLR0912 — one validation branch per bundle field
     imported — this is a settings bundle, not a config replacement. Overrides
     for a currently-disabled backend import fine (stored, effective on enable).
     """
+    if not isinstance(bundle, dict):
+        return [], [_import_shape_error("settings", bundle)]
     if bundle.get("kind") not in (None, EXPORT_KIND):
         return [], [f"not a settings bundle (kind={bundle.get('kind')!r})"]
     if mode not in ("merge", "replace"):
         return [], [f"unknown mode {mode!r} (use merge or replace)"]
-    errors: list[str] = []
+    errors = _validate_import_bundle_shapes(bundle)
+    if errors:
+        return [], errors
     affected: list[str] = []
+    # #286: absent globals keep their current values (merge); replace mode
+    # resets them to the model defaults first so a default-omitting export
+    # round-trips authoritatively. When a global changes, EVERY configured
+    # backend's effective cap moved — include them all (exactly once) so the
+    # caller's commit hot-reloads every live proxy.
+    if _import_gateway_limits(cfg, bundle, errors, replace=(mode == "replace")):
+        affected.extend(b.name for b in cfg.backends)
     for name, entry in (bundle.get("backends") or {}).items():
         b = next((x for x in cfg.backends if x.name == name), None)
         if b is None:
             errors.append(f"{name}: backend not configured on this gateway")
             continue
-        affected.append(name)
+        if name not in affected:
+            affected.append(name)
         if mode == "replace":
             b.tools = []
             b.resources = []
@@ -1470,10 +1765,19 @@ def import_settings(  # noqa: PLR0912 — one validation branch per bundle field
             b.instructions = None
             b.display_name = None
             b.always_load = False
+            b.server_instructions_max_bytes = None
+            b.tool_description_max_bytes = None
         if "display_name" in entry:
             b.display_name = entry["display_name"] or None
         if "always_load" in entry:
             b.always_load = bool(entry["always_load"])
+        # #286: backend metadata-limit overrides — null clears (inherit).
+        for key in ("server_instructions_max_bytes", "tool_description_max_bytes"):
+            if key in entry:
+                try:
+                    setattr(b, key, _clean_limit(entry[key], key))
+                except cl.ConfigError as exc:
+                    errors.append(f"{name}: {key}: {exc}")
         if "instructions" in entry:
             try:
                 set_instructions(cfg, name, entry["instructions"])
@@ -1488,10 +1792,26 @@ def import_settings(  # noqa: PLR0912 — one validation branch per bundle field
                 apply_tool_override(
                     cfg, name, {"tool_original": original, "override": dict(td)}
                 )
-            except (cl.ConfigError, KeyError) as exc:
+            except (
+                cl.ConfigError,
+                KeyError,
+                AttributeError,
+                TypeError,
+                ValueError,
+            ) as exc:
                 errors.append(f"{name}/{original}: {exc}")
         # #15: resource + prompt overrides, through the same validated paths.
         _import_rp_overrides(cfg, name, entry, errors)
+    # #286: the per-item applicators checked the text they themselves wrote
+    # against the caps in force then — a bundle that only LOWERS a gateway (or
+    # backend) cap can strand PRE-EXISTING authored text over its new effective
+    # cap, which would only fail later at transform-build time. Revalidate the
+    # fully mutated config and report the ConfigError atomically (the caller
+    # persists nothing when errors are non-empty).
+    try:
+        cfg._check_authored_metadata_limits()
+    except cl.ConfigError as exc:
+        errors.append(str(exc))
     return affected, errors
 
 
@@ -1511,7 +1831,13 @@ def _import_rp_overrides(
             continue
         try:
             apply_resource_override(cfg, name, {"uri": uri, "override": dict(rd)})
-        except (cl.ConfigError, KeyError) as exc:
+        except (
+            cl.ConfigError,
+            KeyError,
+            AttributeError,
+            TypeError,
+            ValueError,
+        ) as exc:
             errors.append(f"{name}/{uri}: {exc}")
     known_prompts = {p["original"] for p in d.get("prompts", [])}
     for original, pd in (entry.get("prompts") or {}).items():
@@ -1522,7 +1848,13 @@ def _import_rp_overrides(
             apply_prompt_override(
                 cfg, name, {"prompt_original": original, "override": dict(pd)}
             )
-        except (cl.ConfigError, KeyError) as exc:
+        except (
+            cl.ConfigError,
+            KeyError,
+            AttributeError,
+            TypeError,
+            ValueError,
+        ) as exc:
             errors.append(f"{name}/{original}: {exc}")
 
 
@@ -1544,10 +1876,13 @@ def set_instructions(cfg: GatewayConfig, backend: str, value) -> None:
     default = (load_defaults(backend) or {}).get("instructions")
     override = _override_vs_default(value, default)
     if override is not None:
-        n = len(override.encode("utf-8"))
-        if n > INSTRUCTIONS_MAX_BYTES:
+        # #286: the cap is the effective one (backend override > gateway
+        # default of 2048), so a backend can raise or lower its own limit.
+        n = cl.utf8_byte_len(override)
+        cap = cl.effective_server_instructions_limit(cfg, backend)
+        if n > cap:
             raise cl.ConfigError(
-                f"instructions are {n} bytes; the cap is {INSTRUCTIONS_MAX_BYTES} "
+                f"instructions are {n} bytes; the cap is {cap} bytes "
                 f"(Claude Code truncates beyond ~2KB) — shorten them"
             )
     b.instructions = override
@@ -1593,7 +1928,11 @@ def hot_reload(
     # Re-set this backend's live server-level instructions (override else captured
     # original) — each endpoint carries only its own, keeping the full per-server
     # budget.
-    proxy.instructions = cl.backend_instructions(b, {backend: d.get("instructions")})
+    # #286: pass cfg so the outgoing truncation of a captured (over-cap)
+    # original applies the effective cap — backend override > gateway global.
+    proxy.instructions = cl.backend_instructions(
+        b, {backend: d.get("instructions")}, cfg
+    )
     # Live immediately (next tools/list reflects it). FastMCP has no
     # tools/list_changed helper, so a connected Claude session refreshes on its
     # next list / reconnect / new session.
@@ -1957,6 +2296,9 @@ def _gateway_settings_routes(ctx: _AdminCtx) -> list[Route]:
             "log_max_bytes": cfg.log_max_bytes,
             "log_backup_count": cfg.log_backup_count,
             "update_check": cfg.update_check,
+            # #286: gateway-wide metadata byte limits (2048 / None defaults).
+            "server_instructions_max_bytes": cfg.server_instructions_max_bytes,
+            "tool_description_max_bytes": cfg.tool_description_max_bytes,
         }
         if cfg.oauth is not None:
             payload.update(
@@ -2030,6 +2372,32 @@ def _gateway_settings_routes(ctx: _AdminCtx) -> list[Route]:
             if not isinstance(value, bool):
                 return _err("update_check must be a boolean")
             cfg.update_check = value
+        # #286: gateway-wide metadata byte limits. Same strict path as the
+        # per-backend limits endpoint: bool invalid, range 1..1_048_576. The
+        # instructions cap is int-only (null rejected — 2048 is the reset); the
+        # tool-description cap accepts null (unbounded).
+        if "server_instructions_max_bytes" in payload:
+            try:
+                value = _clean_limit(
+                    payload.get("server_instructions_max_bytes"),
+                    "server_instructions_max_bytes",
+                )
+            except cl.ConfigError as exc:
+                return _err(str(exc))
+            if value is None:
+                return _err(
+                    "server_instructions_max_bytes must be an integer "
+                    f"between {LIMIT_MIN_BYTES} and {LIMIT_MAX_BYTES}"
+                )
+            cfg.server_instructions_max_bytes = value
+        if "tool_description_max_bytes" in payload:
+            try:
+                cfg.tool_description_max_bytes = _clean_limit(
+                    payload.get("tool_description_max_bytes"),
+                    "tool_description_max_bytes",
+                )
+            except cl.ConfigError as exc:
+                return _err(str(exc))
         try:
             cfg = cl.GatewayConfig.model_validate(cl.to_raw(cfg))
         except (cl.ConfigError, ValueError) as exc:
@@ -2057,6 +2425,7 @@ def _backend_routes(ctx: _AdminCtx) -> list[Route]:
             error=_err,
             needs_json=_needs_json,
             clean=_clean,
+            clean_limit=_clean_limit,
             name_pattern=_NAME_RE,
             virtual_route=virtual_mod.VIRTUAL_ROUTE,
             stable_backend_id=virtual_mod.stable_backend_id,

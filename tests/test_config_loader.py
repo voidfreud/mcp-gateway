@@ -32,6 +32,69 @@ free_text = st.text(
 )
 
 
+def _draw_tool(draw, original: str) -> dict:
+    tool: dict = {"original": original, "enabled": draw(st.booleans())}
+    if draw(st.booleans()):
+        tool["always_load"] = True
+    if draw(st.booleans()):  # #162: per-tool output cap
+        tool["max_result_chars"] = draw(st.integers(1, 10**7))
+    if draw(st.booleans()):  # #286: per-tool description cap
+        tool["description_max_bytes"] = draw(st.integers(512, 1_048_576))
+    if draw(st.booleans()):
+        tool["name"] = draw(ident)
+    if draw(st.booleans()):
+        tool["title"] = draw(free_text)
+    if draw(st.booleans()):
+        tool["description"] = draw(free_text)
+    params = []
+    for original_param in draw(st.lists(ident, max_size=3, unique=True)):
+        param: dict = {"original": original_param, "hide": draw(st.booleans())}
+        if draw(st.booleans()):
+            param["name"] = draw(ident)
+        if draw(st.booleans()):
+            param["description"] = draw(free_text)
+        params.append(param)
+    if params:
+        tool["params"] = params
+    return tool
+
+
+def _draw_backend(draw, name: str) -> dict:
+    transport = draw(st.sampled_from(["http", "streamable-http", "sse", "stdio"]))
+    backend: dict = {
+        "name": name,
+        "transport": transport,
+        "stateless": draw(st.booleans()),
+    }
+    if draw(st.booleans()):
+        backend["always_load"] = True
+    if draw(st.booleans()):
+        backend["instructions"] = draw(free_text)
+    # #286: drawn limits fit every generated free_text value. Focused boundary
+    # tests cover small limits and precedence.
+    if draw(st.booleans()):
+        backend["server_instructions_max_bytes"] = draw(st.integers(512, 1_048_576))
+    if draw(st.booleans()):
+        backend["tool_description_max_bytes"] = draw(st.integers(512, 1_048_576))
+    if transport == "stdio":
+        backend["command"] = draw(st.sampled_from(["/bin/x", "uvx"]))
+        backend["args"] = draw(st.lists(ident, max_size=3))
+    else:
+        backend["url"] = draw(
+            st.sampled_from(["https://h/mcp", "http://127.0.0.1:9/mcp"])
+        )
+        if draw(st.booleans()):
+            backend["auth_header"] = "Authorization"
+            backend["auth_value"] = "Bearer ${T}"
+    tools = [
+        _draw_tool(draw, original)
+        for original in draw(st.lists(ident, max_size=3, unique=True))
+    ]
+    if tools:
+        backend["tools"] = tools
+    return backend
+
+
 @st.composite
 def gw_config_dict(draw) -> dict:
     names = draw(
@@ -42,51 +105,7 @@ def gw_config_dict(draw) -> dict:
             unique=True,
         )
     )
-    backends = []
-    for nm in names:
-        transport = draw(st.sampled_from(["http", "streamable-http", "sse", "stdio"]))
-        b: dict = {"name": nm, "transport": transport, "stateless": draw(st.booleans())}
-        if draw(st.booleans()):
-            b["always_load"] = True
-        if draw(st.booleans()):
-            b["instructions"] = draw(free_text)
-        if transport == "stdio":
-            b["command"] = draw(st.sampled_from(["/bin/x", "uvx"]))
-            b["args"] = draw(st.lists(ident, max_size=3))
-        else:  # http / streamable-http / sse — all url-based
-            b["url"] = draw(
-                st.sampled_from(["https://h/mcp", "http://127.0.0.1:9/mcp"])
-            )
-            if draw(st.booleans()):
-                b["auth_header"] = "Authorization"
-                b["auth_value"] = "Bearer ${T}"
-        tools = []
-        for to in draw(st.lists(ident, max_size=3, unique=True)):
-            t: dict = {"original": to, "enabled": draw(st.booleans())}
-            if draw(st.booleans()):
-                t["always_load"] = True
-            if draw(st.booleans()):  # #162: per-tool output cap
-                t["max_result_chars"] = draw(st.integers(1, 10**7))
-            if draw(st.booleans()):
-                t["name"] = draw(ident)
-            if draw(st.booleans()):
-                t["title"] = draw(free_text)
-            if draw(st.booleans()):
-                t["description"] = draw(free_text)
-            params = []
-            for po in draw(st.lists(ident, max_size=3, unique=True)):
-                p: dict = {"original": po, "hide": draw(st.booleans())}
-                if draw(st.booleans()):
-                    p["name"] = draw(ident)
-                if draw(st.booleans()):
-                    p["description"] = draw(free_text)
-                params.append(p)
-            if params:
-                t["params"] = params
-            tools.append(t)
-        if tools:
-            b["tools"] = tools
-        backends.append(b)
+    backends = [_draw_backend(draw, name) for name in names]
     out: dict = {
         "host": "127.0.0.1",
         "port": draw(st.integers(1, 65535)),
@@ -95,6 +114,10 @@ def gw_config_dict(draw) -> dict:
     }
     if draw(st.booleans()):  # optional gateway bearer token (#26), stored as a ref
         out["bearer_token"] = "${GW_TOKEN}"
+    if draw(st.booleans()):  # #286: gateway metadata byte caps
+        out["server_instructions_max_bytes"] = draw(st.integers(512, 1_048_576))
+    if draw(st.booleans()):
+        out["tool_description_max_bytes"] = draw(st.integers(512, 1_048_576))
     return out
 
 
@@ -1557,6 +1580,1174 @@ def test_baseline_max_age_rejects_negative():
                 "backends": [{"name": "b", "transport": "stdio", "command": "/bin/x"}],
             }
         )
+
+
+# --- #286: configurable metadata byte limits -------------------------------
+
+
+def _empty_cfg(**kw) -> cl.GatewayConfig:
+    return cl.GatewayConfig.model_validate({"backends": [], **kw})
+
+
+def _limit_backend(**kw) -> cl.Backend:
+    return cl.Backend.model_validate(
+        {"name": "b", "transport": "http", "url": "https://h/mcp", **kw}
+    )
+
+
+def _limit_virtual(**kw) -> cl.VirtualTool:
+    return cl.VirtualTool.model_validate(
+        {
+            "name": "v",
+            "description": "d",
+            "members": [{"backend_id": "x", "tool_original": "s"}],
+            **kw,
+        }
+    )
+
+
+def test_metadata_limits_defaults_and_are_omitted_from_toml():
+    cfg = _empty_cfg()
+    assert (
+        cfg.server_instructions_max_bytes
+        == cl.DEFAULT_SERVER_INSTRUCTIONS_MAX_BYTES
+        == 2048
+    )
+    assert cfg.tool_description_max_bytes is None  # unbounded by default
+    raw = cl.to_raw(cfg)
+    assert "server_instructions_max_bytes" not in raw
+    assert "tool_description_max_bytes" not in raw
+
+
+def test_utf8_byte_len_counts_bytes_not_characters():
+    assert cl.utf8_byte_len("abc") == 3
+    assert cl.utf8_byte_len("é") == 2  # 2-byte codepoint
+    assert cl.utf8_byte_len("中") == 3  # 3-byte codepoint
+    assert cl.utf8_byte_len("🎉") == 4  # 4-byte codepoint
+    assert cl.utf8_byte_len("aé中🎉") == 1 + 2 + 3 + 4
+
+
+def test_utf8_truncate_never_splits_a_codepoint():
+    text = "aé中🎉"  # 1+2+3+4 = 10 UTF-8 bytes
+    assert cl.utf8_truncate(text, 10) == text  # exact fit is unchanged
+    assert cl.utf8_truncate(text, 20) == text  # over-limit is a no-op
+    assert cl.utf8_truncate(text, 9) == "aé中"  # 🎉 (4B) dropped whole
+    assert cl.utf8_truncate(text, 6) == "aé中"  # 中 (3B) starts at byte 4
+    assert cl.utf8_truncate(text, 5) == "aé"  # partial 中 never emitted
+    assert cl.utf8_truncate(text, 3) == "aé"  # é ends at byte 3
+    assert cl.utf8_truncate(text, 2) == "a"  # byte 2 is inside é — dropped
+    assert cl.utf8_truncate(text, 1) == "a"
+    for n in range(1, 10):
+        cut = cl.utf8_truncate(text, n)
+        assert cl.utf8_byte_len(cut) <= n
+        assert cut == text[: len(cut)]  # always a prefix (code-point aligned)
+
+
+def test_sanitize_captured_text_replaces_surrogates_and_counts():
+    # clean text passes through unchanged with a zero count, never copied
+    assert cl.sanitize_captured_text("") == ("", 0)
+    assert cl.sanitize_captured_text("clean text") == ("clean text", 0)
+    assert cl.sanitize_captured_text("éé") == ("éé", 0)
+    # every lone surrogate becomes exactly one U+FFFD and is counted
+    text, replaced = cl.sanitize_captured_text("\ud800x\udc00")
+    assert text == "\ufffdx\ufffd"
+    assert replaced == 2
+    # never raises, and the result is always valid UTF-8
+    text.encode("utf-8")
+    assert cl.sanitize_captured_text("a\ud800") == ("a\ufffd", 1)
+
+
+@pytest.mark.parametrize("bad", [True, False, 0, -1, 1_048_577, "2048", 2.5])
+def test_gateway_metadata_limits_reject_nonsense(bad):
+    for key in ("server_instructions_max_bytes", "tool_description_max_bytes"):
+        with pytest.raises((cl.ConfigError, ValidationError)):
+            _empty_cfg(**{key: bad})
+
+
+def test_gateway_instructions_limit_cannot_be_none():
+    # the instructions cap is never unbounded: None at the gateway is invalid
+    with pytest.raises((cl.ConfigError, ValidationError)):
+        _empty_cfg(server_instructions_max_bytes=None)
+
+
+@pytest.mark.parametrize(
+    "key", ["server_instructions_max_bytes", "tool_description_max_bytes"]
+)
+@pytest.mark.parametrize("bad", [True, False, 0, -1, 1_048_577])
+def test_backend_metadata_limits_reject_nonsense(key, bad):
+    with pytest.raises((cl.ConfigError, ValidationError)):
+        _limit_backend(**{key: bad})
+
+
+@pytest.mark.parametrize("bad", [True, False, 0, -1, 1_048_577])
+def test_tool_description_limit_rejects_nonsense(bad):
+    with pytest.raises((cl.ConfigError, ValidationError)):
+        cl.ToolOverride.model_validate({"original": "t", "description_max_bytes": bad})
+
+
+@pytest.mark.parametrize("bad", [True, False, 0, -1, 1_048_577])
+def test_virtual_description_limit_rejects_nonsense(bad):
+    with pytest.raises((cl.ConfigError, ValidationError)):
+        _limit_virtual(description_max_bytes=bad)
+
+
+def test_metadata_limit_error_never_echoes_long_string_value():
+    # a rejected limit value is not echoed back into the error text (it could
+    # be an operator's half-pasted blob): only the input TYPE is reported
+    raw = "x" * 8192
+    for key in ("server_instructions_max_bytes", "tool_description_max_bytes"):
+        with pytest.raises(cl.ConfigError) as exc:
+            _empty_cfg(**{key: raw})
+        assert raw not in str(exc.value)
+        assert "got str" in str(exc.value)
+
+
+def test_metadata_limit_error_never_echoes_huge_integer_value():
+    # an out-of-range integer is reported by its allowed range alone, without
+    # reflecting the rejected value
+    huge = 10**100  # far beyond MAX_METADATA_LIMIT_BYTES
+    for key in ("server_instructions_max_bytes", "tool_description_max_bytes"):
+        with pytest.raises(cl.ConfigError) as exc:
+            _empty_cfg(**{key: huge})
+        assert str(huge) not in str(exc.value)
+        assert f"between 1 and {cl.MAX_METADATA_LIMIT_BYTES}" in str(exc.value)
+
+
+def test_authored_instructions_boundary_n_and_n_plus_1():
+    limit = 100
+    fit = "é" * 50  # exactly 100 UTF-8 bytes
+    over = fit + "x"  # 101 bytes
+    cl.GatewayConfig.model_validate(
+        {
+            "server_instructions_max_bytes": limit,
+            "backends": [
+                {
+                    "name": "b",
+                    "transport": "http",
+                    "url": "https://h/mcp",
+                    "instructions": fit,
+                }
+            ],
+        }
+    )
+    with pytest.raises(cl.ConfigError, match="instructions are 101 UTF-8 bytes"):
+        cl.GatewayConfig.model_validate(
+            {
+                "server_instructions_max_bytes": limit,
+                "backends": [
+                    {
+                        "name": "b",
+                        "transport": "http",
+                        "url": "https://h/mcp",
+                        "instructions": over,
+                    }
+                ],
+            }
+        )
+
+
+def test_authored_tool_description_boundary_n_and_n_plus_1():
+    limit = 40
+    fit = "é" * 20  # exactly 40 bytes
+    over = fit + "x"  # 41 bytes
+
+    def cfg(description):
+        return cl.GatewayConfig.model_validate(
+            {
+                "tool_description_max_bytes": limit,
+                "backends": [
+                    {
+                        "name": "b",
+                        "transport": "http",
+                        "url": "https://h/mcp",
+                        "tools": [{"original": "t", "description": description}],
+                    }
+                ],
+            }
+        )
+
+    assert cfg(fit).backends[0].tools[0].description == fit
+    with pytest.raises(cl.ConfigError, match="description is 41 UTF-8 bytes"):
+        cfg(over)
+
+
+def test_instructions_limit_precedence_backend_over_gateway():
+    cfg = cl.GatewayConfig.model_validate(
+        {
+            "server_instructions_max_bytes": 10,
+            "backends": [
+                {
+                    "name": "b",
+                    "transport": "http",
+                    "url": "https://h/mcp",
+                    "server_instructions_max_bytes": 100,
+                    "instructions": "x" * 50,  # fits backend cap, not gateway
+                }
+            ],
+        }
+    )
+    assert cl.effective_server_instructions_limit(cfg, cfg.backends[0]) == 100
+    assert cl.effective_server_instructions_limit(cfg, "b") == 100
+
+
+def test_tool_description_limit_precedence_tool_over_backend_over_gateway():
+    cfg = cl.GatewayConfig.model_validate(
+        {
+            "tool_description_max_bytes": 50,
+            "backends": [
+                {
+                    "name": "b",
+                    "transport": "http",
+                    "url": "https://h/mcp",
+                    "tool_description_max_bytes": 100,
+                    "tools": [
+                        {"original": "t1", "description_max_bytes": 200},
+                        {"original": "t2"},
+                    ],
+                }
+            ],
+        }
+    )
+    b = cfg.backends[0]
+    # tool cap wins over backend and gateway
+    assert cl.effective_tool_description_limit(cfg, b, b.tools[0]) == 200
+    assert cl.effective_tool_description_limit(cfg, "b", "t1") == 200
+    # tool None inherits the backend cap
+    assert cl.effective_tool_description_limit(cfg, "b", "t2") == 100
+    # a tool with no override entry uses backend then gateway
+    assert cl.effective_tool_description_limit(cfg, "b", "unlisted") == 100
+
+
+def test_tool_description_limit_none_everywhere_is_unbounded():
+    cfg = cl.GatewayConfig.model_validate(
+        {"backends": [{"name": "b", "transport": "http", "url": "https://h/mcp"}]}
+    )
+    assert cl.effective_tool_description_limit(cfg, "b", "anything") is None
+    # no caps at any level -> an arbitrarily long authored description is valid
+    cfg2 = cl.GatewayConfig.model_validate(
+        {
+            "backends": [
+                {
+                    "name": "b",
+                    "transport": "http",
+                    "url": "https://h/mcp",
+                    "tools": [{"original": "t", "description": "x" * 5000}],
+                }
+            ],
+        }
+    )
+    assert cfg2.backends[0].tools[0].description == "x" * 5000
+
+
+def test_backend_cap_beats_gateway_for_authored_instructions():
+    cfg = cl.GatewayConfig.model_validate(
+        {
+            "server_instructions_max_bytes": 10,
+            "backends": [
+                {
+                    "name": "b",
+                    "transport": "http",
+                    "url": "https://h/mcp",
+                    "server_instructions_max_bytes": 100,
+                    "instructions": "x" * 50,
+                }
+            ],
+        }
+    )
+    assert cfg.backends[0].instructions == "x" * 50
+
+
+def test_backend_instructions_gateway_cap_rejects_authored_over_limit():
+    with pytest.raises(cl.ConfigError, match="effective cap is 10 bytes"):
+        cl.GatewayConfig.model_validate(
+            {
+                "server_instructions_max_bytes": 10,
+                "backends": [
+                    {
+                        "name": "b",
+                        "transport": "http",
+                        "url": "https://h/mcp",
+                        "instructions": "x" * 50,
+                    }
+                ],
+            }
+        )
+
+
+def test_metadata_limits_roundtrip_toml():
+    cfg = cl.GatewayConfig.model_validate(
+        {
+            "server_instructions_max_bytes": 4096,
+            "tool_description_max_bytes": 1024,
+            "backends": [
+                {
+                    "id": "x",
+                    "name": "b",
+                    "transport": "http",
+                    "url": "https://h/mcp",
+                    "server_instructions_max_bytes": 3000,
+                    "tool_description_max_bytes": 999,
+                    "tools": [{"original": "t", "description_max_bytes": 500}],
+                }
+            ],
+            "virtual_tools": [
+                {
+                    "name": "v",
+                    "description": "d",
+                    "description_max_bytes": 250,
+                    "members": [{"backend_id": "x", "tool_original": "s"}],
+                }
+            ],
+        }
+    )
+    reparsed = cl.GatewayConfig.model_validate(tomllib.loads(cl.dump_toml(cfg)))
+    assert cl.to_raw(reparsed) == cl.to_raw(cfg)
+    assert reparsed.server_instructions_max_bytes == 4096
+    assert reparsed.tool_description_max_bytes == 1024
+    b = reparsed.backends[0]
+    assert b.server_instructions_max_bytes == 3000
+    assert b.tool_description_max_bytes == 999
+    assert b.tools[0].description_max_bytes == 500
+    assert reparsed.virtual_tools[0].description_max_bytes == 250
+
+
+def test_metadata_limits_omitted_when_defaults_or_none():
+    cfg = cl.GatewayConfig.model_validate(
+        {
+            "backends": [
+                {
+                    "id": "x",
+                    "name": "b",
+                    "transport": "http",
+                    "url": "https://h/mcp",
+                    "tools": [{"original": "t"}],
+                }
+            ],
+            "virtual_tools": [
+                {
+                    "name": "v",
+                    "description": "d",
+                    "members": [{"backend_id": "x", "tool_original": "s"}],
+                }
+            ],
+        }
+    )
+    raw = cl.to_raw(cfg)
+    assert "server_instructions_max_bytes" not in raw  # default 2048
+    assert "tool_description_max_bytes" not in raw  # None (unbounded)
+    backend = raw["backends"][0]
+    assert "server_instructions_max_bytes" not in backend
+    assert "tool_description_max_bytes" not in backend
+    assert "description_max_bytes" not in backend["tools"][0]
+    assert "description_max_bytes" not in raw["virtual_tools"][0]
+
+
+def test_backend_instructions_truncates_captured_at_utf8_boundary():
+    cfg = cl.GatewayConfig.model_validate(
+        {
+            "server_instructions_max_bytes": 5,
+            "backends": [{"name": "b", "transport": "http", "url": "https://h/mcp"}],
+        }
+    )
+    out = cl.backend_instructions(cfg.backends[0], {"b": "ééééé"}, cfg)  # 10 bytes
+    assert out == "éé"  # 4 bytes — the partial é is dropped, never split
+    assert cl.utf8_byte_len(out) <= 5
+
+
+def test_backend_instructions_warns_when_captured_truncated():
+    from structlog.testing import capture_logs
+
+    cfg = cl.GatewayConfig.model_validate(
+        {
+            "server_instructions_max_bytes": 5,
+            "backends": [{"name": "b", "transport": "http", "url": "https://h/mcp"}],
+        }
+    )
+    with capture_logs() as events:
+        cl.backend_instructions(cfg.backends[0], {"b": "ééééé"}, cfg)
+    warnings = [e for e in events if e["event"] == "server_instructions_truncated"]
+    assert len(warnings) == 1
+    assert warnings[0]["backend"] == "b"
+    assert warnings[0]["limit_bytes"] == 5
+    assert warnings[0]["captured_bytes"] == 10
+    assert "é" not in str(warnings[0])  # the text itself is never logged
+
+
+def test_backend_instructions_truncation_warns_once_per_session():
+    from structlog.testing import capture_logs
+
+    cfg = cl.GatewayConfig.model_validate(
+        {
+            "server_instructions_max_bytes": 5,
+            "backends": [{"name": "b", "transport": "http", "url": "https://h/mcp"}],
+        }
+    )
+    with capture_logs() as events:
+        for _ in range(3):  # every call still truncates; only the warning dedups
+            out = cl.backend_instructions(cfg.backends[0], {"b": "ééééé"}, cfg)
+            assert out == "éé"  # 4 bytes — the partial é is dropped, never split
+
+    warnings = [e for e in events if e["event"] == "server_instructions_truncated"]
+    # three calls, one dedup signature (backend, cap, captured size) per
+    # config session -> exactly one warning
+    assert len(warnings) == 1
+    assert warnings[0]["limit_bytes"] == 5
+    assert warnings[0]["captured_bytes"] == 10
+
+
+def test_backend_instructions_truncation_rewarns_when_cap_changes():
+    from structlog.testing import capture_logs
+
+    cfg = cl.GatewayConfig.model_validate(
+        {
+            "server_instructions_max_bytes": 5,
+            "backends": [{"name": "b", "transport": "http", "url": "https://h/mcp"}],
+        }
+    )
+    with capture_logs() as events:
+        cl.backend_instructions(cfg.backends[0], {"b": "ééééé"}, cfg)
+        cl.backend_instructions(cfg.backends[0], {"b": "ééééé"}, cfg)
+        cfg.server_instructions_max_bytes = 4  # changed cap = new signature
+        cl.backend_instructions(cfg.backends[0], {"b": "ééééé"}, cfg)
+        cl.backend_instructions(cfg.backends[0], {"b": "ééééé"}, cfg)
+
+    warnings = [e for e in events if e["event"] == "server_instructions_truncated"]
+    assert len(warnings) == 2
+    assert [w["limit_bytes"] for w in warnings] == [5, 4]
+
+
+def test_backend_instructions_truncation_rewarns_when_captured_text_changes():
+    from structlog.testing import capture_logs
+
+    cfg = cl.GatewayConfig.model_validate(
+        {
+            "server_instructions_max_bytes": 5,
+            "backends": [{"name": "b", "transport": "http", "url": "https://h/mcp"}],
+        }
+    )
+    with capture_logs() as events:
+        cl.backend_instructions(cfg.backends[0], {"b": "ééééé"}, cfg)  # 10 bytes
+        # SAME byte size, different text -> same signature, memo resets
+        cl.backend_instructions(cfg.backends[0], {"b": "abcdefghij"}, cfg)
+        cl.backend_instructions(cfg.backends[0], {"b": "abcdefghij"}, cfg)
+
+    warnings = [e for e in events if e["event"] == "server_instructions_truncated"]
+    assert len(warnings) == 2
+    assert all(w["captured_bytes"] == 10 for w in warnings)
+
+
+def test_backend_instructions_truncation_rewarns_per_config_session():
+    from structlog.testing import capture_logs
+
+    def make_cfg():
+        return cl.GatewayConfig.model_validate(
+            {
+                "server_instructions_max_bytes": 5,
+                "backends": [
+                    {"name": "b", "transport": "http", "url": "https://h/mcp"}
+                ],
+            }
+        )
+
+    with capture_logs() as events:
+        cfg1 = make_cfg()
+        cl.backend_instructions(cfg1.backends[0], {"b": "ééééé"}, cfg1)
+        cl.backend_instructions(cfg1.backends[0], {"b": "ééééé"}, cfg1)
+        cfg2 = make_cfg()  # a fresh config is a fresh broadcast session
+        cl.backend_instructions(cfg2.backends[0], {"b": "ééééé"}, cfg2)
+        cl.backend_instructions(cfg2.backends[0], {"b": "ééééé"}, cfg2)
+
+    warnings = [e for e in events if e["event"] == "server_instructions_truncated"]
+    # one warning per session, not per signature globally
+    assert len(warnings) == 2
+
+
+def test_backend_instructions_never_truncates_authored_override():
+    # an authored override over the cap is rejected at load, so the outgoing
+    # function sees only validated text and passes it through untouched
+    cfg = cl.GatewayConfig.model_validate(
+        {
+            "server_instructions_max_bytes": 100,
+            "backends": [
+                {
+                    "name": "b",
+                    "transport": "http",
+                    "url": "https://h/mcp",
+                    "instructions": "é" * 50,
+                }
+            ],
+        }
+    )
+    assert cl.backend_instructions(cfg.backends[0], {"b": "captured"}, cfg) == "é" * 50
+    with pytest.raises(cl.ConfigError):
+        cl.GatewayConfig.model_validate(
+            {
+                "server_instructions_max_bytes": 5,
+                "backends": [
+                    {
+                        "name": "b",
+                        "transport": "http",
+                        "url": "https://h/mcp",
+                        "instructions": "ééééé",
+                    }
+                ],
+            }
+        )
+
+
+def test_backend_instructions_without_cfg_passes_captured_through():
+    # backwards compatibility: callers that don't supply cfg get the old
+    # behavior unless the backend itself pins a cap
+    b = cl.Backend.model_validate(
+        {"name": "b", "transport": "http", "url": "https://h/mcp"}
+    )
+    assert cl.backend_instructions(b, {"b": "long captured blurb"}) == (
+        "long captured blurb"
+    )
+    # a backend-level cap still applies without cfg
+    b2 = cl.Backend.model_validate(
+        {
+            "name": "b",
+            "transport": "http",
+            "url": "https://h/mcp",
+            "server_instructions_max_bytes": 5,
+        }
+    )
+    assert cl.backend_instructions(b2, {"b": "ééééé"}) == "éé"
+
+
+@pytest.mark.anyio
+async def test_transform_truncates_captured_description_at_utf8_boundary():
+    from fastmcp.tools.function_tool import FunctionTool
+
+    cfg = cl.GatewayConfig.model_validate(
+        {
+            "tool_description_max_bytes": 6,
+            "backends": [{"name": "b", "transport": "http", "url": "https://h/mcp"}],
+        }
+    )
+    tr, _ = cl.build_transforms(cfg, cfg.backends[0], all_tools={"b": ["t"]})
+
+    def fn(x: str) -> str:
+        return x
+
+    tool = FunctionTool.from_function(fn, name="t", description="éééé")  # 8 bytes
+    [listed] = await tr.list_tools([tool])
+    assert listed.description == "ééé"  # 6 bytes, no split codepoint
+    assert cl.utf8_byte_len(listed.description) <= 6
+
+
+@pytest.mark.anyio
+async def test_transform_warns_when_captured_description_truncated():
+    from fastmcp.tools.function_tool import FunctionTool
+    from structlog.testing import capture_logs
+
+    cfg = cl.GatewayConfig.model_validate(
+        {
+            "tool_description_max_bytes": 6,
+            "backends": [{"name": "b", "transport": "http", "url": "https://h/mcp"}],
+        }
+    )
+    tr, _ = cl.build_transforms(cfg, cfg.backends[0], all_tools={"b": ["t"]})
+
+    def fn(x: str) -> str:
+        return x
+
+    tool = FunctionTool.from_function(fn, name="t", description="éééé")
+    with capture_logs() as events:
+        await tr.list_tools([tool])
+    warnings = [e for e in events if e["event"] == "tool_description_truncated"]
+    assert len(warnings) == 1
+    assert warnings[0]["tool"] == "t"
+    assert warnings[0]["limit_bytes"] == 6
+    assert warnings[0]["captured_bytes"] == 8
+    assert "é" not in str(warnings[0])
+
+
+@pytest.mark.anyio
+async def test_transform_never_truncates_authored_description():
+    from fastmcp.tools.function_tool import FunctionTool
+
+    cfg = cl.GatewayConfig.model_validate(
+        {
+            "tool_description_max_bytes": 6,
+            "backends": [
+                {
+                    "name": "b",
+                    "transport": "http",
+                    "url": "https://h/mcp",
+                    "tools": [{"original": "t", "description": "ééé"}],
+                }
+            ],
+        }
+    )
+    tr, _ = cl.build_transforms(cfg, cfg.backends[0], all_tools={"b": ["t"]})
+
+    def fn(x: str) -> str:
+        return x
+
+    tool = FunctionTool.from_function(fn, name="t", description="upstream original")
+    [listed] = await tr.list_tools([tool])
+    assert listed.description == "ééé"  # the authored override, not captured text
+
+
+@pytest.mark.anyio
+async def test_transform_no_caps_passes_tools_through_unchanged():
+    from fastmcp.tools.function_tool import FunctionTool
+
+    cfg = cl.GatewayConfig.model_validate(
+        {"backends": [{"name": "b", "transport": "http", "url": "https://h/mcp"}]}
+    )
+    tr, _ = cl.build_transforms(cfg, cfg.backends[0], all_tools={"b": ["stale"]})
+
+    def fn(x: str) -> str:
+        return x
+
+    tool = FunctionTool.from_function(
+        fn, name="t", description="very long captured description " * 20
+    )
+    [listed] = await tr.list_tools([tool])
+    assert listed is tool  # identical object: no copy, no truncation
+
+
+@pytest.mark.anyio
+async def test_transform_backend_cap_applies_to_unoverridden_tool():
+    from fastmcp.tools.function_tool import FunctionTool
+
+    cfg = cl.GatewayConfig.model_validate(
+        {
+            "tool_description_max_bytes": 100,
+            "backends": [
+                {
+                    "name": "b",
+                    "transport": "http",
+                    "url": "https://h/mcp",
+                    "tool_description_max_bytes": 8,
+                }
+            ],
+        }
+    )
+    tr, _ = cl.build_transforms(cfg, cfg.backends[0], all_tools={"b": ["t"]})
+
+    def fn(x: str) -> str:
+        return x
+
+    tool = FunctionTool.from_function(fn, name="t", description="éééééé")  # 12 bytes
+    [listed] = await tr.list_tools([tool])
+    assert listed.description == "éééé"  # 8 bytes
+    assert cl.utf8_byte_len(listed.description) == 8
+
+
+def test_transform_description_caps_only_explicit_tool_pins():
+    # #286: the per-tool cap map holds ONLY explicit pins; tools inheriting
+    # (None) and tools with no override entry resolve through the transform's
+    # default fallback (backend > gateway), so the map never duplicates it.
+    cfg = cl.GatewayConfig.model_validate(
+        {
+            "tool_description_max_bytes": 50,
+            "backends": [
+                {
+                    "name": "b",
+                    "transport": "http",
+                    "url": "https://h/mcp",
+                    "tool_description_max_bytes": 100,
+                    "tools": [
+                        {"original": "t1", "description_max_bytes": 200},
+                        {"original": "t2"},
+                    ],
+                }
+            ],
+        }
+    )
+    tr, _ = cl.build_transforms(
+        cfg, cfg.backends[0], all_tools={"b": ["t1", "t2", "t3"]}
+    )
+    assert tr._description_caps == {"t1": 200}
+    # t2 (inherits) and t3 (no override entry) fall back to the backend cap
+    assert tr._default_description_cap == 100
+
+
+@pytest.mark.anyio
+async def test_transform_get_tool_truncates_captured_description():
+    from fastmcp.tools.function_tool import FunctionTool
+
+    cfg = cl.GatewayConfig.model_validate(
+        {
+            "tool_description_max_bytes": 6,
+            "backends": [{"name": "b", "transport": "http", "url": "https://h/mcp"}],
+        }
+    )
+    tr, _ = cl.build_transforms(cfg, cfg.backends[0], all_tools={"b": ["t"]})
+
+    def fn(x: str) -> str:
+        return x
+
+    tool = FunctionTool.from_function(fn, name="t", description="éééé")
+
+    async def call_next(name, *, version=None):
+        return tool if name == "t" else None
+
+    got = await tr.get_tool("t", call_next)
+    assert got.description == "ééé"
+
+
+@pytest.mark.anyio
+async def test_transform_caps_live_tool_missing_from_stale_catalog():
+    from fastmcp.tools.function_tool import FunctionTool
+    from structlog.testing import capture_logs
+
+    cfg = cl.GatewayConfig.model_validate(
+        {
+            "tool_description_max_bytes": 100,
+            "backends": [
+                {
+                    "name": "b",
+                    "transport": "http",
+                    "url": "https://h/mcp",
+                    "tool_description_max_bytes": 6,
+                }
+            ],
+        }
+    )
+    tr, _ = cl.build_transforms(cfg, cfg.backends[0], all_tools={"b": ["old"]})
+
+    def fn(x: str) -> str:
+        return x
+
+    tool = FunctionTool.from_function(
+        fn, name="new", description="éééé"
+    )  # 8 bytes; absent from the stale captured catalog
+
+    async def call_next(name, *, version=None):
+        return tool if name == "new" else None
+
+    with capture_logs() as events:
+        [listed] = await tr.list_tools([tool])
+        fetched = await tr.get_tool("new", call_next)
+
+    assert listed.description == fetched.description == "ééé"
+    warnings = [e for e in events if e["event"] == "tool_description_truncated"]
+    # list + get share one dedup signature (backend, tool, cap, captured
+    # size), so the broadcast session warns exactly once — not per call
+    assert len(warnings) == 1
+    assert all(
+        e["backend"] == "b"
+        and e["tool"] == "new"
+        and e["limit_bytes"] == 6
+        and e["captured_bytes"] == 8
+        and e["truncated_bytes"] == 6
+        for e in warnings
+    )
+    assert "é" not in str(warnings)
+
+
+@pytest.mark.anyio
+async def test_transform_truncation_warns_once_across_repeated_list_get():
+    from fastmcp.tools.function_tool import FunctionTool
+    from structlog.testing import capture_logs
+
+    cfg = cl.GatewayConfig.model_validate(
+        {
+            "tool_description_max_bytes": 6,
+            "backends": [{"name": "b", "transport": "http", "url": "https://h/mcp"}],
+        }
+    )
+    tr, _ = cl.build_transforms(cfg, cfg.backends[0], all_tools={"b": ["t"]})
+
+    def fn(x: str) -> str:
+        return x
+
+    tool = FunctionTool.from_function(fn, name="t", description="éééé")  # 8 bytes
+
+    async def call_next(name, *, version=None):
+        return tool if name == "t" else None
+
+    with capture_logs() as events:
+        for _ in range(3):  # every call still truncates; only the warning dedups
+            [listed] = await tr.list_tools([tool])
+            assert listed.description == "ééé"
+            fetched = await tr.get_tool("t", call_next)
+            assert fetched.description == "ééé"
+
+    warnings = [e for e in events if e["event"] == "tool_description_truncated"]
+    # three list + three get rounds, one dedup signature -> exactly one warning
+    assert len(warnings) == 1
+    assert warnings[0]["tool"] == "t"
+    assert warnings[0]["limit_bytes"] == 6
+    assert warnings[0]["captured_bytes"] == 8
+
+
+@pytest.mark.anyio
+async def test_transform_truncation_rewarns_when_cap_changes():
+    from fastmcp.tools.function_tool import FunctionTool
+    from structlog.testing import capture_logs
+
+    cfg = cl.GatewayConfig.model_validate(
+        {
+            "tool_description_max_bytes": 100,
+            "backends": [
+                {
+                    "name": "b",
+                    "transport": "http",
+                    "url": "https://h/mcp",
+                    "tool_description_max_bytes": 6,
+                }
+            ],
+        }
+    )
+    tr, _ = cl.build_transforms(cfg, cfg.backends[0], all_tools={"b": ["t"]})
+
+    def fn(x: str) -> str:
+        return x
+
+    tool = FunctionTool.from_function(fn, name="t", description="éééé")  # 8 bytes
+    with capture_logs() as events:
+        await tr.list_tools([tool])
+        await tr.list_tools([tool])
+        # a changed effective cap is a new signature -> the memo re-warns
+        tr._default_description_cap = 4
+        await tr.list_tools([tool])
+        await tr.list_tools([tool])
+
+    warnings = [e for e in events if e["event"] == "tool_description_truncated"]
+    assert len(warnings) == 2
+    assert [w["limit_bytes"] for w in warnings] == [6, 4]
+    assert warnings[1]["truncated_bytes"] == 4
+
+
+@pytest.mark.anyio
+async def test_transform_truncation_rewarns_when_captured_text_changes():
+    from fastmcp.tools.function_tool import FunctionTool
+    from structlog.testing import capture_logs
+
+    cfg = cl.GatewayConfig.model_validate(
+        {
+            "tool_description_max_bytes": 6,
+            "backends": [{"name": "b", "transport": "http", "url": "https://h/mcp"}],
+        }
+    )
+    tr, _ = cl.build_transforms(cfg, cfg.backends[0], all_tools={"b": ["t"]})
+
+    def make_tool(desc: str):
+        return FunctionTool.from_function(lambda x: x, name="t", description=desc)
+
+    with capture_logs() as events:
+        await tr.list_tools([make_tool("éééé")])  # 8 bytes
+        # SAME byte size, different text -> same signature, memo resets
+        await tr.list_tools([make_tool("abcdefgh")])  # also 8 bytes
+        await tr.list_tools([make_tool("abcdefgh")])
+
+    warnings = [e for e in events if e["event"] == "tool_description_truncated"]
+    # the changed captured text re-warns exactly once, despite the identical
+    # (backend, tool, cap, captured_bytes) signature
+    assert len(warnings) == 2
+    assert all(e["captured_bytes"] == 8 for e in warnings)
+    assert [e["tool"] for e in warnings] == ["t", "t"]
+
+
+@pytest.mark.anyio
+async def test_transform_renamed_tool_truncates_to_per_tool_cap_in_list_and_get():
+    # A finite per-tool cap rides a RENAME: the cap lookup keys the RAW source
+    # name (the tool's pre-transform identity), not the broadcast name, so
+    # the renamed output still truncates to the per-tool cap.
+    from fastmcp.tools.function_tool import FunctionTool
+    from structlog.testing import capture_logs
+
+    cfg = cl.GatewayConfig.model_validate(
+        {
+            "tool_description_max_bytes": 100,
+            "backends": [
+                {
+                    "name": "b",
+                    "transport": "http",
+                    "url": "https://h/mcp",
+                    "tools": [
+                        {"original": "old", "name": "new", "description_max_bytes": 6}
+                    ],
+                }
+            ],
+        }
+    )
+    tr, _ = cl.build_transforms(cfg, cfg.backends[0], all_tools={"b": ["old"]})
+
+    def fn(x: str) -> str:
+        return x
+
+    tool = FunctionTool.from_function(fn, name="old", description="éééé")  # 8 bytes
+
+    async def call_next(name, *, version=None):
+        return tool if name == "old" else None
+
+    with capture_logs() as events:
+        [listed] = await tr.list_tools([tool])
+        fetched = await tr.get_tool("new", call_next)
+
+    assert listed.name == fetched.name == "new"  # the rename still applies
+    assert listed.description == fetched.description == "ééé"  # 6 bytes
+    warnings = [e for e in events if e["event"] == "tool_description_truncated"]
+    # list + get share one dedup signature; identity stays the ORIGINAL name
+    assert len(warnings) == 1
+    assert all(
+        e["backend"] == "b"
+        and e["tool"] == "old"
+        and e["limit_bytes"] == 6
+        and e["captured_bytes"] == 8
+        and e["truncated_bytes"] == 6
+        for e in warnings
+    )
+    assert "é" not in str(warnings)
+
+
+@pytest.mark.anyio
+async def test_transform_stale_rename_target_uses_default_cap():
+    # A dangling override `old -> new` (the catalog renamed `old` away) must
+    # not hijack a NATIVE live tool named `new`: a reverse lookup from the
+    # broadcast name misattributes it to the stale entry, skipping capping
+    # via the stale authored description and applying the stale per-tool cap
+    # instead of the backend/global fallback.
+    from fastmcp.tools.function_tool import FunctionTool
+    from structlog.testing import capture_logs
+
+    cfg = cl.GatewayConfig.model_validate(
+        {
+            "tool_description_max_bytes": 100,
+            "backends": [
+                {
+                    "name": "b",
+                    "transport": "http",
+                    "url": "https://h/mcp",
+                    "tool_description_max_bytes": 6,
+                    "tools": [
+                        {
+                            "original": "old",
+                            "name": "new",
+                            "description": "ééééééé",  # 14 bytes stale authored text
+                            "description_max_bytes": 500,  # stale per-tool cap
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+    tr, _ = cl.build_transforms(cfg, cfg.backends[0], all_tools={"b": ["old"]})
+
+    def fn(x: str) -> str:
+        return x
+
+    tool = FunctionTool.from_function(
+        fn, name="new", description="éééé"
+    )  # 8 bytes; native, absent from the stale captured catalog
+
+    async def call_next(name, *, version=None):
+        # the transform's get path resolves the stale ORIGINAL name; the live
+        # catalog answers with its native `new` tool (the name collision)
+        return tool if name == "old" else None
+
+    with capture_logs() as events:
+        [listed] = await tr.list_tools([tool])
+        fetched = await tr.get_tool("new", call_next)
+
+    # the default (backend) cap applies — never the stale per-tool cap, and
+    # never skipped by the stale override's authored description
+    assert listed.description == fetched.description == "ééé"  # 6 bytes
+    warnings = [e for e in events if e["event"] == "tool_description_truncated"]
+    # list (8 captured bytes) and get (14 captured bytes) are distinct
+    # signatures; both key the NATIVE tool name
+    assert len(warnings) == 2
+    assert all(
+        e["backend"] == "b"
+        and e["tool"] == "new"
+        and e["limit_bytes"] == 6
+        and e["truncated_bytes"] == 6
+        for e in warnings
+    )
+    assert sorted(w["captured_bytes"] for w in warnings) == [8, 14]
+    assert "é" not in str(warnings)
+
+
+# --- #286: captured-text surrogate sanitization -----------------------------
+
+
+@pytest.mark.anyio
+async def test_transform_sanitizes_captured_description_at_cap_boundary():
+    # "\ud800" + "🎉" (4-byte emoji): sanitized = U+FFFD (3B) + emoji = 7 bytes,
+    # exactly at the cap — tools/list stays serviceable, no truncation.
+    from fastmcp.tools.function_tool import FunctionTool
+    from structlog.testing import capture_logs
+
+    cfg = cl.GatewayConfig.model_validate(
+        {
+            "tool_description_max_bytes": 7,
+            "backends": [{"name": "b", "transport": "http", "url": "https://h/mcp"}],
+        }
+    )
+    tr, _ = cl.build_transforms(cfg, cfg.backends[0], all_tools={"b": ["t"]})
+
+    def fn(x: str) -> str:
+        return x
+
+    tool = FunctionTool.from_function(fn, name="t", description="\ud800🎉")
+    with capture_logs() as events:
+        [listed] = await tr.list_tools([tool])
+    assert listed.description == "\ufffd🎉"
+    listed.description.encode("utf-8")  # always valid UTF-8, never raises
+    assert "\ud800" not in listed.description
+    sanitized = [e for e in events if e["event"] == "captured_metadata_sanitized"]
+    assert len(sanitized) == 1
+    w = sanitized[0]
+    assert w["backend"] == "b"
+    assert w["kind"] == "tool_description"
+    assert w["tool"] == "t"
+    assert w["sanitized_scalars"] == 1
+    assert w["limit_bytes"] == 7
+    assert w["captured_bytes"] == 7  # the sanitized byte length
+    assert "truncated_bytes" not in w  # no truncation at the boundary
+    assert [e for e in events if e["event"] == "tool_description_truncated"] == []
+    # content-free: neither the surrogate nor its replacement is ever logged
+    assert "\ud800" not in str(w)
+    assert "\ufffd" not in str(w)
+
+
+@pytest.mark.anyio
+async def test_transform_sanitizes_captured_description_with_null_global_cap():
+    # gateway cap None = unbounded: text passes through sanitized, and the
+    # warning carries no limit_bytes
+    from fastmcp.tools.function_tool import FunctionTool
+    from structlog.testing import capture_logs
+
+    cfg = cl.GatewayConfig.model_validate(
+        {"backends": [{"name": "b", "transport": "http", "url": "https://h/mcp"}]}
+    )
+    tr, _ = cl.build_transforms(cfg, cfg.backends[0], all_tools={"b": ["t"]})
+
+    def fn(x: str) -> str:
+        return x
+
+    tool = FunctionTool.from_function(fn, name="t", description="x\udfffy")
+    with capture_logs() as events:
+        [listed] = await tr.list_tools([tool])
+    assert listed.description == "x\ufffdy"
+    listed.description.encode("utf-8")
+    assert "\udfff" not in listed.description
+    sanitized = [e for e in events if e["event"] == "captured_metadata_sanitized"]
+    assert len(sanitized) == 1
+    w = sanitized[0]
+    assert w["kind"] == "tool_description"
+    assert w["tool"] == "t"
+    assert w["sanitized_scalars"] == 1
+    assert w["captured_bytes"] == 5  # x + U+FFFD + y
+    assert "limit_bytes" not in w  # no cap applies
+    assert "truncated_bytes" not in w
+    assert "\udfff" not in str(w)
+    assert "\ufffd" not in str(w)
+
+
+def test_backend_instructions_sanitizes_then_truncates_captured():
+    # "\ud800" + "é"*5 sanitizes to U+FFFD (3B) + 10B = 13 bytes; cap 5 keeps
+    # the U+FFFD and the first é whole (3B + 2B = exactly 5), so the cut lands
+    # on a UTF-8 boundary and truncated_bytes <= cap with valid UTF-8
+    from structlog.testing import capture_logs
+
+    cfg = cl.GatewayConfig.model_validate(
+        {
+            "server_instructions_max_bytes": 5,
+            "backends": [{"name": "b", "transport": "http", "url": "https://h/mcp"}],
+        }
+    )
+    with capture_logs() as events:
+        out = cl.backend_instructions(cfg.backends[0], {"b": "\ud800" + "é" * 5}, cfg)
+    assert out == "\ufffdé"
+    out.encode("utf-8")  # no raw UnicodeEncodeError, valid UTF-8
+    assert cl.utf8_byte_len(out) <= 5
+    sanitized = [e for e in events if e["event"] == "captured_metadata_sanitized"]
+    assert len(sanitized) == 1
+    w = sanitized[0]
+    assert w["backend"] == "b"
+    assert w["kind"] == "server_instructions"
+    assert "tool" not in w  # tool only exists for tool_description
+    assert w["sanitized_scalars"] == 1
+    assert w["limit_bytes"] == 5
+    assert w["captured_bytes"] == 13  # the sanitized byte length
+    assert w["truncated_bytes"] == 5
+    assert w["truncated_bytes"] <= w["limit_bytes"]
+    assert "\ud800" not in str(w)
+    assert "\ufffd" not in str(w)
+    trunc = [e for e in events if e["event"] == "server_instructions_truncated"]
+    assert len(trunc) == 1
+    assert trunc[0]["captured_bytes"] == 13
+    assert trunc[0]["truncated_bytes"] == 5
+
+
+def test_backend_instructions_sanitizes_captured_without_cap():
+    # no cfg and no backend cap -> no truncation, sanitization still applies
+    from structlog.testing import capture_logs
+
+    b = cl.Backend.model_validate(
+        {"name": "b", "transport": "http", "url": "https://h/mcp"}
+    )
+    with capture_logs() as events:
+        out = cl.backend_instructions(b, {"b": "\ud800x"})
+    assert out == "\ufffdx"
+    out.encode("utf-8")
+    sanitized = [e for e in events if e["event"] == "captured_metadata_sanitized"]
+    assert len(sanitized) == 1
+    w = sanitized[0]
+    assert w["kind"] == "server_instructions"
+    assert w["sanitized_scalars"] == 1
+    assert w["captured_bytes"] == 4  # U+FFFD + x
+    assert "limit_bytes" not in w
+    assert "truncated_bytes" not in w
+    assert [e for e in events if e["event"] == "server_instructions_truncated"] == []
+
+
+@pytest.mark.parametrize(
+    "build, field, position",
+    [
+        (
+            lambda: cl.Backend.model_validate(
+                {
+                    "name": "b",
+                    "transport": "http",
+                    "url": "https://h/mcp",
+                    "instructions": "\ud800",
+                }
+            ),
+            "instructions",
+            0,
+        ),
+        (
+            lambda: cl.ToolOverride.model_validate(
+                {"original": "t", "description": "ab\udc00"}
+            ),
+            "description",
+            2,
+        ),
+        (
+            lambda: cl.VirtualTool.model_validate(
+                {
+                    "name": "v",
+                    "description": "x\ud83d",
+                    "members": [{"backend_id": "x", "tool_original": "s"}],
+                }
+            ),
+            "description",
+            1,
+        ),
+    ],
+)
+def test_authored_metadata_rejects_unpaired_surrogates_content_free(
+    build, field, position
+):
+    # direct model construction: authored text must be valid UTF-8 — a lone
+    # surrogate fails with a ConfigError naming only the field and position
+    with pytest.raises(cl.ConfigError) as exc:
+        build()
+    msg = str(exc.value)
+    assert field in msg
+    assert f"position {position}" in msg
+    # never the content: no surrogate, no U+FFFD, no raw UnicodeEncodeError
+    for bad in ("\ud800", "\udc00", "\ud83d", "\udfff", "\ufffd"):
+        assert bad not in msg
 
 
 # --- #15 resource + prompt overrides ----------------------------------------

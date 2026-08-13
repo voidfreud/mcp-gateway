@@ -157,6 +157,14 @@ def make_backend(name: str = "db", **overrides) -> dict:
         "introspected": True,
         "default_instructions": "default blurb",
         "instructions": None,
+        # #286: stored/effective metadata limits + UTF-8 instruction bytes
+        # (None stored = inherit the gateway global).
+        "server_instructions_max_bytes": None,
+        "effective_server_instructions_max_bytes": 2048,
+        "tool_description_max_bytes": None,
+        "effective_tool_description_max_bytes": None,
+        "default_instructions_bytes": 13,
+        "instructions_bytes": 13,
         "server_info": {"name": "sqlite", "version": "1.0"},
         "dangling": [],
         "tools": [
@@ -171,6 +179,11 @@ def make_backend(name: str = "db", **overrides) -> dict:
                 "enabled": True,
                 "always_load": False,
                 "max_result_chars": None,
+                # #286: stored/effective description cap + UTF-8 byte counts.
+                "description_max_bytes": None,
+                "effective_description_max_bytes": None,
+                "default_description_bytes": 12,
+                "effective_description_bytes": 12,
                 "validate": None,
                 "post_process": None,
                 "hook_error": None,
@@ -223,6 +236,9 @@ def make_state(*backends) -> dict:
         "log_max_bytes": 10485760,
         "log_backup_count": 3,
         "update_check": True,
+        # #286: gateway-global UTF-8 metadata limits (None tool cap = unbounded).
+        "server_instructions_max_bytes": 2048,
+        "tool_description_max_bytes": None,
         "update": {"status": "disabled"},
         "auth_mode": "none",
         "oauth": None,
@@ -247,6 +263,10 @@ def make_virtual_tool(name: str = "v1", *, enabled: bool = False) -> dict:
         "router": None,
         "routing_input_max_chars": 4096,
         "max_result_bytes": 262144,
+        # #286: stored/effective description cap + UTF-8 byte count.
+        "description_max_bytes": None,
+        "effective_description_max_bytes": None,
+        "description_bytes": 14,
         "failure_policy": "partial",
         "enabled": enabled,
         "resolution": {
@@ -403,8 +423,35 @@ def test_backend_help_lists_backend_subcommands():
         "session",
         "inspect",
         "refresh",
+        "limits",
     ):
         assert sub in out
+
+
+def test_limit_flags_appear_in_help():
+    # #286: every command that reads/writes a metadata limit documents the
+    # flag, its keyword, and the 1 MiB ceiling in --help.
+    rc, out, err = run_cli(["settings", "set", "--help"])
+    assert rc == 0
+    assert "--server-instructions-max-bytes" in out
+    assert "--tool-description-max-bytes" in out
+    assert "N|unlimited" in out
+
+    rc, out, err = run_cli(["backend", "limits", "--help"])
+    assert rc == 0
+    assert "--server-instructions-max-bytes" in out
+    assert "--tool-description-max-bytes" in out
+    assert "N|inherit" in out
+
+    rc, out, err = run_cli(["tool", "set", "--help"])
+    assert rc == 0
+    assert "--description-max-bytes" in out
+    assert "N|inherit" in out
+
+    rc, out, err = run_cli(["virtual", "create", "--help"])
+    assert rc == 0
+    assert "--description-max-bytes" in out
+    assert "N|inherit" in out
 
 
 # ---------------------------------------------------------------------------
@@ -2430,6 +2477,161 @@ def _renamed_tool_backend() -> dict:
 # -- tool ----------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# backend limits (show / update, #286)
+# ---------------------------------------------------------------------------
+
+
+def test_backend_limits_read_view_without_flags(fake_admin):
+    fake_admin.responses[("GET", "/admin/api/state")] = make_state(make_backend("db"))
+
+    rc, out, err = run_cli(["backend", "limits", "db"])
+
+    assert rc == 0
+    assert "backend: db" in out
+    assert "server_instructions_max_bytes: inherit (2048 effective)" in out
+    assert "tool_description_max_bytes: inherit (unlimited effective)" in out
+    assert "instructions_bytes: 13" in out
+    expect_calls(call("GET", "/admin/api/state", params=None))
+
+    rc, out, err = run_cli(["backend", "limits", "db", "--json"])
+    assert rc == 0
+    data = load_json(out)
+    assert data["backend"] == "db"
+    assert data["server_instructions_max_bytes"] is None
+    assert data["effective_server_instructions_max_bytes"] == 2048
+    assert data["tool_description_max_bytes"] is None
+    assert data["effective_tool_description_max_bytes"] is None
+    assert data["instructions_bytes"] == 13
+
+
+def test_backend_limits_read_view_shows_stored_values(fake_admin):
+    backend = make_backend(
+        "db",
+        server_instructions_max_bytes=4096,
+        effective_server_instructions_max_bytes=4096,
+        tool_description_max_bytes=8192,
+        effective_tool_description_max_bytes=8192,
+        instructions_bytes=42,
+    )
+    fake_admin.responses[("GET", "/admin/api/state")] = make_state(backend)
+
+    rc, out, err = run_cli(["backend", "limits", "db"])
+
+    assert rc == 0
+    assert "server_instructions_max_bytes: 4096" in out
+    assert "tool_description_max_bytes: 8192" in out
+    assert "instructions_bytes: 42" in out
+
+
+def test_backend_limits_set_finite_values(fake_admin):
+    fake_admin.responses[("PUT", "/admin/api/backend/db/limits")] = {
+        "ok": True,
+        "reloaded": "in-process",
+    }
+
+    rc, out, err = run_cli(
+        [
+            "backend",
+            "limits",
+            "db",
+            "--server-instructions-max-bytes",
+            "4096",
+            "--tool-description-max-bytes",
+            "8192",
+        ]
+    )
+
+    assert rc == 0
+    assert "limits of 'db' updated (hot reload)" in out
+    expect_calls(
+        call(
+            "PUT",
+            "/admin/api/backend/db/limits",
+            payload={
+                "server_instructions_max_bytes": 4096,
+                "tool_description_max_bytes": 8192,
+            },
+        )
+    )
+
+
+def test_backend_limits_set_inherit_sends_null(fake_admin):
+    # 'inherit' clears the override: null in the payload (gateway global
+    # applies). Only the given keys are sent — absent keys keep stored values.
+    fake_admin.responses[("PUT", "/admin/api/backend/db/limits")] = {
+        "ok": True,
+        "reloaded": "in-process",
+    }
+
+    rc, out, err = run_cli(
+        ["backend", "limits", "db", "--tool-description-max-bytes", "inherit"]
+    )
+
+    assert rc == 0
+    expect_calls(
+        call(
+            "PUT",
+            "/admin/api/backend/db/limits",
+            payload={"tool_description_max_bytes": None},
+        )
+    )
+
+
+def test_backend_limits_rejects_invalid_values_locally(fake_admin):
+    cases = [
+        ["--server-instructions-max-bytes", "true"],
+        ["--server-instructions-max-bytes", "0"],
+        ["--server-instructions-max-bytes", "1048577"],
+        ["--tool-description-max-bytes", "false"],
+        ["--tool-description-max-bytes", "-1"],
+        ["--tool-description-max-bytes", "2.5"],
+    ]
+    for extra in cases:
+        rc, out, err = run_cli(["backend", "limits", "db", *extra])
+        assert rc == 1, extra
+        assert "must be an integer between 1 and 1048576" in err, extra
+        assert FakeAdminClient.calls == [], extra
+
+
+def test_backend_limits_unknown_backend(fake_admin):
+    fake_admin.responses[("GET", "/admin/api/state")] = make_state(make_backend("db"))
+
+    rc, out, err = run_cli(["backend", "limits", "nope"])
+
+    assert rc == 1
+    assert "unknown backend" in err
+
+
+def test_backend_limits_server_400_propagates(fake_admin):
+    fake_admin.responses[("PUT", "/admin/api/backend/db/limits")] = CLIError(
+        "gateway 400 Bad Request for "
+        "http://127.0.0.1:9100/admin/api/backend/db/limits: unknown key",
+        response={"error": "unknown key"},
+    )
+
+    rc, out, err = run_cli(
+        ["backend", "limits", "db", "--server-instructions-max-bytes", "4096"]
+    )
+
+    assert rc == 1
+    assert out == ""
+    assert "400" in err
+    assert "unknown key" in err
+
+
+def test_backend_show_human_includes_metadata_limits(fake_admin):
+    fake_admin.responses[("GET", "/admin/api/state")] = make_state(make_backend("db"))
+    fake_admin.responses[("GET", "/admin/api/status")] = make_status()
+
+    rc, out, err = run_cli(["backend", "show", "db"])
+
+    assert rc == 0
+    assert "server_instructions_max_bytes: inherit (2048 effective)" in out
+    assert "tool_description_max_bytes: inherit (unlimited effective)" in out
+    assert "instructions_bytes: 13" in out
+
+
 def test_tool_list_human_and_json(fake_admin):
     fake_admin.responses[("GET", "/admin/api/state")] = make_state(make_backend("db"))
 
@@ -2675,6 +2877,103 @@ def test_tool_set_nothing_to_change(fake_admin):
     assert rc == 1
     assert "nothing to change" in err
     expect_calls(call("GET", "/admin/api/state"))
+
+
+def test_tool_set_description_limit_finite(fake_admin):
+    fake_admin.responses[("GET", "/admin/api/state")] = make_state(make_backend("db"))
+    fake_admin.responses[("PUT", "/admin/api/override")] = {"ok": True}
+
+    rc, out, err = run_cli(
+        ["tool", "set", "db", "query", "--description-max-bytes", "4096"]
+    )
+
+    assert rc == 0
+    expect_calls(
+        call("GET", "/admin/api/state", params=None),
+        call(
+            "PUT",
+            "/admin/api/override",
+            payload={
+                "backend": "db",
+                "tool_original": "query",
+                "override": {"description_max_bytes": 4096},
+            },
+        ),
+    )
+
+
+def test_tool_set_description_limit_inherit_sends_null(fake_admin):
+    # 'inherit' clears a stored per-tool cap: null override = inherit the
+    # backend/gateway limit (server #139 merge: present key, null value).
+    fake_admin.responses[("GET", "/admin/api/state")] = make_state(make_backend("db"))
+    fake_admin.responses[("PUT", "/admin/api/override")] = {"ok": True}
+
+    rc, out, err = run_cli(
+        ["tool", "set", "db", "query", "--description-max-bytes", "inherit"]
+    )
+
+    assert rc == 0
+    expect_calls(
+        call("GET", "/admin/api/state", params=None),
+        call(
+            "PUT",
+            "/admin/api/override",
+            payload={
+                "backend": "db",
+                "tool_original": "query",
+                "override": {"description_max_bytes": None},
+            },
+        ),
+    )
+
+
+def test_tool_set_description_limit_rejects_invalid_locally(fake_admin):
+    for value in ("true", "false", "0", "-1", "1048577", "abc", "1.5"):
+        rc, out, err = run_cli(
+            ["tool", "set", "db", "query", "--description-max-bytes", value]
+        )
+        assert rc == 1, value
+        assert "must be an integer between 1 and 1048576" in err, value
+        assert FakeAdminClient.calls == [], value
+
+
+def test_tool_set_file_accepts_description_max_bytes(fake_admin, tmp_path):
+    fake_admin.responses[("GET", "/admin/api/state")] = make_state(make_backend("db"))
+    fake_admin.responses[("PUT", "/admin/api/override")] = {"ok": True}
+    source = tmp_path / "override.json"
+    source.write_text(json.dumps({"description_max_bytes": 2048}), encoding="utf-8")
+
+    rc, out, err = run_cli(["tool", "set", "db", "query", "--file", str(source)])
+
+    assert rc == 0
+    put = FakeAdminClient.calls[1]
+    assert put["payload"]["override"]["description_max_bytes"] == 2048
+
+
+def test_tool_show_human_includes_description_bytes(fake_admin):
+    tool = make_backend("db")["tools"][0]
+    fake_admin.responses[("GET", "/admin/api/state")] = make_state(
+        make_backend("db", tools=[{**tool, "description_max_bytes": 4096}])
+    )
+
+    rc, out, err = run_cli(["tool", "show", "db", "query"])
+
+    assert rc == 0
+    assert "description_max_bytes: 4096" in out
+    assert "description_bytes: 12" in out
+
+
+def test_tool_list_json_includes_limit_fields(fake_admin):
+    fake_admin.responses[("GET", "/admin/api/state")] = make_state(make_backend("db"))
+
+    rc, out, err = run_cli(["tool", "list", "--json"])
+
+    assert rc == 0
+    data = load_json(out)
+    assert data[0]["description_max_bytes"] is None
+    assert data[0]["effective_description_max_bytes"] is None
+    assert data[0]["default_description_bytes"] == 12
+    assert data[0]["effective_description_bytes"] == 12
 
 
 def test_tool_reset_requires_yes(fake_admin):
@@ -3223,6 +3522,117 @@ def test_virtual_update_with_nothing_to_change(fake_admin):
     assert [c["path"] for c in FakeAdminClient.calls] == ["/admin/api/virtual-tools"]
 
 
+def test_virtual_create_description_limit_finite(fake_admin):
+    fake_admin.responses[("POST", "/admin/api/virtual-tools")] = {
+        "ok": True,
+        "tool": {"name": "v1", "enabled": False},
+        "lifecycle": "draft",
+    }
+
+    rc, out, err = run_cli(
+        ["virtual", "create", "--name", "v1", "--description-max-bytes", "4096"]
+    )
+
+    assert rc == 0
+    assert "created virtual tool 'v1' as draft" in out
+    expect_calls(
+        call(
+            "POST",
+            "/admin/api/virtual-tools",
+            payload={"name": "v1", "description_max_bytes": 4096},
+        )
+    )
+
+
+def test_virtual_create_description_limit_inherit_sends_null(fake_admin):
+    # 'inherit' on a virtual tool = null: follow the gateway-global tool
+    # description cap (itself 'unlimited' by default).
+    fake_admin.responses[("POST", "/admin/api/virtual-tools")] = {
+        "ok": True,
+        "tool": {"name": "v1", "enabled": False},
+        "lifecycle": "draft",
+    }
+
+    rc, out, err = run_cli(
+        ["virtual", "create", "--name", "v1", "--description-max-bytes", "inherit"]
+    )
+
+    assert rc == 0
+    expect_calls(
+        call(
+            "POST",
+            "/admin/api/virtual-tools",
+            payload={"name": "v1", "description_max_bytes": None},
+        )
+    )
+
+
+def test_virtual_create_description_limit_rejects_invalid_locally(fake_admin):
+    for value in ("true", "0", "1048577", "1.5"):
+        rc, out, err = run_cli(
+            ["virtual", "create", "--name", "v1", "--description-max-bytes", value]
+        )
+        assert rc == 1, value
+        assert "must be an integer between 1 and 1048576" in err, value
+        assert FakeAdminClient.calls == [], value
+
+
+def test_virtual_update_description_limit_merges(fake_admin):
+    tool = make_virtual_tool("v1")
+    fake_admin.responses[("GET", "/admin/api/virtual-tools")] = virtual_list_response(
+        tool
+    )
+    fake_admin.responses[("PUT", "/admin/api/virtual-tools/v1")] = {
+        "ok": True,
+        "tool": {**tool, "description_max_bytes": 2048},
+        "lifecycle": "draft",
+    }
+
+    rc, out, err = run_cli(
+        ["virtual", "update", "v1", "--description-max-bytes", "2048"]
+    )
+
+    assert rc == 0
+    put = FakeAdminClient.calls[1]
+    assert put["method"] == "PUT"
+    assert put["path"] == "/admin/api/virtual-tools/v1"
+    assert put["payload"]["description_max_bytes"] == 2048
+    # the stored definition round-trips (inherited limit stays explicit null)
+    assert put["payload"]["name"] == "v1"
+
+
+def test_virtual_update_description_limit_inherit_sends_null(fake_admin):
+    tool = make_virtual_tool("v1")
+    fake_admin.responses[("GET", "/admin/api/virtual-tools")] = virtual_list_response(
+        tool
+    )
+    fake_admin.responses[("PUT", "/admin/api/virtual-tools/v1")] = {
+        "ok": True,
+        "tool": tool,
+        "lifecycle": "draft",
+    }
+
+    rc, out, err = run_cli(
+        ["virtual", "update", "v1", "--description-max-bytes", "inherit"]
+    )
+
+    assert rc == 0
+    put = FakeAdminClient.calls[1]
+    assert put["payload"]["description_max_bytes"] is None
+
+
+def test_virtual_show_human_includes_description_limit(fake_admin):
+    fake_admin.responses[("GET", "/admin/api/virtual-tools")] = virtual_list_response(
+        make_virtual_tool("v1")
+    )
+
+    rc, out, err = run_cli(["virtual", "show", "v1"])
+
+    assert rc == 0
+    assert "Description limit: inherit (unlimited effective)" in out
+    assert "Description bytes: 14" in out
+
+
 def test_virtual_delete_requires_yes(fake_admin):
     rc, out, err = run_cli(["virtual", "delete", "v1"])
     assert rc == 1
@@ -3391,6 +3801,168 @@ def test_settings_show(fake_admin):
     assert rc == 0
     data = load_json(out)
     assert data["log_level"] == "INFO"
+
+
+def test_settings_show_includes_utf8_metadata_limits(fake_admin):
+    # #286: the gateway-wide UTF-8 metadata limits surface in both views,
+    # verbatim from the server (None tool cap renders as 'unlimited').
+    fake_admin.responses[("GET", "/admin/api/settings")] = {
+        "bearer_token": None,
+        "introspect_interval": 0,
+        "log_level": "INFO",
+        "log_max_bytes": 10485760,
+        "log_backup_count": 3,
+        "update_check": True,
+        "server_instructions_max_bytes": 2048,
+        "tool_description_max_bytes": None,
+    }
+
+    rc, out, err = run_cli(["settings", "show"])
+
+    assert rc == 0
+    assert "server_instructions_max_bytes: 2048" in out
+    assert "tool_description_max_bytes: unlimited" in out
+
+    rc, out, err = run_cli(["settings", "show", "--json"])
+    assert rc == 0
+    data = load_json(out)
+    assert data["server_instructions_max_bytes"] == 2048
+    assert data["tool_description_max_bytes"] is None
+
+
+def test_settings_set_limit_flags_finite_values(fake_admin):
+    fake_admin.responses[("PUT", "/admin/api/settings")] = {
+        "ok": True,
+        "reloaded": "restarting",
+        "changed": "gateway-settings",
+    }
+
+    rc, out, err = run_cli(
+        [
+            "settings",
+            "set",
+            "--server-instructions-max-bytes",
+            "4096",
+            "--tool-description-max-bytes",
+            "8192",
+        ]
+    )
+
+    assert rc == 0
+    assert "settings saved" in out
+    expect_calls(
+        call(
+            "PUT",
+            "/admin/api/settings",
+            payload={
+                "server_instructions_max_bytes": 4096,
+                "tool_description_max_bytes": 8192,
+            },
+        )
+    )
+
+
+def test_settings_set_tool_limit_unlimited_sends_null(fake_admin):
+    # The top-level tool limit uses the 'unlimited' keyword: null in the
+    # payload = no cap (the default).
+    fake_admin.responses[("PUT", "/admin/api/settings")] = {
+        "ok": True,
+        "reloaded": "restarting",
+        "changed": "gateway-settings",
+    }
+
+    rc, out, err = run_cli(
+        ["settings", "set", "--tool-description-max-bytes", "unlimited"]
+    )
+
+    assert rc == 0
+    expect_calls(
+        call("PUT", "/admin/api/settings", payload={"tool_description_max_bytes": None})
+    )
+
+
+def test_settings_set_limits_via_json_pairs(fake_admin):
+    fake_admin.responses[("PUT", "/admin/api/settings")] = {
+        "ok": True,
+        "reloaded": "restarting",
+        "changed": "gateway-settings",
+    }
+
+    rc, out, err = run_cli(
+        [
+            "settings",
+            "set",
+            "--set",
+            "server_instructions_max_bytes=4096",
+            "--set",
+            "tool_description_max_bytes=null",
+        ]
+    )
+
+    assert rc == 0
+    expect_calls(
+        call(
+            "PUT",
+            "/admin/api/settings",
+            payload={
+                "server_instructions_max_bytes": 4096,
+                "tool_description_max_bytes": None,
+            },
+        )
+    )
+
+
+def test_settings_set_rejects_invalid_limit_values_locally(fake_admin):
+    # Bool-like aliases, 0, negatives, non-integers, and >1 MiB must fail
+    # before any request — both on the flags and on the --set JSON path.
+    flag_cases = [
+        ["--server-instructions-max-bytes", "true"],
+        ["--server-instructions-max-bytes", "0"],
+        ["--server-instructions-max-bytes", "-1"],
+        ["--server-instructions-max-bytes", "1048577"],
+        ["--server-instructions-max-bytes", "1.5"],
+        ["--server-instructions-max-bytes", "1e3"],
+        ["--tool-description-max-bytes", "false"],
+        ["--tool-description-max-bytes", "0"],
+        ["--tool-description-max-bytes", "1048577"],
+    ]
+    for extra in flag_cases:
+        rc, out, err = run_cli(["settings", "set", *extra])
+        assert rc == 1, extra
+        assert "must be an integer between 1 and 1048576" in err, extra
+        assert FakeAdminClient.calls == [], extra
+
+    for pair in (
+        "server_instructions_max_bytes=true",
+        "server_instructions_max_bytes=0",
+        "server_instructions_max_bytes=1048577",
+        "tool_description_max_bytes=false",
+        "tool_description_max_bytes=0",
+        "tool_description_max_bytes=1048577",
+    ):
+        rc, out, err = run_cli(["settings", "set", "--set", pair])
+        assert rc == 1, pair
+        assert "must be an integer between 1 and 1048576" in err, pair
+        assert FakeAdminClient.calls == [], pair
+
+
+def test_settings_set_limit_server_400_propagates(fake_admin):
+    # The server stays the authority: its 400 (e.g. a cross-field conflict)
+    # surfaces on stderr with exit 1, like every other settings rejection.
+    fake_admin.responses[("PUT", "/admin/api/settings")] = CLIError(
+        "gateway 400 Bad Request for "
+        "http://127.0.0.1:9100/admin/api/settings: instructions cap out of range",
+        response={"error": "instructions cap out of range"},
+    )
+
+    rc, out, err = run_cli(
+        ["settings", "set", "--server-instructions-max-bytes", "4096"]
+    )
+
+    assert rc == 1
+    assert out == ""
+    assert "400" in err
+    assert "instructions cap out of range" in err
 
 
 def test_settings_set_pairs_and_flags(fake_admin):

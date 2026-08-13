@@ -78,11 +78,11 @@ the data structurally.
 | `status` | Per-backend liveness through `GET /admin/api/status`. |
 | `check` | Probe `/ready`; print readiness, list missing backends, and exit nonzero when the gateway is dead or degraded. |
 | `restart` | Restart the daemon (honest no-op in foreground mode). |
-| `backend …` | List, show, add, remove, rename, display-name, enable/disable, pin, session, inspect, refresh backends. |
+| `backend …` | List, show, add, remove, rename, display-name, enable/disable, pin, session, inspect, limits, refresh backends. |
 | `tool …` | List, show, set, reset, run, migrate, discard tool and parameter overrides. |
 | `resource …` | List, show, set, reset resource/template overrides. |
 | `prompt …` | List, show, set, reset prompt overrides. |
-| `instructions …` | Show, set, clear a backend's server instructions. |
+| `instructions …` | Show, set, clear a backend's server instructions (authored overrides must fit the effective byte cap). |
 | `virtual …` | List, show, catalog, create, update, delete, validate, test, activate, disable Virtual Tools. |
 | `settings …` | Show, set, export, import gateway settings. |
 | `logs …` | Show or follow the structured log. |
@@ -116,8 +116,20 @@ mcp-gateway backend session exa --warm            # persistent connection (defau
 mcp-gateway backend session exa --stateless       # fresh session per call
 mcp-gateway backend inspect exa                   # force re-capture of the live catalog
 mcp-gateway backend refresh                       # throttled sweep of every enabled backend
+mcp-gateway backend limits exa                    # read view: stored/effective limits + instruction bytes
+mcp-gateway backend limits exa --server-instructions-max-bytes 1024
+mcp-gateway backend limits exa --tool-description-max-bytes 4096
+mcp-gateway backend limits exa --tool-description-max-bytes inherit  # back to backend default
 mcp-gateway backend remove exa --yes              # destructive: confirmation required
 ```
+
+`backend limits` reads or mutates a backend's per-backend metadata caps
+(#286), the same values `PUT /admin/api/backend/{name}/limits` owns. With no
+flags it prints the stored limits (`inherit` when unset) plus the effective
+values after gateway fallback and the backend's live `instructions_bytes`.
+With flags, each value is an integer from `1` to `1,048,576`; the `inherit`
+keyword clears the scoped value back to inheriting the gateway cap (the
+global settings level uses `unlimited` for its unbounded default instead).
 
 `backend add` mirrors `POST /admin/api/backend`. The backend's endpoint is set
 with `--backend-url` — the global `--url` is reserved for the Admin API base
@@ -157,6 +169,8 @@ mcp-gateway tool set exa web_search --name web-search --auto-uniquify  # suffix 
 mcp-gateway tool set exa web_search --param query --param-desc "…"
 mcp-gateway tool set exa web_search --pin          # eager load one tool
 mcp-gateway tool set exa web_search --max-result-chars 12000
+mcp-gateway tool set exa web_search --description-max-bytes 1500
+mcp-gateway tool set exa web_search --description-max-bytes inherit  # clear back to inherit
 mcp-gateway tool set exa web_search --file edit.json   # full override object ('-' = stdin)
 mcp-gateway tool run exa web_search --arg query "…"    # execute through the live proxy
 mcp-gateway tool run exa web_search --file args.json
@@ -176,12 +190,25 @@ mcp-gateway instructions set exa --file instructions.txt
 mcp-gateway instructions clear exa
 ```
 
+`instructions set` measures the override in UTF-8 bytes and rejects it when it
+exceeds the backend's effective instructions cap — the backend's own
+`server_instructions_max_bytes` when set, else the gateway-wide default
+(`2048`). Captured upstream instructions that exceed the cap are never a
+write error: they are truncated at a UTF-8 character boundary only when
+broadcast, and `backend show` / `backend limits` reports the live
+`instructions_bytes` so the truncation stays visible.
+
 `tool set` posts the same payload the dashboard sends: scalar flags
 (`--name`, `--title`, `--description`, `--enabled`/`--disabled`, `--pin`/
-`--unpin`, `--max-result-chars N|none`, empty string clears a field) plus
-repeated `--param NAME` edit groups (`--param-name`, `--param-desc`,
-`--param-default`, `--hide`/`--show`). A `--file` JSON override object is
-merged with #139 semantics — keys absent preserve stored values. `--auto-uniquify`
+`--unpin`, `--max-result-chars N|none`, `--description-max-bytes N|inherit`,
+empty string clears a field) plus repeated `--param NAME` edit groups
+(`--param-name`, `--param-desc`, `--param-default`, `--hide`/`--show`).
+`--description-max-bytes` caps this tool's broadcast description in UTF-8
+bytes (integer `1`..`1,048,576`); `inherit` clears the per-tool value so the
+backend's cap, then the gateway's, apply. Tool `show` prints the stored and
+effective cap plus the tool's live `description_bytes`. A `--file` JSON
+override object is merged with #139 semantics — keys absent preserve stored
+values. `--auto-uniquify`
 retries a rename collision once with a deterministic `_2`/`_3` suffix instead
 of failing (the dashboard's auto-uniquify escape hatch); without it, a
 colliding rename is rejected. `tool run` accepts the tool's original or
@@ -196,8 +223,10 @@ mcp-gateway virtual list                        # drafts and active tools, resol
 mcp-gateway virtual show summarize
 mcp-gateway virtual catalog                     # live source-tool catalog for members
 mcp-gateway virtual create --name summarize --description "…" \
+  --description-max-bytes 2000 \
   --file def.json                               # or a full definition from a file/stdin
 mcp-gateway virtual update summarize --description "…"   # stays a draft until activated
+mcp-gateway virtual update summarize --description-max-bytes inherit
 mcp-gateway virtual validate summarize          # resolve members against live backends
 mcp-gateway virtual test summarize --arguments args.json   # or --arg key=value
 mcp-gateway virtual activate summarize          # hot-reload into /virtual/mcp
@@ -207,16 +236,23 @@ mcp-gateway virtual delete summarize --yes      # destructive: confirmation requ
 
 `create`/`update` accept the full `VirtualTool` JSON definition via `--file`
 (or `-` for stdin); repeated `--input JSON` / `--member JSON` items replace the
-respective lists, and scalar flags (`--description`, `--dispatch`, `--member`,
-`--router-*`, …) overlay single fields. `update` merges over the current
-definition and the server always stores the result as an inactive draft.
+respective lists, and scalar flags (`--description`, `--description-max-bytes`,
+`--dispatch`, `--member`, `--router-*`, …) overlay single fields.
+`--description-max-bytes N|inherit` caps the definition's broadcast
+description in UTF-8 bytes (integer `1`..`1,048,576`); `inherit` follows the
+gateway-wide `tool_description_max_bytes` (which itself defaults to
+unlimited). `update` merges over the current definition and the server always
+stores the result as an inactive draft.
 
 ### Settings and logs
 
 ```bash
-mcp-gateway settings show                       # bearer ref, update check, log settings
+mcp-gateway settings show                       # bearer ref, update check, log + metadata limits
 mcp-gateway settings set --log-level DEBUG --no-update-check
 mcp-gateway settings set --set introspect_interval=0
+mcp-gateway settings set --server-instructions-max-bytes 4096
+mcp-gateway settings set --tool-description-max-bytes 8192
+mcp-gateway settings set --tool-description-max-bytes unlimited   # clear the global cap (default)
 mcp-gateway settings set --bearer-token '${MCP_GATEWAY_TOKEN}'   # a ${ENV} reference, never the secret
 mcp-gateway settings export -o bundle.json      # the full settings bundle
 mcp-gateway settings export -o bundle.json --force   # replace an existing file
@@ -231,8 +267,14 @@ mcp-gateway logs follow --level ERROR
 
 `settings set` updates only the keys given: repeatable `--set KEY=JSON` pairs
 plus explicit flags (`--log-level`, `--log-max-bytes`, `--log-backup-count`,
-`--introspect-interval`, `--update-check`/`--no-update-check`, `--bearer-token`).
-Unknown or boot-time-only keys fail before any request. `settings export`
+`--introspect-interval`, `--update-check`/`--no-update-check`,
+`--server-instructions-max-bytes`, `--tool-description-max-bytes`,
+`--bearer-token`). Both metadata limits are integers from `1` to `1,048,576`;
+`--tool-description-max-bytes unlimited` clears the gateway cap back to the
+unbounded default (the value keyword is `unlimited` at this global level —
+scoped values use `inherit` instead). `settings show` prints both globals
+(`tool_description_max_bytes: unlimited` or the number). Unknown or
+boot-time-only keys fail before any request. `settings export`
 writes the bundle to stdout (or `-o FILE`); `settings import` is all-or-nothing
 like the dashboard and requires `--yes`.
 

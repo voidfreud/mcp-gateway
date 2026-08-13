@@ -53,20 +53,20 @@ when you want it.
 | Method | Path | Body | Response |
 |--------|------|------|----------|
 | GET | `/admin` | — | The admin UI page (HTML). |
-| GET | `/admin/api/state` | — | Full UI state: gateway version/update-check status plus every backend, its captured default tools/params, and overrides. `update` is a five-field snapshot (`current_version`, `latest_version`, `available`, `checked_at`, `error`) and this route performs no network I/O. Each tool also carries its behavior-hook specs read-only — `validate`, `post_process` (`module:function` or `null`) and `hook_error` (`null` when absent/loading fine, else the current load failure). Hooks are hand-authored in `config.toml`, not writable via the API; `PUT /admin/api/override` preserves them. |
-| GET | `/admin/api/export` | — (query `?full=true` adds captured defaults) | The complete stored settings bundle as JSON — every override, instruction, pin, and display name. Behavior hooks are excluded (machine-local code references); merge-mode imports preserve stored hooks, replace-mode imports clear them with the rest of the backend's overrides. |
+| GET | `/admin/api/state` | — | Full UI state: gateway version/update-check status plus every backend, its captured default tools/params, and overrides. `update` is a five-field snapshot (`current_version`, `latest_version`, `available`, `checked_at`, `error`) and this route performs no network I/O. Each tool also carries its behavior-hook specs read-only — `validate`, `post_process` (`module:function` or `null`) and `hook_error` (`null` when absent/loading fine, else the current load failure). Hooks are hand-authored in `config.toml`, not writable via the API; `PUT /admin/api/override` preserves them. The state also exposes the metadata limits: top-level `server_instructions_max_bytes` and `tool_description_max_bytes` globals; per backend its stored and effective limits and live `instructions_bytes`; per tool and per Virtual Tool its stored and effective `description_max_bytes` and the broadcast `description_bytes` — so upstream truncation at broadcast time is observable. |
+| GET | `/admin/api/export` | — (query `?full=true` adds captured defaults) | The complete stored settings bundle as JSON — every override, instruction, pin, display name, and non-default metadata limit (gateway-wide plus per-backend/per-tool caps). Behavior hooks are excluded (machine-local code references); merge-mode imports preserve stored hooks, replace-mode imports clear them with the rest of the backend's overrides. |
 
 ## Settings (text overrides)
 
 | Method | Path | Body | Response |
 |--------|------|------|----------|
-| PUT | `/admin/api/override` | `{backend, tool_original, override: {name?, title?, description?, enabled?, always_load?, max_result_chars?, params?}, on_collision?}` | `{ok, reloaded: "in-process"}`. `max_result_chars` (a positive integer, or `null` to clear) sets the tool's `_meta["anthropic/maxResultSizeChars"]` output budget; anything else is a 400. If `on_collision: "uniquify"` was set and a name collided, also `{name: "<final>", uniquified: true}`. A collision without uniquify, or an invalid field, returns `{ok:false, error}`. Merge semantics apply inside `override`: an omitted key preserves its stored value rather than clearing it. |
+| PUT | `/admin/api/override` | `{backend, tool_original, override: {name?, title?, description?, enabled?, always_load?, max_result_chars?, description_max_bytes?, params?}, on_collision?}` | `{ok, reloaded: "in-process"}`. `max_result_chars` (a positive integer, or `null` to clear) sets the tool's `_meta["anthropic/maxResultSizeChars"]` output budget; `description_max_bytes` (an integer from `1` to `1,048,576` UTF-8 bytes, or `null` to clear back to inheriting the backend's cap) sets this tool's broadcast-description cap; a boolean or out-of-range value for either is a 400. An authored `description` over the tool's effective cap — its own `description_max_bytes` when set, else the backend's `tool_description_max_bytes`, else the gateway's — rejects the whole PUT atomically (`{ok:false, error}`), with nothing applied. If `on_collision: "uniquify"` was set and a name collided, also `{name: "<final>", uniquified: true}`. A collision without uniquify, or an invalid field, returns `{ok:false, error}`. Merge semantics apply inside `override`: an omitted key preserves its stored value rather than clearing it. |
 | POST | `/admin/api/reset` | `{backend, tool_original}` | `{ok}`. Clears every override for that one tool (reverts to the backend default). |
 | PUT | `/admin/api/resource-override` | `{backend, uri, override: {name?, title?, description?, enabled?}}` | `{ok, reloaded: "in-process"}`. Rewrites a resource's (or resource template's) display text; `uri` is the identity and is never rewritten. Same merge semantics as tool overrides. |
 | POST | `/admin/api/resource-reset` | `{backend, uri}` | `{ok}`. Clears every override for that one resource. |
 | PUT | `/admin/api/prompt-override` | `{backend, prompt_original, override: {name?, title?, description?, enabled?, args?}}` | `{ok, reloaded: "in-process"}`. Rewrites a prompt (renames reverse-map on `prompts/get`); `args` is a list of `{original, description}` — argument names are not renameable. Invalid name or a name collision returns `{ok:false, error}`. |
 | POST | `/admin/api/prompt-reset` | `{backend, prompt_original}` | `{ok}`. Clears every override for that one prompt. |
-| PUT | `/admin/api/instructions` | `{backend, value}` | `{ok}`. Sets the backend's server-instructions override (`value` empty inherits the original). Admin/API writes are rejected above 2,048 UTF-8 bytes; a directly authored TOML `Backend.instructions` value is not schema-capped. |
+| PUT | `/admin/api/instructions` | `{backend, value}` | `{ok}`. Sets the backend's server-instructions override (`value` empty inherits the original). An authored override is **rejected** (400) when it exceeds the backend's effective instructions cap — `server_instructions_max_bytes` on the backend when set, else the gateway-wide `server_instructions_max_bytes` (default `2048`). Captured upstream instructions over the cap are not rejected; they are truncated at a UTF-8 character boundary at broadcast time only. |
 | POST | `/admin/api/import` | `{mode: "merge"\|"replace", settings: {...}}` | `{ok, backends, mode}` on success; `400 {ok:false, errors, applied:false}` if any item is invalid (all-or-nothing). Backend topology is never imported. |
 | POST | `/admin/api/backend/{name}/migrate-override` | `{from, to}` | Carries a stale override (its `from` tool no longer exists upstream) onto the tool's new name `to`; params that no longer exist are dropped and reported. `{ok, dropped_params}`. `400` if `to` is unknown or already overridden. |
 | POST | `/admin/api/backend/{name}/discard-override` | `{original}` | Drops a stale override entry. `{ok}`; `400` when no such entry. |
@@ -83,7 +83,8 @@ when you want it.
 | POST | `/admin/api/enabled` | `{value: bool}` | Master switch: enable/disable every backend, mounting or unmounting each. `{ok, reloaded: "in-process"}`. |
 | POST | `/admin/api/backend/{name}/pin` | `{value: bool}` | Toggle per-backend eager loading (pin all its tools). `{ok, reloaded: "in-process"}`. |
 | POST | `/admin/api/backend/{name}/stateless` | `{value: bool}` | Session strategy: `false` = warm (one persistent connection, auto-repaired if it dies), `true` = fresh session per call. Saves and recycles the backend live — no restart. `{ok, reloaded: "recycled", stateless}`. |
-| GET | `/admin/api/settings` | — | The gateway-wide settings: `{bearer_token, introspect_interval, update_check, log_level, log_max_bytes, log_backup_count}`. `bearer_token` is the stored `${ENV_VAR}` reference, never a resolved secret. OAuth deployments additionally return read-only `auth_mode` and public `oauth` metadata. |
+| PUT | `/admin/api/backend/{name}/limits` | `{server_instructions_max_bytes?: integer\|null, tool_description_max_bytes?: integer\|null}` | Sets (or clears) this backend's per-backend metadata caps. Each value is an integer from `1` to `1,048,576`; a boolean or out-of-range value is a 400. `null` clears the scoped value back to inheriting the gateway default. `{ok, reloaded: "in-process"}` — the caps apply to the live endpoint immediately. |
+| GET | `/admin/api/settings` | — | The gateway-wide settings: `{bearer_token, introspect_interval, update_check, log_level, log_max_bytes, log_backup_count, server_instructions_max_bytes, tool_description_max_bytes}`. `bearer_token` is the stored `${ENV_VAR}` reference, never a resolved secret. OAuth deployments additionally return read-only `auth_mode` and public `oauth` metadata. |
 | PUT | `/admin/api/settings` | Any subset of the settings keys below. | Validates and persists boot-time settings. A launchd-managed daemon is asked to restart (`reloaded: "restarting"`); a foreground/development process returns `"dev-no-restart"`, leaving the saved values for its next real restart. In OAuth mode, changing `bearer_token` is rejected. |
 
 For backend creation, `auth_value` must be exactly one `${ENV_VAR}` reference
@@ -104,12 +105,16 @@ literal.
 | `log_level` | string | Structured-log verbosity: `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL` (normalized to uppercase). |
 | `log_max_bytes` | integer | Maximum size of the active log before rotation, from `65536` to `1073741824` bytes. |
 | `log_backup_count` | integer | Number of rotated log files to retain, from `1` to `100`. |
+| `server_instructions_max_bytes` | integer | Gateway-wide cap, in UTF-8 bytes, on **authored** server-instructions overrides. Must be an integer from `1` to `1,048,576`; a boolean is rejected. Default `2048`. A backend's own `server_instructions_max_bytes` (set via `PUT /admin/api/backend/{name}/limits`) overrides it for that backend. |
+| `tool_description_max_bytes` | integer or `null` | Gateway-wide cap, in UTF-8 bytes, on each broadcast tool description. Must be an integer from `1` to `1,048,576`; a boolean is rejected. `null` (the default) = unlimited. |
 
 The Gateway page writes `bearer_token`, `introspect_interval`, `update_check`,
-and `log_level`. It displays the two retention values read-only; set
-`log_max_bytes` and `log_backup_count` through this API or
-[configuration.md](configuration.md). All six values take effect after the
-managed restart, or after the next real restart in foreground/development mode.
+`log_level`, and the two metadata limits. It displays the two retention
+values read-only; set `log_max_bytes` and `log_backup_count` through this API
+or [configuration.md](configuration.md). The two metadata limits are
+writable through this route and are validated exactly as above. All eight
+values take effect after the managed restart, or after the next real restart
+in foreground/development mode.
 
 ## Client registration
 
@@ -122,7 +127,12 @@ independent of them. See the [admin guide](admin-guide.md).
 
 Virtual Tools are gateway-owned tools on the always-mounted `/virtual/mcp`
 endpoint. Definitions bind to stable backend IDs and original source identities;
-current effective names are resolved from the live transformed proxies.
+current effective names are resolved from the live transformed proxies. A
+definition's `description_max_bytes` — an integer from `1` to `1,048,576` UTF-8
+bytes, or `null` (the default) to inherit the gateway-wide
+`tool_description_max_bytes` (unlimited when unset) — caps that Virtual Tool's
+broadcast description. An authored `description` over the effective cap is
+rejected with a 400, and the save is atomic: nothing is applied.
 
 | Method | Path | Body | Response |
 |--------|------|------|----------|

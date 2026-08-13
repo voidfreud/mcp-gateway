@@ -35,6 +35,8 @@ log_file = "~/.local/state/mcp-gateway/gateway.log"
 # introspect_interval = 0
 # baseline_max_age = 86400
 # update_check = true
+# server_instructions_max_bytes = 2048  # authored-instructions cap
+# tool_description_max_bytes = 4096     # per-tool description cap; unset = unlimited
 # bearer_token = "${MCP_GATEWAY_TOKEN}"
 
 # Remote OAuth resource-server mode (mutually exclusive with bearer_token):
@@ -89,10 +91,62 @@ diff-vs-default model (see below).
 | `introspect_interval` | integer (seconds) | `0` (off) | How often to re-scan every backend's tool list on a timer. `0` means off, which is the recommended default — the gateway already refreshes on reconnect, on a backend's own change notification, and on admin page load. Set an interval only for a long-lived remote backend that silently swaps its tools. |
 | `baseline_max_age` | integer (seconds) | `86400` (24 h) | How long a captured baseline counts as fresh for the **post-mount** refresh: at boot (or remount) a backend whose stored baseline is younger than this is not re-introspected, sparing slow stdio backends a second cold start per boot. `0` disables the gate (re-capture on every mount). Only the mount-time trigger is gated — a backend's own change notification, an admin page load, and the manual Re-inspect button always refresh. |
 | `update_check` | boolean | `true` | Check the fixed public PyPI project once at startup and every 24 hours. The check sends the installed gateway version in its User-Agent, has a 10-second timeout, tolerates offline/error responses, and never applies an update. Set `false` for zero update-check network requests; the Admin UI exposes the same toggle. |
+| `server_instructions_max_bytes` | integer | `2048` | Gateway-wide cap, in UTF-8 bytes, on **authored** server-instructions overrides (the backend `instructions` field, admin UI/API/CLI writes). Must be an integer from `1` to `1,048,576` (1 MiB); a boolean is rejected. A backend-level `server_instructions_max_bytes` overrides this for that backend. See [Metadata byte limits](#metadata-byte-limits). |
+| `tool_description_max_bytes` | integer or unset | unset (unlimited) | Gateway-wide cap, in UTF-8 bytes, on each tool description this gateway broadcasts. Unset (the default) means no cap. Must be an integer from `1` to `1,048,576` when set; a boolean is rejected. Precedence per tool: tool `description_max_bytes` > backend `tool_description_max_bytes` > this gateway value. See [Metadata byte limits](#metadata-byte-limits). |
 | `bearer_token` | string or unset | unset | Optional access token. When set, it must be one `${ENV}` reference; raw values are rejected. Every backend endpoint **and** the admin API then require `Authorization: Bearer <token>`. See [security.md](security.md#the-optional-bearer-token). |
 | `oauth` | table or unset | unset | JWT resource-server profile for standard remote OAuth. Mutually exclusive with `bearer_token`; protects each backend and `/virtual/mcp` independently. See [OAuth resource-server mode](#oauth-resource-server-mode). |
 | `backends` | list | empty | One `[[backends]]` block per backend. An empty configuration is valid: the Admin UI remains available to add or import backends, and `/virtual/mcp` remains mounted with an empty catalog. No backend MCP endpoint is available until a backend is configured and mounted. |
 | `virtual_tools` | list | empty | Gateway-owned tools served together at the permanent `/virtual/mcp` endpoint. Normally managed through the Admin UI. |
+
+## Metadata byte limits
+
+The gateway can enforce strict UTF-8 byte budgets on the two metadata
+strings it broadcasts to MCP clients: a backend's server-level `instructions`
+and each tool's `description` (backend tools and Virtual Tools alike). This
+keeps a chatty upstream backend or an over-long authored blurb from pushing
+unbounded context into every client session.
+
+**Sizing is in UTF-8 bytes, not characters.** A multibyte character counts at
+its full encoded size, and truncation never splits one: an over-cap string is
+cut at the last whole character that fits. Every cap is an integer from `1`
+to `1,048,576` (1 MiB); a boolean, zero, negative, or out-of-range value is
+rejected wherever the value is validated (config load, admin API, CLI).
+
+**Where the caps live.** The gateway-wide defaults sit at the top level:
+`server_instructions_max_bytes` (default `2048`) and
+`tool_description_max_bytes` (default unset = **unlimited**, preserving the
+historic behavior). A backend may set its own `server_instructions_max_bytes`
+and `tool_description_max_bytes`; a tool (or Virtual Tool definition) may set
+a per-tool `description_max_bytes`. Effective caps resolve as:
+
+- **instructions:** the backend cap when set, else the gateway cap.
+- **tool description:** the tool cap when set, else the backend cap when set,
+  else the gateway cap, else unlimited.
+
+Unset (`None`) means **inherit** at every scoped level; the top-level
+`tool_description_max_bytes` unset is the one special case — it means
+unlimited. The CLI spells these out as the `inherit` and `unlimited` value
+keywords (see [operations.md](operations.md#command-line-reference)); in
+`config.toml` you simply omit the field.
+
+**Authored text is rejected; captured text is truncated.** The two kinds of
+metadata get different guarantees:
+
+- **Authored** text — a backend `instructions` override you write, a tool
+  `description` override, a Virtual Tool definition, or any admin UI/API/CLI
+  write — is **rejected** with a clear error when it exceeds the effective
+  cap, and a directly authored `config.toml` value is rejected at load the
+  same way. Nothing you author is silently cut.
+- **Captured upstream** text — the backend's original instructions or a tool
+  description the gateway did not author — never fails to load. When it
+  exceeds the effective cap it is truncated at a UTF-8 character boundary at
+  broadcast time only, and the admin state (and dashboard) shows the
+  truncation so it stays observable.
+
+**Only non-default values are stored.** A scoped limit equal to the value it
+would inherit is not written to `config.toml`, and the top-level
+`tool_description_max_bytes` is only written when set — exactly like every
+other optional field (see the note at the top of this page).
 
 ## OAuth resource-server mode
 
@@ -137,7 +191,9 @@ deployments but cannot be combined with `[oauth]`.
 | `request_timeout` | number (seconds) | `300` | Maximum time allowed for each request forwarded to the backend. Must be greater than `0` and at most `3600`. |
 | `always_load` | boolean | `false` | Pin **all** of this backend's tools to load upfront (eager), where the connected client supports deferred loading. |
 | `enabled` | boolean | `true` | Whether the backend is broadcast at all. `false` disables every tool, drops its server instructions, and unmounts the endpoint. Toggles live in the admin UI without a restart. |
-| `instructions` | string or unset | unset | Overrides the backend's server-level instructions (the connection-time guidance a client receives). Unset inherits the backend's captured original. Set it even when the backend sends none, to add your own. The Admin UI, its API, and settings import reject overrides longer than 2,048 UTF-8 bytes; direct TOML values are not schema-capped. |
+| `instructions` | string or unset | unset | Overrides the backend's server-level instructions (the connection-time guidance a client receives). Unset inherits the backend's captured original. Set it even when the backend sends none, to add your own. An authored override longer than the **effective** instructions cap — the backend's `server_instructions_max_bytes` if set, else the gateway's `server_instructions_max_bytes` (default `2048`) — is rejected wherever it is written — the Admin UI, its API, the CLI, settings import, and `config.toml` load. Only **captured upstream** text — the backend's original instructions — can exceed the cap; it is truncated at a UTF-8 character boundary at broadcast time only. |
+| `server_instructions_max_bytes` | integer or unset | unset | Per-backend override of the gateway-wide `server_instructions_max_bytes`. Unset inherits the gateway value. Integer from `1` to `1,048,576`; a boolean is rejected. |
+| `tool_description_max_bytes` | integer or unset | unset | Per-backend cap, in UTF-8 bytes, on this backend's tool descriptions. Unset inherits the gateway `tool_description_max_bytes` (default: unlimited). A tool's own `description_max_bytes` overrides this. Integer from `1` to `1,048,576`; a boolean is rejected. |
 | `tools` | list | empty | One `[[backends.tools]]` block per tool you override. |
 | `resources` | list | empty | One `[[backends.resources]]` block per resource or resource template you override. |
 | `prompts` | list | empty | One `[[backends.prompts]]` block per prompt you override. |
@@ -156,6 +212,7 @@ backend's original.
 | `enabled` | boolean | `true` | `false` drops the tool from the listing entirely. |
 | `always_load` | boolean | `false` | Pin this one tool to load upfront (eager). |
 | `max_result_chars` | positive integer or unset | unset | Per-tool output budget: broadcast as `_meta["anthropic/maxResultSizeChars"]`, which Claude Code honors over its global 25k-token output cap (`MAX_MCP_OUTPUT_TOKENS`) for text content. Raise it for bulk readers, lower it for chatty tools. Unset = the client default. |
+| `description_max_bytes` | integer or unset | unset | Per-tool cap, in UTF-8 bytes, on this tool's broadcast description. Unset inherits the backend's `tool_description_max_bytes`, then the gateway's `tool_description_max_bytes` (default: unlimited). Integer from `1` to `1,048,576`; a boolean is rejected. |
 | `validate` | string or unset | unset | A behavior hook, `module:function` (see [Behavior hooks](#behavior-hooks-validate--post_process)). Runs before every call; raise `ValueError("why")` to reject it. |
 | `post_process` | string or unset | unset | A behavior hook, `module:function`. Runs on every result before the caller sees it. |
 | `params` | list | empty | One `[[backends.tools.params]]` block per parameter you override. |
@@ -278,6 +335,7 @@ definitions use these fields:
 | `inputs` | list | empty | Public inputs: `name`, `type` (`string`/`integer`/`number`/`boolean`), `description`, `required`, and optional `default`. |
 | `members` | list | required | Stable `backend_id` + `tool_original` binding, optional `label`, original-parameter maps in `args`/`static_args`, timeout, and routing hints. |
 | `router` | table or unset | unset | Fallback plus OpenRouter model, `${ENV}` API-key reference, deadline, policy, and activation-bound egress consent for `llm`. Use the Admin UI to acknowledge the exact routing configuration; editing it returns the definition to draft. |
+| `description_max_bytes` | integer or unset | unset | Per-definition cap, in UTF-8 bytes, on this Virtual Tool's broadcast description. Unset inherits the gateway-wide `tool_description_max_bytes` (default: unlimited). Integer from `1` to `1,048,576`; a boolean is rejected. |
 | `max_result_bytes` | integer | `262144` | Strict limit on the final serialized MCP `ToolResult`. Whole content/structured items that do not fit are omitted with a bounded marker and metadata. |
 | `failure_policy` | `partial` or `strict` | `partial` | Partial succeeds when any selected member succeeds; strict fails if any selected member fails. |
 | `always_load` | boolean | `false` | Adds the same eager-load metadata used by backend tools. |

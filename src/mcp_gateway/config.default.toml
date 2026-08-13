@@ -9,6 +9,8 @@ log_file = "~/.local/state/mcp-gateway/gateway.log"
 # log_max_bytes = 5242880  # active-file cap (5 MiB by default)
 # log_backup_count = 5     # rotated files kept in addition to the active file
 # update_check = true       # daily PyPI notice only; false disables all checks
+# server_instructions_max_bytes = 2048  # authored-instructions cap (UTF-8 bytes, 1..1048576)
+# tool_description_max_bytes = 4096      # per-tool description cap; unset = unlimited
 
 [[backends]]
 name = "deepwiki"

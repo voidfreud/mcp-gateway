@@ -141,6 +141,36 @@ def test_set_instructions_none_clears(defaults_dir):
     assert cfg.backends[0].instructions is None
 
 
+# --- #286 configurable metadata limits ------------------------------------
+
+
+def test_instructions_effective_cap(defaults_dir):
+    """#286: the instructions cap is the effective one — a backend override
+    raises it above (and can lower it below) the 2048 gateway default."""
+    cfg = _single_cfg()
+    cfg.backends[0].server_instructions_max_bytes = 4096
+    admin.set_instructions(cfg, "b", "a" * 3000)  # over 2048, under 4096
+    assert cfg.backends[0].instructions == "a" * 3000
+    with pytest.raises(cl.ConfigError, match="4096"):
+        admin.set_instructions(cfg, "b", "a" * 4097)
+
+
+def test_set_instructions_lowered_backend_cap_rejects_sooner(defaults_dir):
+    cfg = _single_cfg()
+    cfg.backends[0].server_instructions_max_bytes = 100
+    with pytest.raises(cl.ConfigError, match="100"):
+        admin.set_instructions(cfg, "b", "a" * 101)
+
+
+def test_set_instructions_cap_counts_utf8_bytes_with_custom_cap(defaults_dir):
+    # 4-byte chars under a raised cap — the byte count (not char count) rules.
+    cfg = _single_cfg()
+    cfg.backends[0].server_instructions_max_bytes = 8
+    admin.set_instructions(cfg, "b", "\U0001f928" * 2)  # exactly 8 bytes
+    with pytest.raises(cl.ConfigError):
+        admin.set_instructions(cfg, "b", "\U0001f928" * 3)  # 12 bytes
+
+
 # --- #81 FastMCP private-attr tripwire -------------------------------------
 
 
@@ -390,6 +420,114 @@ def test_import_is_reported_per_item_and_rejects_unknowns(defaults_dir):
     # application inside the throwaway cfg is fine ("t" did apply here).
 
 
+@pytest.mark.parametrize(
+    ("bundle", "expected_error"),
+    [
+        ([], "settings: must be a JSON object (got list)"),
+        ({"backends": []}, "backends: must be a JSON object (got list)"),
+        ({"backends": 1}, "backends: must be a JSON object (got int)"),
+        (
+            {"backends": {"b": []}},
+            "b: backend settings must be a JSON object (got list)",
+        ),
+        (
+            {"backends": {"b": "bad"}},
+            "b: backend settings must be a JSON object (got str)",
+        ),
+        (
+            {"backends": {"b": {"tools": []}}},
+            "b/tools: must be a JSON object (got list)",
+        ),
+        (
+            {"backends": {"b": {"tools": {"t": []}}}},
+            "b/t: tool override must be a JSON object (got list)",
+        ),
+        (
+            {"backends": {"b": {"resources": False}}},
+            "b/resources: must be a JSON object (got bool)",
+        ),
+        (
+            {"backends": {"b": {"resources": {"file://a.txt": 1}}}},
+            "b/file://a.txt: resource override must be a JSON object (got int)",
+        ),
+        (
+            {"backends": {"b": {"prompts": None}}},
+            "b/prompts: must be a JSON object (got NoneType)",
+        ),
+        (
+            {"backends": {"b": {"prompts": {"p1": "bad"}}}},
+            "b/p1: prompt override must be a JSON object (got str)",
+        ),
+        (
+            {"backends": {"b": {"tools": {"t": {"params": {}}}}}},
+            "b/t/params: must be a JSON array (got dict)",
+        ),
+        (
+            {"backends": {"b": {"prompts": {"p1": {"args": [[]]}}}}},
+            ("b/p1/args[0]: prompt argument override must be a JSON object (got list)"),
+        ),
+        (
+            {"backends": {"b": {"display_name": []}}},
+            "b/display_name: must be a string or null (got list)",
+        ),
+        (
+            {"backends": {"b": {"display_name": "\ud83d"}}},
+            (
+                "b/display_name: invalid display name: contains characters that "
+                "can't be encoded (unpaired surrogate at position 0)"
+            ),
+        ),
+    ],
+)
+def test_import_rejects_malformed_shapes_without_mutation(
+    defaults_dir, bundle, expected_error
+):
+    cfg = _single_cfg()
+    cfg.server_instructions_max_bytes = 512
+    cfg.backends[0].display_name = "keep"
+    cfg.backends[0].instructions = "keep"
+    cfg.backends[0].always_load = True
+    before = cfg.model_dump()
+    if isinstance(bundle, dict):
+        bundle = {"server_instructions_max_bytes": 4096, **bundle}
+
+    affected, errors = admin.import_settings(cfg, bundle, mode="replace")
+
+    assert affected == []
+    assert errors == [expected_error]
+    assert cfg.model_dump() == before
+
+
+def test_import_accumulates_shape_errors_before_mutation(defaults_dir):
+    cfg = _single_cfg()
+    cfg.backends[0].display_name = "keep"
+    cfg.backends[0].always_load = True
+    before = cfg.model_dump()
+    bundle = {
+        "server_instructions_max_bytes": 4096,
+        "backends": {
+            "b": {
+                "display_name": "changed",
+                "tools": {"t": []},
+                "resources": [],
+                "prompts": {"p1": "bad"},
+            },
+            "ghost": 7,
+        },
+    }
+
+    affected, errors = admin.import_settings(cfg, bundle, mode="replace")
+
+    assert affected == []
+    assert errors == [
+        "b/t: tool override must be a JSON object (got list)",
+        "b/resources: must be a JSON object (got list)",
+        "b/p1: prompt override must be a JSON object (got str)",
+        "ghost: backend settings must be a JSON object (got int)",
+    ]
+    assert cfg.model_dump() == before
+
+
 def test_import_merge_vs_replace(defaults_dir):
     _write_defaults(defaults_dir, "b", "t", desc="orig")
     cfg = _single_cfg()
@@ -415,6 +553,205 @@ def test_import_ignores_backend_topology(defaults_dir):
     affected, errors = admin.import_settings(cfg, bundle)
     assert errors == [] and cfg.backends[0].enabled is True
     assert cfg.backends[0].tools[0].name == "n"
+
+
+def test_export_omits_default_limits(defaults_dir):
+    # #286: serialize only non-default/non-null limit fields.
+    _write_defaults(defaults_dir, "b", "t")
+    cfg = _single_cfg()
+    cfg.backends[0].instructions = "tuned"  # ensure the entry is non-empty
+    bundle = admin.export_settings(cfg)
+    assert "server_instructions_max_bytes" not in bundle
+    assert "tool_description_max_bytes" not in bundle
+    assert "server_instructions_max_bytes" not in bundle["backends"]["b"]
+    assert "tool_description_max_bytes" not in bundle["backends"]["b"]
+
+
+def test_export_import_round_trips_limits(defaults_dir):
+    _write_defaults(defaults_dir, "b", "t", desc="orig desc")
+    cfg = _single_cfg()
+    cfg.server_instructions_max_bytes = 4096
+    cfg.tool_description_max_bytes = 2048
+    cfg.backends[0].server_instructions_max_bytes = 1000
+    cfg.backends[0].tool_description_max_bytes = 500
+    admin.apply_tool_override(
+        cfg, "b", {"tool_original": "t", "override": {"description_max_bytes": 100}}
+    )
+    bundle = admin.export_settings(cfg)
+    assert bundle["server_instructions_max_bytes"] == 4096
+    assert bundle["tool_description_max_bytes"] == 2048
+    assert bundle["backends"]["b"]["server_instructions_max_bytes"] == 1000
+    assert bundle["backends"]["b"]["tool_description_max_bytes"] == 500
+    assert bundle["backends"]["b"]["tools"]["t"]["description_max_bytes"] == 100
+    clean = _single_cfg()
+    affected, errors = admin.import_settings(clean, bundle, mode="replace")
+    assert errors == [] and affected == ["b"]
+    assert admin.export_settings(clean) == bundle
+
+
+def test_import_clears_limits_with_null(defaults_dir):
+    """#286: explicit null in a bundle clears stored scoped limits (inherit)."""
+    _write_defaults(defaults_dir, "b", "t", desc="orig")
+    cfg = _single_cfg()
+    cfg.backends[0].server_instructions_max_bytes = 1000
+    cfg.backends[0].tool_description_max_bytes = 500
+    admin.apply_tool_override(
+        cfg, "b", {"tool_original": "t", "override": {"description_max_bytes": 100}}
+    )
+    bundle = {
+        "backends": {
+            "b": {
+                "server_instructions_max_bytes": None,
+                "tool_description_max_bytes": None,
+                "tools": {"t": {"description_max_bytes": None}},
+            }
+        }
+    }
+    affected, errors = admin.import_settings(cfg, bundle)
+    assert errors == []
+    assert cfg.backends[0].server_instructions_max_bytes is None
+    assert cfg.backends[0].tool_description_max_bytes is None
+    assert cfg.backends[0].tools == []
+
+
+def test_import_applies_gateway_limits(defaults_dir):
+    _write_defaults(defaults_dir, "b", "t")
+    cfg = _single_cfg()
+    bundle = {
+        "server_instructions_max_bytes": 4096,
+        "tool_description_max_bytes": None,  # explicit unbounded
+        "backends": {},
+    }
+    affected, errors = admin.import_settings(cfg, bundle)
+    # #286: a moved gateway global shifts every backend's effective cap — all
+    # configured backends must be in ``affected`` so every live proxy reloads.
+    assert errors == [] and affected == ["b"]
+    assert cfg.server_instructions_max_bytes == 4096
+    assert cfg.tool_description_max_bytes is None
+
+
+def test_import_replace_resets_backend_limits(defaults_dir):
+    # replace mode yields exactly the bundle: stored limits are reset first.
+    _write_defaults(defaults_dir, "b", "t", desc="orig")
+    cfg = _single_cfg()
+    cfg.backends[0].server_instructions_max_bytes = 1000
+    cfg.backends[0].tool_description_max_bytes = 500
+    affected, errors = admin.import_settings(
+        cfg, {"backends": {"b": {}}}, mode="replace"
+    )
+    assert errors == []
+    assert cfg.backends[0].server_instructions_max_bytes is None
+    assert cfg.backends[0].tool_description_max_bytes is None
+
+
+def test_import_replace_resets_gateway_globals_to_defaults(defaults_dir):
+    """#286: replace mode initializes BOTH gateway globals to their model
+    defaults (2048 / None) before applying present bundle keys, so a
+    default-omitting export round-trips authoritatively onto a gateway running
+    custom limits."""
+    _write_defaults(defaults_dir, "b", "t", desc="orig")
+    default_export = admin.export_settings(_single_cfg())
+    assert "server_instructions_max_bytes" not in default_export
+    assert "tool_description_max_bytes" not in default_export
+    cfg = _single_cfg()
+    cfg.server_instructions_max_bytes = 4096
+    cfg.tool_description_max_bytes = 2048
+    affected, errors = admin.import_settings(cfg, default_export, mode="replace")
+    assert errors == []
+    assert cfg.server_instructions_max_bytes == 2048
+    assert cfg.tool_description_max_bytes is None
+    # replace reset the globals -> every configured backend reloads
+    assert affected == ["b"]
+
+
+@pytest.mark.parametrize(
+    ("lowered", "expected"),
+    [
+        (
+            {"server_instructions_max_bytes": 100},
+            "backend 'b': instructions are 3000 UTF-8 bytes; the effective "
+            "cap is 100 bytes",
+        ),
+        (
+            {"tool_description_max_bytes": 100},
+            "backend 'b' tool 't': description is 3000 UTF-8 bytes; the "
+            "effective cap is 100 bytes",
+        ),
+    ],
+)
+def test_import_lowered_cap_rejects_existing_authored_text(
+    defaults_dir, lowered, expected
+):
+    """#286: a bundle that only LOWERS an inherited cap must not strand
+    pre-existing authored text over the new effective cap — the fully mutated
+    config is revalidated and the ConfigError is reported atomically."""
+    _write_defaults(defaults_dir, "b", "t", desc="orig")
+    cfg = _single_cfg()
+    cfg.server_instructions_max_bytes = 4096
+    cfg.tool_description_max_bytes = 4096
+    cfg.backends[0].instructions = "a" * 3000  # valid under 4096
+    admin.apply_tool_override(
+        cfg, "b", {"tool_original": "t", "override": {"description": "b" * 3000}}
+    )
+    affected, errors = admin.import_settings(cfg, {**lowered, "backends": {}})
+    assert errors == [expected]
+    assert affected == ["b"]  # globals moved, but the caller discards cfg
+
+
+def test_import_global_limit_change_reloads_every_backend(defaults_dir):
+    """#286: a gateway-global change lands EVERY configured backend in
+    ``affected``, so the caller's commit hot-reloads all live proxies — not
+    just the backends the bundle names."""
+    import structlog
+    from fastmcp.server import create_proxy
+
+    _write_defaults(defaults_dir, "b", "t", desc="orig")
+    _write_defaults(defaults_dir, "c", "u", desc="orig")
+    cfg = cl.GatewayConfig.model_validate(
+        {
+            "backends": [
+                {"name": "b", "transport": "stdio", "command": "/bin/x"},
+                {"name": "c", "transport": "stdio", "command": "/bin/y"},
+            ]
+        }
+    )
+    proxies = {
+        b.name: create_proxy(cl.to_proxy_config_one(b), name=f"mcp-gateway-{b.name}")
+        for b in cfg.backends
+    }
+    registry, holders = proxies, {}
+    backend_runtime = runtime.BackendRuntime.from_legacy(registry, holders)
+    affected, errors = admin.import_settings(
+        cfg, {"server_instructions_max_bytes": 4096, "backends": {}}
+    )
+    assert errors == []
+    assert affected == ["b", "c"]
+    for name in affected:
+        admin.hot_reload(backend_runtime, cfg, name, structlog.get_logger("test"))
+    # every proxy actually got its fresh transform holder swapped in
+    assert len(holders["b"]) == 1
+    assert len(holders["c"]) == 1
+
+
+@pytest.mark.parametrize("bad", [True, 0, -5, "1024", 1_048_577, 1.5])
+def test_import_rejects_bad_limit_values(defaults_dir, bad):
+    _write_defaults(defaults_dir, "b", "t")
+    cfg = _single_cfg()
+    bundle = {"server_instructions_max_bytes": bad, "backends": {}}
+    affected, errors = admin.import_settings(cfg, bundle)
+    assert errors  # reported per item; the caller discards cfg on any error
+    assert cfg.server_instructions_max_bytes == 2048  # untouched
+
+
+def test_import_rejects_null_gateway_instructions_limit(defaults_dir):
+    # the gateway instructions cap is int-only — null is not a valid reset.
+    _write_defaults(defaults_dir, "b", "t")
+    cfg = _single_cfg()
+    affected, errors = admin.import_settings(
+        cfg, {"server_instructions_max_bytes": None, "backends": {}}
+    )
+    assert errors
+    assert cfg.server_instructions_max_bytes == 2048
 
 
 def test_apply_rejects_invalid_name(defaults_dir):
@@ -508,6 +845,122 @@ def test_export_import_round_trips_max_result_chars(defaults_dir):
     affected, errors = admin.import_settings(clean, bundle, mode="replace")
     assert errors == []
     assert clean.backends[0].tools[0].max_result_chars == 12345
+
+
+def test_apply_stores_description_limit(defaults_dir):
+    # #286: the per-tool description cap alone is a real override.
+    _write_defaults(defaults_dir, "b", "t", desc="orig desc")
+    cfg = _single_cfg()
+    admin.apply_tool_override(
+        cfg, "b", {"tool_original": "t", "override": {"description_max_bytes": 512}}
+    )
+    ov = cfg.backends[0].tools[0]
+    assert ov.description_max_bytes == 512
+    assert ov.description is None  # a limit without a text diff is stored
+
+
+def test_apply_partial_put_preserves_description_limit(defaults_dir):
+    # #139 merge semantics: an absent description_max_bytes key keeps the cap.
+    _write_defaults(defaults_dir, "b", "t", desc="orig desc")
+    cfg = _single_cfg()
+    admin.apply_tool_override(
+        cfg, "b", {"tool_original": "t", "override": {"description_max_bytes": 512}}
+    )
+    admin.apply_tool_override(
+        cfg, "b", {"tool_original": "t", "override": {"description": "tuned"}}
+    )
+    ov = cfg.backends[0].tools[0]
+    assert ov.description_max_bytes == 512 and ov.description == "tuned"
+
+
+def test_apply_null_clears_desc_limit(defaults_dir):
+    _write_defaults(defaults_dir, "b", "t", desc="orig desc")
+    cfg = _single_cfg()
+    admin.apply_tool_override(
+        cfg, "b", {"tool_original": "t", "override": {"description_max_bytes": 512}}
+    )
+    admin.apply_tool_override(
+        cfg,
+        "b",
+        {"tool_original": "t", "override": {"description_max_bytes": None}},
+    )
+    assert cfg.backends[0].tools == []  # cleared -> no stored override
+
+
+@pytest.mark.parametrize("bad", [True, False, 0, -1, 1_048_577, "512", 1.5])
+def test_apply_rejects_bad_desc_limit(defaults_dir, bad):
+    # bool is invalid (int subclass); out-of-range and non-int are invalid too.
+    _write_defaults(defaults_dir, "b", "t", desc="orig desc")
+    cfg = _single_cfg()
+    with pytest.raises(cl.ConfigError, match="description_max_bytes"):
+        admin.apply_tool_override(
+            cfg,
+            "b",
+            {"tool_original": "t", "override": {"description_max_bytes": bad}},
+        )
+    assert cfg.backends[0].tools == []  # nothing persisted
+
+
+def test_apply_rejects_over_limit_authored_description(defaults_dir):
+    # #286: authored over-limit text is a clean ConfigError (-> 400), and the
+    # cap is the tool > backend > gateway effective one.
+    _write_defaults(defaults_dir, "b", "t", desc="orig desc")
+    cfg = _single_cfg()
+    cfg.tool_description_max_bytes = 8  # tight gateway-wide cap
+    with pytest.raises(cl.ConfigError, match="8"):
+        admin.apply_tool_override(
+            cfg, "b", {"tool_original": "t", "override": {"description": "123456789"}}
+        )
+    assert cfg.backends[0].tools == []  # rejected save stores nothing
+    admin.apply_tool_override(
+        cfg, "b", {"tool_original": "t", "override": {"description": "12345678"}}
+    )
+    assert cfg.backends[0].tools[0].description == "12345678"
+
+
+def test_apply_backend_cap_overrides_gateway_for_descriptions(defaults_dir):
+    _write_defaults(defaults_dir, "b", "t", desc="orig desc")
+    cfg = _single_cfg()
+    cfg.tool_description_max_bytes = 4  # gateway is tight...
+    cfg.backends[0].tool_description_max_bytes = 16  # ...backend loosens it
+    admin.apply_tool_override(
+        cfg, "b", {"tool_original": "t", "override": {"description": "12345678"}}
+    )
+    assert cfg.backends[0].tools[0].description == "12345678"  # 8 <= 16
+    with pytest.raises(cl.ConfigError):
+        admin.apply_tool_override(
+            cfg, "b", {"tool_original": "t", "override": {"description": "x" * 17}}
+        )
+
+
+def test_apply_raises_limit_in_same_save_allows_bigger_text(defaults_dir):
+    """The cap applied is the one effective AFTER the save — the payload may
+    raise the tool's own limit in the same call."""
+    _write_defaults(defaults_dir, "b", "t", desc="orig desc")
+    cfg = _single_cfg()  # gateway tool_description_max_bytes None (unbounded)
+    admin.apply_tool_override(
+        cfg,
+        "b",
+        {
+            "tool_original": "t",
+            "override": {"description_max_bytes": 64, "description": "a" * 64},
+        },
+    )
+    ov = cfg.backends[0].tools[0]
+    assert ov.description_max_bytes == 64 and ov.description == "a" * 64
+
+
+def test_apply_over_limit_captured_default_still_inherits(defaults_dir):
+    """Captured upstream text is truncated (never rejected) at outgoing
+    transform time — an override equal to an over-limit default must not 400
+    (it inherits and stores nothing)."""
+    _write_defaults(defaults_dir, "b", "t", desc="x" * 100)  # over the cap
+    cfg = _single_cfg()
+    cfg.tool_description_max_bytes = 8
+    admin.apply_tool_override(
+        cfg, "b", {"tool_original": "t", "override": {"description": "x" * 100}}
+    )
+    assert cfg.backends[0].tools == []  # equal-to-default inherits, no reject
 
 
 def test_apply_param_hide_stored(defaults_dir):
@@ -1185,6 +1638,78 @@ def test_build_state_includes_endpoint(defaults_dir):
     assert admin.build_state(cfg)["backends"][0]["endpoint"] == "/b/mcp"
 
 
+# --- #286 metadata limits in state -----------------------------------------
+
+
+def test_state_surfaces_limit_defaults(defaults_dir):
+    _write_defaults(defaults_dir, "b", "t", desc="hello")
+    st = admin.build_state(_single_cfg())
+    assert st["server_instructions_max_bytes"] == 2048
+    assert st["tool_description_max_bytes"] is None
+    bst = st["backends"][0]
+    assert bst["server_instructions_max_bytes"] is None
+    assert bst["tool_description_max_bytes"] is None
+    assert bst["effective_server_instructions_max_bytes"] == 2048
+    assert bst["effective_tool_description_max_bytes"] is None
+    assert bst["default_instructions_bytes"] is None
+    assert bst["instructions_bytes"] is None
+    tst = bst["tools"][0]
+    assert tst["description_max_bytes"] is None
+    assert tst["effective_description_max_bytes"] is None
+    assert tst["default_description_bytes"] == 5
+    assert tst["effective_description_bytes"] == 5
+
+
+def test_build_state_surfaces_custom_limits_and_bytes(defaults_dir):
+    """#286: precedence (tool > backend > gateway for descriptions, backend >
+    gateway for instructions) and UTF-8 byte counts (not chars)."""
+    _write_defaults(defaults_dir, "b", "t", desc="caf\u00e9")
+    cfg = _single_cfg()
+    cfg.server_instructions_max_bytes = 4096
+    cfg.tool_description_max_bytes = 512
+    cfg.backends[0].server_instructions_max_bytes = 1000
+    cfg.backends[0].tool_description_max_bytes = 256
+    cfg.backends[0].instructions = "caf\u00e9 instructions"
+    admin.apply_tool_override(
+        cfg,
+        "b",
+        {
+            "tool_original": "t",
+            "override": {
+                "description_max_bytes": 128,
+                "description": "\U0001f928" * 10,  # 40 UTF-8 bytes
+            },
+        },
+    )
+    st = admin.build_state(cfg)
+    assert st["server_instructions_max_bytes"] == 4096
+    assert st["tool_description_max_bytes"] == 512
+    bst = st["backends"][0]
+    assert bst["server_instructions_max_bytes"] == 1000
+    assert bst["tool_description_max_bytes"] == 256
+    assert bst["effective_server_instructions_max_bytes"] == 1000  # backend wins
+    assert bst["effective_tool_description_max_bytes"] == 256  # backend wins
+    assert bst["default_instructions_bytes"] is None
+    assert bst["instructions_bytes"] == len("caf\u00e9 instructions".encode("utf-8"))
+    tst = bst["tools"][0]
+    assert tst["description_max_bytes"] == 128
+    assert tst["effective_description_max_bytes"] == 128  # tool wins
+    assert tst["default_description_bytes"] == len("caf\u00e9".encode("utf-8"))
+    assert tst["effective_description_bytes"] == 40
+
+
+def test_build_state_instructions_bytes_uses_override(defaults_dir):
+    _write_defaults_instr(defaults_dir, "b", "ORIGINAL")
+    cfg = _single_cfg()
+    state = admin.build_state(cfg)
+    assert state["backends"][0]["default_instructions_bytes"] == 8
+    assert state["backends"][0]["instructions_bytes"] == 8  # inherits
+    cfg.backends[0].instructions = "EDITED"
+    state = admin.build_state(cfg)
+    assert state["backends"][0]["instructions_bytes"] == 6  # override wins
+    assert state["backends"][0]["default_instructions_bytes"] == 8
+
+
 # --- #79 effective_tools scoping (per-backend collision check) --------------
 
 
@@ -1499,6 +2024,18 @@ def test_migrate_override_carries_fields_and_surviving_params(defaults_dir):
     assert nt.always_load is True
     assert [p.original for p in nt.params] == ["keep"]
     assert nt.params[0].description == "better"
+
+
+def test_migrate_override_carries_description_cap(defaults_dir):
+    """#286: migrating a dangling override carries its per-tool
+    ``description_max_bytes`` onto the replacement payload — the cap is
+    authored config, not a rename casualty."""
+    cfg = _cfg_migrate_setup(defaults_dir)
+    cfg.backends[0].tools[0].description_max_bytes = 123
+    res = admin.migrate_override(cfg, "b", "old-tool", "new-tool")
+    assert res["carried_params"] == ["keep"]
+    nt = {t.original: t for t in cfg.backends[0].tools}["new-tool"]
+    assert nt.description_max_bytes == 123
 
 
 def test_migrate_override_to_unknown_target_raises(defaults_dir):
@@ -2157,6 +2694,59 @@ def test_add_backend_rejects_malformed_env(tmp_path, monkeypatch, bad_env):
     assert names == ["b"]
 
 
+# --- #286: settings import bundle selection + atomic cap revalidation ---------
+
+
+@pytest.mark.parametrize("bad_settings", [[], False, None, ""])
+def test_post_import_rejects_falsy_settings_values(tmp_path, monkeypatch, bad_settings):
+    """#286: the bundle is selected by KEY PRESENCE — a falsy nested
+    ``settings`` value must 400, never fall through to treating the envelope
+    itself as the bundle (which would silently import nothing and report
+    success)."""
+    _stub_capture_defaults(monkeypatch, tmp_path)
+    app = _backend_admin_app(tmp_path)
+    path = tmp_path / "config.toml"
+    before = path.read_text()
+    r = TestClient(app).post("/admin/api/import", json={"settings": bad_settings})
+    assert r.status_code == 400
+    assert r.json()["ok"] is False
+    assert path.read_text() == before  # nothing persisted
+
+
+def test_post_import_lowered_cap_rejects_without_persisting(tmp_path, monkeypatch):
+    """#286: importing a lowered gateway cap over existing authored text 400s
+    with the revalidation error and persists NOTHING (all-or-nothing)."""
+    _stub_capture_defaults(monkeypatch, tmp_path)
+    cfg = cl.GatewayConfig.model_validate(
+        {
+            "server_instructions_max_bytes": 4096,
+            "backends": [
+                {
+                    "name": "b",
+                    "transport": "stdio",
+                    "command": "/bin/x",
+                    "instructions": "a" * 3000,  # valid under 4096
+                }
+            ],
+        }
+    )
+    path = tmp_path / "config.toml"
+    cl.save(cfg, str(path))
+    app = Starlette()
+    admin.register(app, str(path), structlog.get_logger("test"), {}, {})
+    r = TestClient(app).post(
+        "/admin/api/import",
+        json={"settings": {"server_instructions_max_bytes": 100, "backends": {}}},
+    )
+    assert r.status_code == 400
+    assert r.json()["errors"] == [
+        "backend 'b': instructions are 3000 UTF-8 bytes; the effective cap is 100 bytes"
+    ]
+    after = cl.load(str(path))
+    assert after.server_instructions_max_bytes == 4096
+    assert after.backends[0].instructions == "a" * 3000
+
+
 # --- credential-like header/env values must be ${ENV_VAR} refs ---------------
 # (CLI-CREDENTIAL-ARGV-003) The Backend model boundary rejects raw credentials
 # under credential-like keys for headers AND env; the add API surfaces the
@@ -2332,3 +2922,147 @@ def test_add_backend_rejects_unknown_payload_key(tmp_path, monkeypatch):
     names = [b.name for b in cl.load(str(tmp_path / "config.toml")).backends]
     assert names == ["b"]  # config untouched
     assert not (tmp_path / "defaults").exists()  # capture never ran
+
+
+# --- #286 metadata limits: routes -------------------------------------------
+
+
+def test_backend_limits_put_roundtrips(tmp_path, monkeypatch):
+    """#286: PUT /admin/api/backend/{name}/limits stores the overrides, hot-
+    reloads in-process, and persists atomically; null clears (inherit)."""
+    monkeypatch.setattr(admin, "under_launchd", lambda: False)
+    _stub_capture_defaults(monkeypatch, tmp_path)
+    client = TestClient(_backend_admin_app(tmp_path))
+    r = client.put(
+        "/admin/api/backend/b/limits",
+        json={"server_instructions_max_bytes": 1000, "tool_description_max_bytes": 500},
+    )
+    assert r.status_code == 200
+    assert r.json() == {"ok": True, "reloaded": "in-process"}
+    b = cl.load(str(tmp_path / "config.toml")).backends[0]
+    assert b.server_instructions_max_bytes == 1000
+    assert b.tool_description_max_bytes == 500
+    # null clears the stored override; the other key is untouched (merge)
+    r = client.put(
+        "/admin/api/backend/b/limits",
+        json={"server_instructions_max_bytes": None},
+    )
+    assert r.status_code == 200
+    b = cl.load(str(tmp_path / "config.toml")).backends[0]
+    assert b.server_instructions_max_bytes is None
+    assert b.tool_description_max_bytes == 500
+
+
+def test_backend_limits_put_unknown_backend(tmp_path, monkeypatch):
+    _stub_capture_defaults(monkeypatch, tmp_path)
+    r = TestClient(_backend_admin_app(tmp_path)).put(
+        "/admin/api/backend/ghost/limits", json={"server_instructions_max_bytes": 100}
+    )
+    assert r.status_code == 400
+    assert "unknown backend" in r.json()["error"]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"server_instructions_max_bytes": True},  # bool is invalid
+        {"tool_description_max_bytes": False},
+        {"server_instructions_max_bytes": 0},
+        {"tool_description_max_bytes": -1},
+        {"server_instructions_max_bytes": 1_048_577},
+        {"tool_description_max_bytes": "512"},
+        {"server_instructions_max_bytes": 1.5},
+        {"tool_desc_max_bytes": 512},  # unknown key
+        {"server_instructions_max_bytes": 512, "extra": 1},
+        [],  # non-object body
+    ],
+)
+def test_backend_limits_put_rejects_bad_payload(tmp_path, monkeypatch, payload):
+    """#286: invalid/bool/unknown values are clean 400s and nothing is
+    persisted (no partial write)."""
+    _stub_capture_defaults(monkeypatch, tmp_path)
+    r = TestClient(_backend_admin_app(tmp_path)).put(
+        "/admin/api/backend/b/limits", json=payload
+    )
+    assert r.status_code == 400
+    b = cl.load(str(tmp_path / "config.toml")).backends[0]
+    assert b.server_instructions_max_bytes is None
+    assert b.tool_description_max_bytes is None
+
+
+def test_backend_limits_put_rejects_mixed_good_and_bad(tmp_path, monkeypatch):
+    """A valid key alongside an invalid one leaves the config untouched."""
+    _stub_capture_defaults(monkeypatch, tmp_path)
+    r = TestClient(_backend_admin_app(tmp_path)).put(
+        "/admin/api/backend/b/limits",
+        json={
+            "server_instructions_max_bytes": 100,
+            "tool_description_max_bytes": "nope",
+        },
+    )
+    assert r.status_code == 400
+    b = cl.load(str(tmp_path / "config.toml")).backends[0]
+    assert b.server_instructions_max_bytes is None
+    assert b.tool_description_max_bytes is None
+
+
+def test_settings_put_accepts_limit_keys(tmp_path, monkeypatch):
+    """#286: PUT /admin/api/settings owns the gateway-wide limits."""
+    monkeypatch.setattr(admin, "under_launchd", lambda: False)
+    _stub_capture_defaults(monkeypatch, tmp_path)
+    client = TestClient(_backend_admin_app(tmp_path))
+    r = client.put(
+        "/admin/api/settings",
+        json={
+            "server_instructions_max_bytes": 4096,
+            "tool_description_max_bytes": 1024,
+        },
+    )
+    assert r.status_code == 200
+    assert r.json()["reloaded"] == "dev-no-restart"  # boot-time semantics
+    cfg = cl.load(str(tmp_path / "config.toml"))
+    assert cfg.server_instructions_max_bytes == 4096
+    assert cfg.tool_description_max_bytes == 1024
+    # readable back through GET with the prefill shape
+    j = client.get("/admin/api/settings").json()
+    assert j["server_instructions_max_bytes"] == 4096
+    assert j["tool_description_max_bytes"] == 1024
+
+
+def test_settings_put_rejects_bad_limits(tmp_path, monkeypatch):
+    _stub_capture_defaults(monkeypatch, tmp_path)
+    client = TestClient(_backend_admin_app(tmp_path))
+    for payload in (
+        {"server_instructions_max_bytes": True},
+        {"server_instructions_max_bytes": 0},
+        {"server_instructions_max_bytes": 1_048_577},
+        {"server_instructions_max_bytes": "512"},
+        {"server_instructions_max_bytes": None},  # int-only at the gateway
+        {"tool_description_max_bytes": False},
+        {"tool_description_max_bytes": -3},
+    ):
+        r = client.put("/admin/api/settings", json=payload)
+        assert r.status_code == 400, payload
+    cfg = cl.load(str(tmp_path / "config.toml"))
+    assert cfg.server_instructions_max_bytes == 2048  # untouched
+    assert cfg.tool_description_max_bytes is None
+    # null tool limit is legal (explicit unbounded)
+    r = client.put("/admin/api/settings", json={"tool_description_max_bytes": None})
+    assert r.status_code == 200
+
+
+def test_state_endpoint_surfaces_limits(tmp_path, monkeypatch):
+    _stub_capture_defaults(monkeypatch, tmp_path)
+    client = TestClient(_backend_admin_app(tmp_path))
+    client.put(
+        "/admin/api/backend/b/limits",
+        json={"server_instructions_max_bytes": 1000},
+    )
+    j = client.get("/admin/api/state").json()
+    assert j["server_instructions_max_bytes"] == 2048  # gateway default
+    assert j["tool_description_max_bytes"] is None
+    bst = j["backends"][0]
+    assert bst["server_instructions_max_bytes"] == 1000
+    assert bst["effective_server_instructions_max_bytes"] == 1000
+    assert bst["effective_tool_description_max_bytes"] is None
+    assert bst["instructions_bytes"] is None

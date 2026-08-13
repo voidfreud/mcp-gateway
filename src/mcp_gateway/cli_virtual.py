@@ -23,9 +23,13 @@ import urllib.parse
 from typing import Any
 
 from mcp_gateway.cli_common import (
+    LIMIT_MAX_BYTES,
+    UNSET,
     CLIContext,
     CLIError,
     expect_object,
+    limit_flag_type,
+    limit_human,
     read_json_source,
     require_yes,
 )
@@ -47,6 +51,8 @@ _DEFINITION_KEYS = (
     "router",
     "routing_input_max_chars",
     "max_result_bytes",
+    # #286: UTF-8 description cap; null = inherit the gateway global.
+    "description_max_bytes",
     "failure_policy",
 )
 
@@ -101,6 +107,10 @@ def _strip_definition(tool: dict) -> dict:
 
 
 def _has_definition_flags(args: argparse.Namespace) -> bool:
+    # ``description_max_bytes`` defaults to the UNSET sentinel (an explicit
+    # ``inherit`` is ``None``), so it is checked separately.
+    if getattr(args, "description_max_bytes", UNSET) is not UNSET:
+        return True
     return any(
         getattr(args, name) is not None
         for name in (
@@ -182,6 +192,10 @@ def _definition_payload(
         )
         payload.update(loaded)
     _overlay_scalars(args, payload)
+    # Scoped by hand (not via _SCALAR_FIELDS): ``inherit`` is None, which the
+    # generic overlay skips but here must still be sent (null) to clear a cap.
+    if getattr(args, "description_max_bytes", UNSET) is not UNSET:
+        payload["description_max_bytes"] = args.description_max_bytes
     if args.inputs is not None:
         payload["inputs"] = [
             _json_object(item, f"--input {item!r}") for item in args.inputs
@@ -329,6 +343,20 @@ def _human_show(tool: dict) -> list[str]:
         lines.extend(_human_show_members(members))
     else:
         lines.append("Members:         (none)")
+    # #286: stored/effective description cap and current byte count.
+    if (
+        tool.get("description_max_bytes") is not None
+        or tool.get("effective_description_max_bytes") is not None
+        or tool.get("description_bytes") is not None
+    ):
+        cap = limit_human(
+            tool.get("description_max_bytes"),
+            tool.get("effective_description_max_bytes"),
+        )
+        lines.append(f"Description limit: {cap}")
+        dbytes = tool.get("description_bytes")
+        if dbytes is not None:
+            lines.append(f"Description bytes: {dbytes}")
     router = tool.get("router")
     if router:
         lines.append(f"Router:          {_router_summary(router)}")
@@ -625,6 +653,17 @@ def _add_definition_flags(parser: argparse.ArgumentParser) -> None:
         type=int,
         metavar="CHARS",
         help="routing text character limit",
+    )
+    parser.add_argument(
+        "--description-max-bytes",
+        type=limit_flag_type("inherit", "description_max_bytes"),
+        default=UNSET,
+        metavar="N|inherit",
+        help=(
+            f"description cap in UTF-8 bytes (1..{LIMIT_MAX_BYTES}); "
+            "'inherit' follows the gateway-global tool description cap "
+            "(itself 'unlimited' by default)"
+        ),
     )
     parser.add_argument(
         "--input",

@@ -161,9 +161,11 @@ def default_config_path() -> str:
 
 CONFIG_PATH = default_config_path()
 
-# Cap admin-API request bodies. Admin payloads are tiny (tool text, backend
-# config); anything larger is rejected before it's buffered/parsed. Issue #49.
-ADMIN_BODY_LIMIT = 64 * 1024
+# Keep the Admin envelope finite while allowing one authored metadata field at
+# the shared maximum. A single UTF-8 byte can occupy six JSON bytes when escaped
+# as ``\uXXXX``; reserve that worst case plus 64 KiB for the request wrapper.
+# Oversized bodies are still rejected before they're buffered/parsed. Issue #49.
+ADMIN_BODY_LIMIT = config_loader.MAX_METADATA_LIMIT_BYTES * 6 + 64 * 1024
 
 # On shutdown, how long runners get to unwind gracefully before a backend stuck
 # mid-connect is cancelled (it never reaches stop.wait(), so without this the
@@ -325,8 +327,8 @@ class BodyLimitMiddleware:
 
     Note (#81): the whole body is buffered in memory before dispatch even when it
     fits, and on a mid-stream reject we return 413 without draining the rest of
-    the in-flight body. Both are fine here — loopback only, 64 KB cap — but would
-    need revisiting for a larger cap or a non-loopback bind.
+    the in-flight body. Both are acceptable for this bounded loopback-only Admin
+    envelope, but would need revisiting for a non-loopback bind.
     """
 
     def __init__(self, app, *, max_bytes: int, path_prefix: str = "/admin/api"):
@@ -818,7 +820,10 @@ async def _mount_backend(  # noqa: PLR0913, PLR0917 — the mount needs the full
             proxy.add_transform(rp_transform)
             holder.append(rp_transform)
         # Per-endpoint instructions: only this backend's blurb -> its own 2KB.
-        proxy.instructions = config_loader.backend_instructions(b, captured_instr)
+        # cfg supplies the gateway-global #286 cap so a captured upstream blurb
+        # is truncated (at a UTF-8 boundary, with a warning) instead of
+        # broadcasting an over-cap original.
+        proxy.instructions = config_loader.backend_instructions(b, captured_instr, cfg)
 
         sub = proxy.http_app(path="/mcp")
         # Starlette only runs the TOP app's lifespan, so run each mounted app's
@@ -1197,7 +1202,10 @@ def _build_app(  # noqa: PLR0913, PLR0915, PLR0917 — composition root; takes w
         lifespan=lifespan,
         middleware=[
             # Origin guard FIRST — a rebinding page's request dies before any
-            # body buffering or auth work (MCP spec MUST).
+            # body buffering or auth work (MCP spec MUST). Bearer auth comes
+            # next, before the body cap (#286): an unauthenticated admin-API
+            # request is answered 401 without the gateway ever buffering the
+            # (possibly huge) body an attacker sent along.
             StarletteMiddleware(
                 OriginGuardMiddleware,
                 host=cfg.host,
@@ -1206,12 +1214,12 @@ def _build_app(  # noqa: PLR0913, PLR0915, PLR0917 — composition root; takes w
                     oauth_runtime.allowed_origins if oauth_runtime is not None else ()
                 ),
             ),
-            StarletteMiddleware(BodyLimitMiddleware, max_bytes=ADMIN_BODY_LIMIT),
             StarletteMiddleware(
                 BearerAuthMiddleware,
                 token=bearer_token,
                 protected_prefixes=bearer_prefixes,
             ),
+            StarletteMiddleware(BodyLimitMiddleware, max_bytes=ADMIN_BODY_LIMIT),
             StarletteMiddleware(logging_setup.RequestLogMiddleware, log=log),
         ],
     )

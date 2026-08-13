@@ -99,7 +99,9 @@ mcp-gateway backend add exa --transport http \
 mcp-gateway tool list --backend exa          # effective broadcast of every tool
 mcp-gateway tool set exa web_search --description "…"
 mcp-gateway virtual list                     # gateway-owned Virtual Tools
-mcp-gateway settings show                    # bearer ref, update check, log settings
+mcp-gateway settings show                    # bearer ref, update check, log settings,
+                                             # and UTF-8 metadata limits
+                                             # (see docs/configuration.md#metadata-byte-limits)
 mcp-gateway logs follow                      # live structured log
 ```
 
@@ -163,6 +165,8 @@ contributors deploying a checkout can continue to use the guarded
 
 - Tool, parameter, resource, prompt, and server-instruction text.
 - Visibility, injected defaults, output budgets, and per-tool behavior hooks.
+- Strict UTF-8 metadata limits on the server instructions and tool
+  descriptions it broadcasts — gateway-wide, per-backend, and per-tool.
 - Backend configuration and the independent per-backend `/<backend>/mcp`
   endpoints clients register.
 - Gateway-owned Virtual Tools that compose or route backend tools at

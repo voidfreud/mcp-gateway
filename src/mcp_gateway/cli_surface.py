@@ -28,9 +28,12 @@ from typing import Any, TextIO, cast
 from urllib.parse import quote
 
 from mcp_gateway.cli_common import (
+    LIMIT_MAX_BYTES,
     CLIContext,
     CLIError,
     expect_object,
+    limit_flag_type,
+    limit_human,
     read_json_source,
     reject_unknown_fields,
     require_yes,
@@ -52,6 +55,8 @@ _TOOL_OVERRIDE_FIELDS = frozenset(
         "enabled",
         "always_load",
         "max_result_chars",
+        # #286: per-tool UTF-8 description cap override (null = inherit).
+        "description_max_bytes",
         "params",
     }
 )
@@ -129,6 +134,7 @@ def _tool_is_overridden(t: dict[str, Any]) -> bool:
         or not t.get("enabled", True)
         or t.get("always_load")
         or t.get("max_result_chars") is not None
+        or t.get("description_max_bytes") is not None
         or any(
             p.get("name")
             or p.get("description")
@@ -263,6 +269,12 @@ def _tool_record(
         "enabled": t.get("enabled", True),
         "always_load": t.get("always_load", False),
         "max_result_chars": t.get("max_result_chars"),
+        # #286: stored/effective description cap and the UTF-8 byte counts of
+        # the default and effective descriptions — state pass-through only.
+        "description_max_bytes": t.get("description_max_bytes"),
+        "effective_description_max_bytes": t.get("effective_description_max_bytes"),
+        "default_description_bytes": t.get("default_description_bytes"),
+        "effective_description_bytes": t.get("effective_description_bytes"),
         "params": t.get("params") or [],
     }
     if full:
@@ -290,6 +302,29 @@ def _tool_line(b: dict[str, Any], t: dict[str, Any]) -> str:
     )
 
 
+def _tool_limit_lines(t: dict[str, Any]) -> list[str]:
+    """#286: human lines for a tool's stored/effective description cap and
+    the effective/default description byte counts — state pass-through only."""
+    if (
+        t.get("description_max_bytes") is None
+        and t.get("effective_description_max_bytes") is None
+        and t.get("effective_description_bytes") is None
+    ):
+        return []
+    cap = limit_human(
+        t.get("description_max_bytes"), t.get("effective_description_max_bytes")
+    )
+    lines = [f"description_max_bytes: {cap}"]
+    dbytes = t.get("effective_description_bytes")
+    if dbytes is not None:
+        default_bytes = t.get("default_description_bytes")
+        if default_bytes is not None and default_bytes != dbytes:
+            lines.append(f"description_bytes: {dbytes} (default {default_bytes})")
+        else:
+            lines.append(f"description_bytes: {dbytes}")
+    return lines
+
+
 def _tool_show_lines(b: dict[str, Any], t: dict[str, Any]) -> list[str]:
     name = t.get("name") or t.get("default_name") or t.get("original")
     lines = [f"backend:  {b.get('name')}", f"tool:     {t.get('original')} → {name}"]
@@ -305,6 +340,7 @@ def _tool_show_lines(b: dict[str, Any], t: dict[str, Any]) -> list[str]:
         lines.append(f"description: {desc}")
     if t.get("max_result_chars") is not None:
         lines.append(f"max_result_chars: {t['max_result_chars']}")
+    lines.extend(_tool_limit_lines(t))
     if t.get("validate") or t.get("post_process"):
         hooks = ", ".join(
             filter(
@@ -496,6 +532,8 @@ def _apply_tool_scalars(ov: dict[str, Any], args: argparse.Namespace) -> None:
         ov["always_load"] = args.always_load
     if args.max_result_chars is not _MISSING:
         ov["max_result_chars"] = args.max_result_chars
+    if args.description_max_bytes is not _MISSING:
+        ov["description_max_bytes"] = args.description_max_bytes
 
 
 def _cmd_tool_set(args: argparse.Namespace, ctx: CLIContext) -> None:
@@ -530,7 +568,7 @@ def _cmd_tool_set(args: argparse.Namespace, ctx: CLIContext) -> None:
         raise CLIError(
             "nothing to change — pass at least one field flag (--name/--title/"
             "--description/--enabled/--disabled/--pin/--unpin/"
-            "--max-result-chars/--param) or --file"
+            "--max-result-chars/--description-max-bytes/--param) or --file"
         )
     payload: dict[str, Any] = {
         "backend": args.backend,
@@ -1178,6 +1216,16 @@ def _register_tool_commands(subparsers) -> None:
         default=_MISSING,
         metavar="N|none",
         help="per-tool output cap in chars; 'none' clears the cap",
+    )
+    lp.add_argument(
+        "--description-max-bytes",
+        type=limit_flag_type("inherit", "description_max_bytes"),
+        default=_MISSING,
+        metavar="N|inherit",
+        help=(
+            f"per-tool description cap in UTF-8 bytes (1..{LIMIT_MAX_BYTES}); "
+            "'inherit' clears the override"
+        ),
     )
     lp.add_argument(
         "--auto-uniquify",

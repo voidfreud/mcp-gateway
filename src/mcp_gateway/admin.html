@@ -143,7 +143,7 @@
   .wrap { flex: 1; display: flex; min-height: 0; }
   aside { width: 250px; background: var(--s1); border-right: 1px solid var(--b);
           overflow-y: auto; flex-shrink: 0; }
-  main { flex: 1; overflow-y: auto; padding: 16px 20px; }
+  main { flex: 1; min-width: 0; overflow-y: auto; padding: 16px 20px; }
   .empty { color: var(--td); margin-top: 56px; text-align: center; font-size: 12.5px; }
   .empty .ic { width: 26px; height: 26px; display: block; margin: 0 auto 10px; color: var(--td); opacity: .7; }
   .empty.first-run { color: var(--t); font-size: 14px; }
@@ -232,13 +232,26 @@
              font-size: 13px; line-height: 1.55; color: var(--tt); }
   .f-instr { font-family: var(--mono); font-size: 12.5px; line-height: 1.6;
              min-height: 200px; color: var(--tt); }
-  /* Byte-budget counter for [data-cap] fields — always visible, amber near the
-     cap (≥80%), red at/over. */
+  /* UTF-8 byte counter for fields with an effective metadata limit. */
   .cap-wrap { position: relative; }
   .cap-count { position: absolute; right: 4px; top: -19px; pointer-events: none;
+               max-width: calc(100% - 8px); text-align: right;
                font: 10px var(--mono); color: var(--td); }
   .cap-count.warn { color: var(--am); }
   .cap-count.over { color: var(--rd); font-weight: 700; }
+  .limit-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .limit-control { min-width: 0; }
+  .limit-entry { display: flex; align-items: center; gap: 8px; }
+  .limit-entry input[type=number] { flex: 1; min-width: 0; }
+  .limit-choice { display: inline-flex; align-items: center; gap: 6px; margin: 0;
+                  text-transform: none; letter-spacing: 0; white-space: nowrap;
+                  cursor: pointer; font-size: 11px; }
+  .limit-effective { min-height: 16px; font-size: 11px; color: var(--td); margin-top: 3px; }
+  .limit-effective.error { color: var(--rd); }
+  .limit-warning { display: flex; align-items: flex-start; gap: 6px; margin-top: 7px;
+                   color: var(--am); font-size: 11px; }
+  .limit-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; }
+  .card label.c-title { margin: 0; text-transform: none; letter-spacing: 0; }
 
   /* Tool cards */
   .tool { border: 1px solid var(--b); border-radius: 10px; background: var(--s1);
@@ -412,7 +425,11 @@
   .vt-members, .vt-inputs { margin-top: 12px; }
   .vt-member-grid { display:grid; grid-template-columns: 1.3fr .8fr .55fr; gap:8px; }
   .vt-inline { display:flex; align-items:center; gap:8px; }
-  @media (max-width: 760px) { .vt-grid, .vt-member-grid { grid-template-columns: 1fr; } }
+  @media (max-width: 760px) {
+    .vt-grid, .vt-member-grid, .limit-grid, .row2, .stat-grid, .ep-grid { grid-template-columns: 1fr; }
+    .limit-entry { flex-wrap: wrap; }
+    .limit-entry input[type=number] { flex: 0 0 100%; width: 100%; }
+  }
 </style>
 </head>
 <body>
@@ -421,7 +438,7 @@
   <h1>mcp-gateway</h1>
   <span class="sub">admin</span>
   <span class="spacer"></span>
-  <span id="saved" class="saved"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M13.78 4.22a.75.75 0 0 1 0 1.06l-7.25 7.25a.75.75 0 0 1-1.06 0L2.22 9.28a.75.75 0 0 1 1.06-1.06L6 10.94l6.72-6.72a.75.75 0 0 1 1.06 0Z"/></svg>Saved</span>
+  <span id="saved" class="saved" role="status" aria-live="polite"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M13.78 4.22a.75.75 0 0 1 0 1.06l-7.25 7.25a.75.75 0 0 1-1.06 0L2.22 9.28a.75.75 0 0 1 1.06-1.06L6 10.94l6.72-6.72a.75.75 0 0 1 1.06 0Z"/></svg>Saved</span>
   <button class="btn-pri" onclick="openImport()">+ Import MCP</button>
 </header>
 <div class="wrap">
@@ -514,7 +531,16 @@
       <div><label>Public tool name</label><input id="vt_name" class="mono" autocomplete="off" spellcheck="false" placeholder="search_everywhere"></div>
       <div><label>Dispatch</label><select id="vt_dispatch" onchange="virtualDispatchChanged()"><option value="all">all · every member</option><option value="keyword">keyword · local rules</option><option value="llm">llm · external router</option></select></div>
     </div>
-    <label>Description</label><textarea id="vt_description" class="grow" data-cap="2048" placeholder="When and why an agent should use this tool"></textarea>
+    <label for="vt_description">Description</label><textarea id="vt_description" name="description" class="grow" data-cap="" data-cap-trim="1" data-cap-label="Virtual Tool description" placeholder="When and why an agent should use this tool"></textarea>
+    <div class="limit-control">
+      <label for="vt_description_limit">Description limit (UTF-8 bytes)</label>
+      <div class="limit-entry">
+        <input id="vt_description_limit" name="description_max_bytes" type="number" min="1" max="1048576" step="1" inputmode="numeric">
+        <label class="limit-choice" for="vt_description_limit_inherit">
+          <input id="vt_description_limit_inherit" name="description_max_bytes_inherit" type="checkbox" class="tgl"> inherit gateway</label>
+      </div>
+      <div class="limit-effective" id="vt_description_limit_status" role="status" aria-live="polite"></div>
+    </div>
     <div class="vt-grid">
       <div><label>Aggregate budget (bytes)</label><input id="vt_budget" type="number" min="1024" step="1" value="262144"></div>
       <div><label>Failure policy</label><select id="vt_failure"><option value="partial">partial · succeed when any member succeeds</option><option value="strict">strict · fail when any member fails</option></select></div>
@@ -542,7 +568,7 @@
       <div class="hint">The external provider is OpenRouter. It receives virtual-tool input values, member routing descriptions, and this policy. Routing responses are capped at 200 output tokens. Provider pricing applies to every routed call; check the selected model's current OpenRouter price before activation. The API key reference is stored, but its resolved value must never be returned or logged.</div>
       <label class="chk" style="margin-top:10px"><input type="checkbox" class="tgl tgl-red" id="vt_egress"> I acknowledge these fields may be sent to OpenRouter using the named model</label>
     </div>
-    <div class="err" id="vt_err"></div>
+    <div class="err" id="vt_err" role="alert" aria-live="assertive"></div>
     <div class="foot">
       <button onclick="closeVirtualEditor()">Cancel</button>
       <button id="vt_validate" onclick="saveVirtualTool(false)">Save draft</button>
@@ -563,7 +589,7 @@
     </div>
   </div>
 </div>
-<div class="toast" id="toast"></div>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
 
 <script>
 const $ = (s, r=document) => r.querySelector(s);
@@ -585,12 +611,13 @@ let VIRTUAL_TEST_NAME = null;
 let STATUS = null;  // #23: backend name -> {state, ms, tools, error}, async
 const timers = {};
 let LOG_STREAM_ABORT = null;
+let CONTROL_SEQ = 0;
 
 // A captured tool carries a stored override iff any editable field differs from
 // its default — the same test used for the "overridden" badge (#153 reuses it
 // to find migration targets: captured tools with NO stored override).
 function toolIsOverridden(t) {
-  return !!(t.name || t.title || t.description || !t.enabled
+  return !!(t.name || t.title || t.description || t.description_max_bytes != null || !t.enabled
     || t.params.some(p => p.name || p.description || p.hide || p.default != null));
 }
 
@@ -780,7 +807,7 @@ async function startLogStream() {
 
 // how many of a backend's tools carry any override
 function overriddenCount(b) {
-  return b.tools.filter(t => t.name || t.title || t.description || !t.enabled
+  return b.tools.filter(t => t.name || t.title || t.description || t.description_max_bytes != null || !t.enabled
     || t.params.some(p => p.name || p.description || p.hide || p.default != null)).length;
 }
 
@@ -887,6 +914,7 @@ function renderDetail(name) {
       </span>
     </div>
     ${danglingBanner(b)}
+    ${backendLimitsSection(b)}
     ${backendInstrSection(b)}
     <div id="tools"></div>
     <div id="rp"></div>`;
@@ -900,6 +928,7 @@ function renderDetail(name) {
   dn.addEventListener('blur', saveDn);
   dn.addEventListener('keydown', e => { if (e.key === 'Enter') dn.blur(); });
   dn.addEventListener('click', e => e.preventDefault());
+  wireBackendLimits(m, b);
   wireInstr(m, b.name, b.default_instructions);
   wireCaps(m);
   wireGrow(m);
@@ -908,7 +937,7 @@ function renderDetail(name) {
   if (!b.introspected) { tw.innerHTML = '<div class="empty">Backend not introspected yet — click Re-inspect.</div>'; return; }
   // Order: pinned first, switched-off last; among equals, overridden above.
   const grpOf = t => !t.enabled ? 2 : (t.always_load || b.always_load ? 0 : 1);
-  const ovrOf = t => (t.name || t.title || t.description
+  const ovrOf = t => (t.name || t.title || t.description || t.description_max_bytes != null
     || t.params.some(p => p.name || p.description || p.hide || p.default != null)) ? 0 : 1;
   [...b.tools].sort((a, z) => grpOf(a) - grpOf(z) || ovrOf(a) - ovrOf(z))
     .forEach(t => tw.appendChild(toolCard(b, t)));
@@ -937,21 +966,87 @@ function renderResourcesPrompts(b, root) {
   }
 }
 
+// Metadata limit state is explicit: null on a scoped value means inherit, while
+// null on the gateway tool-description value means unlimited.
+function effectiveServerInstructionsLimit(b) {
+  return b.effective_server_instructions_max_bytes ?? STATE.server_instructions_max_bytes ?? 2048;
+}
+function effectiveBackendToolDescriptionLimit(b) {
+  return Object.prototype.hasOwnProperty.call(b, 'effective_tool_description_max_bytes')
+    ? b.effective_tool_description_max_bytes : (STATE.tool_description_max_bytes ?? null);
+}
+function effectiveToolDescriptionLimit(b, t) {
+  return Object.prototype.hasOwnProperty.call(t, 'effective_description_max_bytes')
+    ? t.effective_description_max_bytes : (t.description_max_bytes ?? effectiveBackendToolDescriptionLimit(b));
+}
+function formatByteLimit(value) { return value == null ? 'unlimited' : `${value} B`; }
+
+function backendLimitsSection(b) {
+  const instructionsStored = b.server_instructions_max_bytes ?? null;
+  const instructionsEffective = effectiveServerInstructionsLimit(b);
+  const toolsStored = b.tool_description_max_bytes ?? null;
+  const toolsEffective = effectiveBackendToolDescriptionLimit(b);
+  return `<div class="card">
+    <div class="c-head"><span class="c-title">Backend metadata limits</span>
+      <span class="si">UTF-8 bytes · 1–1,048,576</span></div>
+    <div class="limit-grid">
+      <div class="limit-control">
+        <label for="b_instructions_limit">Server instructions limit</label>
+        <div class="limit-entry">
+          <input id="b_instructions_limit" name="server_instructions_max_bytes" type="number"
+            min="1" max="1048576" step="1" inputmode="numeric"
+            value="${instructionsStored ?? instructionsEffective}" aria-describedby="b_instructions_limit_status">
+          <label class="limit-choice" for="b_instructions_limit_inherit">
+            <input id="b_instructions_limit_inherit" name="server_instructions_max_bytes_inherit"
+              type="checkbox" class="tgl" ${instructionsStored == null ? 'checked' : ''}> inherit gateway</label>
+        </div>
+        <div class="limit-effective" id="b_instructions_limit_status" role="status" aria-live="polite"></div>
+      </div>
+      <div class="limit-control">
+        <label for="b_tool_limit">Tool description limit</label>
+        <div class="limit-entry">
+          <input id="b_tool_limit" name="tool_description_max_bytes" type="number"
+            min="1" max="1048576" step="1" inputmode="numeric"
+            value="${toolsStored ?? toolsEffective ?? ''}" placeholder="${toolsEffective == null ? 'unlimited' : ''}"
+            aria-describedby="b_tool_limit_status">
+          <label class="limit-choice" for="b_tool_limit_inherit">
+            <input id="b_tool_limit_inherit" name="tool_description_max_bytes_inherit"
+              type="checkbox" class="tgl" ${toolsStored == null ? 'checked' : ''}> inherit gateway</label>
+        </div>
+        <div class="limit-effective" id="b_tool_limit_status" role="status" aria-live="polite"></div>
+      </div>
+    </div>
+    <div class="limit-actions">
+      <button class="btn" onclick="saveBackendLimits('${escJS(b.name)}')">Save backend limits</button>
+      <span class="si" id="b_limit_save_status" role="status" aria-live="polite">Changes apply live.</span>
+    </div>
+  </div>`;
+}
+
 // Per-backend server instructions card: prefilled with override else captured
 // original. Empty -> inherit; if the backend sends none, type to add your own.
 function backendInstrSection(b) {
   const eff = b.instructions ?? b.default_instructions ?? '';
   const has = b.default_instructions != null && b.default_instructions !== '';
+  const limit = effectiveServerInstructionsLimit(b);
+  const bytes = b.instructions_bytes ?? bLen(eff);
+  const capturedOver = b.instructions == null && bytes > limit;
   const si = b.server_info ? `${b.server_info.name} ${b.server_info.version || ''}`.trim() : '';
   return `<div class="card">
     <div class="c-head">
-      <span class="c-title">Server instructions</span>
+      <label class="c-title" for="backend_instructions">Server instructions</label>
       ${si ? `<span class="c-meta">${esc(si)}</span>` : ''}
     </div>
-    <div class="si" style="margin-bottom:6px">the always-loaded blurb this MCP sends at initialize</div>
-    <textarea class="f-instr grow" data-cap="2048" data-default="${esc(b.default_instructions ?? '')}"
+    <div class="si" id="backend_instructions_help" style="margin-bottom:6px">the always-loaded blurb this MCP sends at initialize</div>
+    <textarea id="backend_instructions" name="instructions" class="f-instr grow"
+      data-cap="${limit}" data-cap-note="${b.server_instructions_max_bytes == null ? 'inherited' : 'backend override'}"
+      data-cap-label="Server instructions" data-default="${esc(b.default_instructions ?? '')}"
+      aria-describedby="backend_instructions_help"
       placeholder="${has ? '' : '(this server sends no instructions — type to add your own)'}">${esc(eff)}</textarea>
     <div class="hint">Empty = inherit the server's original${has ? '' : ' (none)'}. Edits reload live.</div>
+    ${capturedOver ? `<div class="limit-warning" role="status">${ICON.warn}
+      Captured upstream instructions are ${bytes} B, above the ${limit} B effective limit.
+      Outgoing instructions are truncated at a UTF-8 boundary; the captured text remains intact.</div>` : ''}
   </div>`;
 }
 
@@ -995,35 +1090,135 @@ function wireInstr(root, backend, def) {
   ta.addEventListener('input', () => scheduleInstr(backend, ta));
   ta.addEventListener('blur', () => {
     if (ta.value.trim() === '' && def) ta.value = def;
-    flushInstr(backend, ta);
+    updateCapField(ta);
+    if (capFieldValid(ta, true)) flushInstr(backend, ta);
   });
 }
 
-// Live byte-count for any [data-cap] field: UTF-8 BYTES (TextEncoder) against
-// the field's cap, red at/over. Top-right of the field per the design.
+function parseByteLimit(input, label) {
+  const raw = input.value.trim();
+  // #286: only a plain decimal integer string may convert — Number() would
+  // round 0.99999999999999999 to 1 and 1048576.0000000001 to 1048576.
+  const value = /^[0-9]+$/.test(raw) ? Number(raw) : NaN;
+  const valid = Number.isInteger(value) && value >= 1 && value <= 1048576;
+  input.classList.toggle('bad', !valid);
+  input.setAttribute('aria-invalid', valid ? 'false' : 'true');
+  if (!valid) throw new Error(`${label} must be an integer from 1 to 1,048,576 bytes`);
+  return value;
+}
+function scopedByteLimit(input, inherit, label) {
+  return inherit.checked ? null : parseByteLimit(input, label);
+}
+function wireLimitControl(input, inherit, status, field, inheritedLimit, inheritedFrom, overrideLabel = 'Scoped override') {
+  const sync = () => {
+    input.disabled = inherit.checked;
+    let limit;
+    try {
+      limit = inherit.checked ? inheritedLimit : parseByteLimit(input, input.dataset.limitLabel || 'Limit');
+      status.textContent = inherit.checked
+        ? `Inherited from ${inheritedFrom}: ${formatByteLimit(limit)}`
+        : `${overrideLabel}: ${formatByteLimit(limit)}`;
+      status.classList.remove('error');
+      if (inherit.checked) {
+        input.classList.remove('bad');
+        input.setAttribute('aria-invalid', 'false');
+      }
+      if (field) {
+        field.dataset.cap = limit == null ? '' : String(limit);
+        field.dataset.capNote = inherit.checked ? 'inherited' : 'override';
+        updateCapField(field);
+      }
+    } catch (e) {
+      status.textContent = e.message;
+      status.classList.add('error');
+    }
+  };
+  input.oninput = sync;
+  inherit.onchange = sync;
+  sync();
+}
+
+// Live byte-count for metadata fields. A null/empty cap is intentionally
+// unlimited; a value equal to the cap is valid.
+function capFieldBytes(field) {
+  return bLen(field.dataset.capTrim ? field.value.trim() : field.value);
+}
+function updateCapField(field) {
+  if (!field || !field._capCount) return;
+  const rawCap = field.dataset.cap;
+  const cap = rawCap === '' ? null : Number(rawCap);
+  const bytes = capFieldBytes(field);
+  const note = field.dataset.capNote ? ` · ${field.dataset.capNote}` : '';
+  field._capCount.textContent = cap == null
+    ? `${bytes} B / unlimited${note}` : `${bytes} / ${cap} B${note}`;
+  const over = cap != null && bytes > cap;
+  field._capCount.classList.toggle('warn', cap != null && bytes >= cap * 0.8 && !over);
+  field._capCount.classList.toggle('over', over);
+  field.classList.toggle('bad', over);
+  field.setAttribute('aria-invalid', over ? 'true' : 'false');
+}
+function capFieldValid(field, announce = false) {
+  const rawCap = field.dataset.cap;
+  const cap = rawCap === '' ? null : Number(rawCap);
+  const bytes = capFieldBytes(field);
+  if (cap == null || bytes <= cap) return true;
+  if (announce) toast(`${field.dataset.capLabel || 'Text'} is ${bytes} B; effective limit is ${cap} B`, 5000);
+  return false;
+}
 function wireCaps(root) {
-  const enc = new TextEncoder();
   root.querySelectorAll('[data-cap]').forEach(field => {
-    if (field.dataset.capWired) return;
+    if (field.dataset.capWired) { updateCapField(field); return; }
     field.dataset.capWired = '1';
-    const cap = parseInt(field.dataset.cap, 10);
     const wrap = document.createElement('div');
     wrap.className = 'cap-wrap';
     field.parentNode.insertBefore(wrap, field);
     wrap.appendChild(field);
     const count = document.createElement('span');
     count.className = 'cap-count';
+    count.id = `${field.id || 'metadata'}_byte_count`;
+    count.setAttribute('role', 'status');
+    count.setAttribute('aria-live', 'polite');
     wrap.appendChild(count);
-    const upd = () => {
-      const n = enc.encode(field.value).length;
-      count.textContent = n + ' / ' + cap + ' B';
-      count.classList.toggle('warn', n >= cap * 0.8 && n < cap);  // amber near the budget
-      count.classList.toggle('over', n >= cap);
-    };
-    field.addEventListener('input', upd);
-    field.addEventListener('blur', upd);
-    upd();
+    field._capCount = count;
+    const describedBy = field.getAttribute('aria-describedby');
+    field.setAttribute('aria-describedby', [describedBy, count.id].filter(Boolean).join(' '));
+    field.addEventListener('input', () => updateCapField(field));
+    field.addEventListener('blur', () => updateCapField(field));
+    updateCapField(field);
   });
+}
+
+function wireBackendLimits(root, b) {
+  const instructions = $('#b_instructions_limit', root);
+  const instructionsInherit = $('#b_instructions_limit_inherit', root);
+  const tools = $('#b_tool_limit', root);
+  const toolsInherit = $('#b_tool_limit_inherit', root);
+  instructions.dataset.limitLabel = 'Server instructions limit';
+  tools.dataset.limitLabel = 'Tool description limit';
+  wireLimitControl(instructions, instructionsInherit, $('#b_instructions_limit_status', root),
+    $('.f-instr', root), STATE.server_instructions_max_bytes ?? 2048, 'gateway');
+  wireLimitControl(tools, toolsInherit, $('#b_tool_limit_status', root),
+    null, STATE.tool_description_max_bytes ?? null, 'gateway');
+}
+
+async function saveBackendLimits(name) {
+  const status = $('#b_limit_save_status');
+  try {
+    const payload = {
+      server_instructions_max_bytes: scopedByteLimit(
+        $('#b_instructions_limit'), $('#b_instructions_limit_inherit'), 'Server instructions limit'),
+      tool_description_max_bytes: scopedByteLimit(
+        $('#b_tool_limit'), $('#b_tool_limit_inherit'), 'Tool description limit'),
+    };
+    await api('PUT', `/admin/api/backend/${encodeURIComponent(name)}/limits`, payload);
+    if (status) status.textContent = 'Saved; effective limits updated.';
+    await load();
+    toast('backend metadata limits saved');
+    flashSaved();
+  } catch (e) {
+    if (status) { status.textContent = e.message; status.style.color = 'var(--rd)'; }
+    toast('save failed: ' + e.message, 5000);
+  }
 }
 
 // Auto-size a textarea to its content, capped at ~40vh (#58).
@@ -1055,10 +1250,12 @@ function nameBytes(b, t) {
   // the deferred-list line: mcp__gateway-<backend>__<broadcast name>
   return bLen('mcp__gateway-' + b.name + '__' + (t.name || t.default_name));
 }
-function textBytes(t) {
-  // everything beyond the name: title + description + visible params
+function textBytes(b, t) {
+  // everything beyond the name: title + transmitted description + visible params
+  const descriptionBytes = bLen(t.description || t.default_description);
+  const descriptionLimit = effectiveToolDescriptionLimit(b, t);
   let n = bLen(t.title || t.default_title)
-        + bLen(t.description || t.default_description);
+        + (descriptionLimit == null ? descriptionBytes : Math.min(descriptionBytes, descriptionLimit));
   for (const p of t.params || []) {
     if (p.hide) continue;
     n += bLen(p.name || p.default_name) + bLen(p.description || p.default_description);
@@ -1091,13 +1288,14 @@ function renderGateway() {
   let namesTot = 0, pinnedTot = 0, instrTot = 0, deferTot = 0,
       toolTot = 0, ovrTot = 0, pinTot = 0;
   const per = STATE.backends.map(b => {
-    const instr = bLen(b.instructions ?? b.default_instructions ?? '');
+    const instrRaw = b.instructions_bytes ?? bLen(b.instructions ?? b.default_instructions ?? '');
+    const instr = Math.min(instrRaw, effectiveServerInstructionsLimit(b));
     let names = 0, pinned = 0, defer = 0, pins = 0;
     if (b.enabled) {
       for (const t of b.tools) {
         if (!t.enabled) continue;
         names += nameBytes(b, t);          // every callable name is visible at turn 0
-        const txt = textBytes(t);
+        const txt = textBytes(b, t);
         if (t.always_load || b.always_load) { pinned += txt; pins += 1; }
         else defer += txt;                  // only unpinned text is deferred
       }
@@ -1105,14 +1303,15 @@ function renderGateway() {
     const ovr = overriddenCount(b);
     toolTot += b.tools.length; ovrTot += ovr; pinTot += pins;
     if (b.enabled) { namesTot += names; pinnedTot += pinned; instrTot += instr; deferTot += defer; }
-    return { b, instr, names, pinned, defer, pins, ovr };
+    return { b, instr, instrRaw, names, pinned, defer, pins, ovr };
   });
   const upfront = namesTot + pinnedTot + instrTot;
   const catalog = upfront + deferTot;
   const maxRow = Math.max(1, ...per.map(x => x.b.enabled ? x.names + x.pinned + x.instr + x.defer : 0));
 
-  const epCards = per.map(({ b, instr, pins, ovr }) => {
-    const pct = Math.min(100, Math.round(100 * instr / 2048));
+  const epCards = per.map(({ b, instrRaw, pins, ovr }) => {
+    const limit = effectiveServerInstructionsLimit(b);
+    const pct = Math.min(100, Math.round(100 * instrRaw / limit));
     const near = pct >= 80;
     return `<div class="ep${near ? ' near' : ''}">
       <div class="e-top"><span class="st-dot st-unk" data-b="${esc(b.name)}"></span>
@@ -1120,7 +1319,7 @@ function renderGateway() {
       <span class="e-url">${esc(base + (b.endpoint || ''))}</span>
       <div class="e-counts"><span>${b.tools.length} tools</span>
         <span><span class="ac">${ovr} overridden</span> · <span class="am">${pins} ${ICON.pin}</span></span></div>
-      <div class="e-blabel${near ? ' near' : ''}">instructions ${instr} / 2048 B</div>
+      <div class="e-blabel${near ? ' near' : ''}">instructions ${instrRaw} / ${limit} B</div>
       <div class="e-bar"><div style="width:${pct}%"></div></div>
     </div>`;
   }).join('');
@@ -1235,6 +1434,30 @@ function renderGateway() {
           <div class="hint">Set <code>log_max_bytes</code> / <code>log_backup_count</code> in config.toml for a different cap.</div>
         </div>
       </div>
+      <div class="limit-grid" style="margin-top:10px;padding-top:10px;border-top:1px solid var(--b)">
+        <div class="limit-control">
+          <label for="set_instructions_limit">Server instructions limit (UTF-8 bytes)</label>
+          <input id="set_instructions_limit" name="server_instructions_max_bytes" type="number"
+            min="1" max="1048576" step="1" inputmode="numeric"
+            value="${STATE.server_instructions_max_bytes ?? 2048}"
+            aria-describedby="set_instructions_limit_status">
+          <div class="limit-effective" id="set_instructions_limit_status" role="status" aria-live="polite">
+            Gateway default for all backends.</div>
+        </div>
+        <div class="limit-control">
+          <label for="set_tool_limit">Tool description limit (UTF-8 bytes)</label>
+          <div class="limit-entry">
+            <input id="set_tool_limit" name="tool_description_max_bytes" type="number"
+              min="1" max="1048576" step="1" inputmode="numeric"
+              value="${STATE.tool_description_max_bytes ?? ''}" placeholder="unlimited"
+              aria-describedby="set_tool_limit_status">
+            <label class="limit-choice" for="set_tool_limit_unlimited">
+              <input id="set_tool_limit_unlimited" name="tool_description_max_bytes_unlimited"
+                type="checkbox" class="tgl" ${STATE.tool_description_max_bytes == null ? 'checked' : ''}> unlimited</label>
+          </div>
+          <div class="limit-effective" id="set_tool_limit_status" role="status" aria-live="polite"></div>
+        </div>
+      </div>
       <div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--b)">
         <label for="set_update_check" style="display:flex;align-items:flex-start;gap:8px;cursor:pointer">
           <input type="checkbox" class="tgl" id="set_update_check"
@@ -1276,10 +1499,55 @@ function renderGateway() {
   au.addEventListener('change', () => localStorage.setItem('autoUniquify', au.checked ? '1' : '0'));
   const logLevel = $('#set_log_level');
   if (logLevel) logLevel.value = STATE.log_level || 'INFO';
+  wireGatewayLimits();
   refreshGatewayLogs().then(startLogStream);
   paintStatus();  // #23
 }
 
+
+function wireGatewayLimits() {
+  const instructions = $('#set_instructions_limit');
+  const instructionsStatus = $('#set_instructions_limit_status');
+  instructions.dataset.limitLabel = 'Server instructions limit';
+  const syncInstructions = () => {
+    try {
+      const value = parseByteLimit(instructions, 'Server instructions limit');
+      instructionsStatus.textContent = `Gateway default: ${formatByteLimit(value)}`;
+      instructionsStatus.classList.remove('error');
+    } catch (e) {
+      instructionsStatus.textContent = e.message;
+      instructionsStatus.classList.add('error');
+    }
+  };
+  instructions.addEventListener('input', syncInstructions);
+  syncInstructions();
+
+  const tools = $('#set_tool_limit');
+  const unlimited = $('#set_tool_limit_unlimited');
+  const toolsStatus = $('#set_tool_limit_status');
+  tools.dataset.limitLabel = 'Tool description limit';
+  const syncTools = () => {
+    tools.disabled = unlimited.checked;
+    if (unlimited.checked) {
+      tools.classList.remove('bad');
+      tools.setAttribute('aria-invalid', 'false');
+      toolsStatus.textContent = 'Unlimited at gateway level; scoped controls may set a limit.';
+      toolsStatus.classList.remove('error');
+      return;
+    }
+    try {
+      const value = parseByteLimit(tools, 'Tool description limit');
+      toolsStatus.textContent = `Gateway default: ${formatByteLimit(value)}`;
+      toolsStatus.classList.remove('error');
+    } catch (e) {
+      toolsStatus.textContent = e.message;
+      toolsStatus.classList.add('error');
+    }
+  };
+  tools.addEventListener('input', syncTools);
+  unlimited.addEventListener('change', syncTools);
+  syncTools();
+}
 // Virtual Tools — first-class draft → validate/test → activate lifecycle.
 function virtualResolutionState(t) {
   const r = t.resolution || t.status || {};
@@ -1313,6 +1581,10 @@ function renderVirtualTools() {
     const members = (t.members || []).map(x => `<div class="vt-binding">${virtualMemberBinding(x)}</div>`).join('');
     const tested = t.last_test ? `last test: ${esc(t.last_test.status || t.last_test.outcome || 'recorded')} · runtime-only` : 'not tested yet · runtime-only';
     const dispatched = t.last_dispatch ? ` · last dispatch: ${esc(t.last_dispatch.status || t.last_dispatch.outcome || 'recorded')}` : '';
+    const limit = Object.prototype.hasOwnProperty.call(t, 'effective_description_max_bytes')
+      ? t.effective_description_max_bytes : (t.description_max_bytes ?? STATE.tool_description_max_bytes ?? null);
+    const bytes = t.description_bytes ?? bLen(t.description || '');
+    const limitSource = t.description_max_bytes == null ? 'inherited from gateway' : 'Virtual Tool override';
     return `<div class="card">
       <div class="c-head"><span class="c-title"><code>${esc(t.name)}</code></span>
         <span class="chip">${esc(t.dispatch || 'all')}</span>
@@ -1320,7 +1592,8 @@ function renderVirtualTools() {
         <button onclick="openVirtualEditor('${escJS(t.name)}')">Edit</button>
         <button onclick="duplicateVirtualTool('${escJS(t.name)}')">Duplicate</button>
         <button class="btn-danger" onclick="deleteVirtualTool('${escJS(t.name)}')">Delete</button></div>
-      <div style="font-size:12.5px;color:var(--tm);margin-bottom:9px">${esc(t.description || '')}</div>
+      <div style="font-size:12.5px;color:var(--tm);margin-bottom:3px">${esc(t.description || '')}</div>
+      <div class="si" style="margin-bottom:9px">Description ${bytes} B / ${formatByteLimit(limit)} · ${limitSource}</div>
       ${members || '<div class="si">no members</div>'}
       <div class="vt-actions">
         <button onclick="validateVirtualTool('${escJS(t.name)}')">Validate &amp; resolve</button>
@@ -1401,6 +1674,16 @@ async function openVirtualEditor(name, duplicate = false) {
   $('#vt_original_name').value = source && !duplicate ? source.name : '';
   $('#vt_name').value = duplicate ? `${t.name}_copy` : (t.name || '');
   $('#vt_description').value = t.description || '';
+  const descriptionLimit = Object.prototype.hasOwnProperty.call(t, 'effective_description_max_bytes')
+    ? t.effective_description_max_bytes : (t.description_max_bytes ?? STATE.tool_description_max_bytes ?? null);
+  $('#vt_description_limit').value = t.description_max_bytes ?? descriptionLimit ?? '';
+  $('#vt_description_limit_inherit').checked = t.description_max_bytes == null;
+  $('#vt_description_limit').dataset.limitLabel = 'Virtual Tool description limit';
+  wireLimitControl($('#vt_description_limit'), $('#vt_description_limit_inherit'),
+    $('#vt_description_limit_status'), $('#vt_description'),
+    STATE.tool_description_max_bytes ?? null, 'gateway');
+  wireCaps($('#virtualBg'));
+  wireGrow($('#virtualBg'));
   $('#vt_dispatch').value = t.dispatch || 'all';
   $('#vt_budget').value = t.max_result_bytes || 262144;
   $('#vt_failure').value = t.failure_policy || 'partial';
@@ -1443,7 +1726,14 @@ function gatherVirtualTool() {
       route_description: $('.vm-route-desc', row).value.trim() };
   });
   const dispatch = $('#vt_dispatch').value;
-  const definition = { name: $('#vt_name').value.trim(), description: $('#vt_description').value.trim(),
+  const description = $('#vt_description');
+  if (!capFieldValid(description)) {
+    const cap = Number(description.dataset.cap);
+    throw new Error(`Description is ${capFieldBytes(description)} B; effective limit is ${cap} B`);
+  }
+  const definition = { name: $('#vt_name').value.trim(), description: description.value.trim(),
+    description_max_bytes: scopedByteLimit($('#vt_description_limit'), $('#vt_description_limit_inherit'),
+      'Virtual Tool description limit'),
     always_load: $('#vt_always').checked, dispatch, inputs, members,
     max_result_bytes: Number($('#vt_budget').value), failure_policy: $('#vt_failure').value };
   if (dispatch === 'llm') definition.router = { model: $('#vt_model').value.trim(), api_key: $('#vt_api_key').value.trim(),
@@ -1503,7 +1793,8 @@ async function deleteVirtualTool(name) { if (!confirm(`Delete Virtual Tool ${nam
 // Tool card — editable fields prefilled with effective values (#62 semantics).
 function toolCard(b, t) {
   const card = document.createElement('div');
-  const isOvr = !!(t.name || t.title || t.description || t.max_result_chars != null
+  const isOvr = !!(t.name || t.title || t.description || t.description_max_bytes != null
+    || t.max_result_chars != null
     || t.params.some(p => p.name || p.description || p.hide || p.default != null));
   card.className = 'tool' + (t.enabled ? '' : ' disabled') + (isOvr ? ' ovr' : '');
   card.dataset.original = t.original;
@@ -1513,8 +1804,13 @@ function toolCard(b, t) {
   const desc = t.description || t.default_description || '';
   const pinned = !!t.always_load;
   const dot = k => t[k] ? ' <span class="ovd">·</span>' : '';
+  const controlId = `tool_limit_${++CONTROL_SEQ}`;
+  const inheritedLimit = effectiveBackendToolDescriptionLimit(b);
+  const effectiveLimit = effectiveToolDescriptionLimit(b, t);
+  const descriptionBytes = t.effective_description_bytes ?? bLen(desc);
+  const capturedOver = t.description == null && effectiveLimit != null && descriptionBytes > effectiveLimit;
   card.innerHTML = `
-    <div class="tc-h" onclick="this.parentElement.classList.toggle('open')">
+    <div class="tc-h" role="button" tabindex="0" aria-expanded="false" aria-controls="${controlId}_body">
       <span class="orig" title="real MCP tool name (provider-facing, not editable)">${esc(t.original)}</span>
       <span class="arrow">→</span>
       <span class="newname">${esc(name)}</span>
@@ -1529,21 +1825,42 @@ function toolCard(b, t) {
       <input type="checkbox" class="f-always" ${t.always_load ? 'checked' : ''} style="display:none">
       <span class="chev">${ICON.chev}</span>
     </div>
-    <div class="t-body">
+    <div class="t-body" id="${controlId}_body">
       <div class="row2">
         <div><span class="flabel">Broadcast name${dot('name')}</span>
           <input type="text" class="f-name mono${t.name ? ' ov' : ''}" value="${esc(name)}" data-default="${esc(t.default_name)}"></div>
         <div><span class="flabel">Title${dot('title')}</span>
           <input type="text" class="f-title${t.title ? ' ov' : ''}" value="${esc(title)}" data-default="${esc(t.default_title||'')}"></div>
       </div>
-      <span class="flabel">Description${dot('description')}</span>
-      <textarea class="f-desc grow${t.description ? ' ov' : ''}" data-cap="2048" data-default="${esc(t.default_description||'')}">${esc(desc)}</textarea>
+      <label class="flabel" for="${controlId}_description">Description${dot('description')}</label>
+      <textarea id="${controlId}_description" name="description"
+        class="f-desc grow${t.description ? ' ov' : ''}"
+        data-cap="${effectiveLimit ?? ''}"
+        data-cap-note="${t.description_max_bytes == null ? 'inherited' : 'tool override'}"
+        data-cap-label="Tool description" data-default="${esc(t.default_description||'')}">${esc(desc)}</textarea>
+      ${capturedOver ? `<div class="limit-warning" role="status">${ICON.warn}
+        Captured upstream description is ${descriptionBytes} B, above the ${effectiveLimit} B effective limit.
+        Outgoing description is truncated at a UTF-8 boundary; the captured text remains intact.</div>` : ''}
       <div class="row2">
+        <div class="limit-control">
+          <label for="${controlId}">Description limit (UTF-8 bytes)${t.description_max_bytes != null ? ' <span class="ovd">·</span>' : ''}</label>
+          <div class="limit-entry">
+            <input id="${controlId}" name="description_max_bytes" type="number"
+              class="f-description-limit mono${t.description_max_bytes != null ? ' ov' : ''}"
+              min="1" max="1048576" step="1" inputmode="numeric"
+              value="${t.description_max_bytes ?? inheritedLimit ?? ''}" placeholder="${inheritedLimit == null ? 'unlimited' : ''}"
+              aria-describedby="${controlId}_status">
+            <label class="limit-choice" for="${controlId}_inherit">
+              <input id="${controlId}_inherit" name="description_max_bytes_inherit"
+                type="checkbox" class="tgl f-description-inherit"
+                ${t.description_max_bytes == null ? 'checked' : ''}> inherit backend</label>
+          </div>
+          <div class="limit-effective" id="${controlId}_status" role="status" aria-live="polite"></div>
+        </div>
         <div><span class="flabel">Output cap (chars)${t.max_result_chars != null ? ' <span class="ovd">·</span>' : ''}</span>
           <input type="number" class="f-maxchars mono${t.max_result_chars != null ? ' ov' : ''}" min="1" step="1"
             value="${t.max_result_chars != null ? t.max_result_chars : ''}" placeholder="client default (~25k tokens)"
             title="per-tool result budget — broadcast as _meta anthropic/maxResultSizeChars; empty = no cap override"></div>
-        <div></div>
       </div>
       <div class="params">
         <span class="flabel" style="margin-top:0">Parameters</span>
@@ -1560,6 +1877,17 @@ function toolCard(b, t) {
   // Pin pill drives the hidden .f-always checkbox so gather()/save wiring is
   // unchanged. Pin/enable changes save immediately and re-render so the list
   // re-sorts (pinned → top, off → bottom) and the sidebar 📌 count updates.
+  const header = $('.tc-h', card);
+  const toggleOpen = () => {
+    const open = card.classList.toggle('open');
+    header.setAttribute('aria-expanded', open ? 'true' : 'false');
+  };
+  header.addEventListener('click', toggleOpen);
+  header.addEventListener('keydown', event => {
+    if (event.target !== header || (event.key !== 'Enter' && event.key !== ' ')) return;
+    event.preventDefault();
+    toggleOpen();
+  });
   const pinBtn = $('.pin-btn', card), always = $('.f-always', card),
         enabledTgl = $('.f-enabled', card);
   const saveAndResort = async () => {
@@ -1576,8 +1904,12 @@ function toolCard(b, t) {
     if (!enabledTgl.checked && always.checked) always.checked = false;  // off can't stay pinned
     saveAndResort();
   });
-  wireCard(b.name, t.original, card);
+  const limitInput = $('.f-description-limit', card);
+  limitInput.dataset.limitLabel = 'Tool description limit';
   wireCaps(card);
+  wireLimitControl(limitInput, $('.f-description-inherit', card),
+    $(`#${controlId}_status`, card), $('.f-desc', card), inheritedLimit, 'backend');
+  wireCard(b.name, t.original, card);
   return card;
 }
 
@@ -1873,6 +2205,8 @@ function gather(card) {
     name: $('.f-name', card).value,
     title: $('.f-title', card).value,
     description: $('.f-desc', card).value,
+    description_max_bytes: scopedByteLimit(
+      $('.f-description-limit', card), $('.f-description-inherit', card), 'Tool description limit'),
     enabled: $('.f-enabled', card).checked,
     always_load: $('.f-always', card).checked,
     // #162: per-tool output cap — empty field = null = no cap override.
@@ -1884,7 +2218,7 @@ function gather(card) {
 // ---- #113: Load field snapshots (browser-side restore; Save buttons removed —
 // use GET /admin/api/export for downloads, or the old snapshot files still load).
 const SNAP_KIND = 'mcp-gateway-fields';
-const EMPTY_OVERRIDE = { name: '', title: '', description: '', enabled: true, always_load: false, max_result_chars: null, params: [] };
+const EMPTY_OVERRIDE = { name: '', title: '', description: '', description_max_bytes: null, enabled: true, always_load: false, max_result_chars: null, params: [] };
 
 // ---- #136 settings bundles: Export/Import wired to the server-side API ----
 async function exportSettings() {
@@ -1936,8 +2270,15 @@ async function saveSettings() {
   if (isNaN(iv) || iv < 0) { toast('introspect interval must be an integer ≥ 0'); return; }
   const logLevel = $('#set_log_level') ? $('#set_log_level').value : (STATE.log_level || 'INFO');
   try {
-    const payload = { introspect_interval: iv, log_level: logLevel,
-      update_check: $('#set_update_check').checked === true };
+    const payload = {
+      introspect_interval: iv,
+      log_level: logLevel,
+      update_check: $('#set_update_check').checked === true,
+      server_instructions_max_bytes: parseByteLimit(
+        $('#set_instructions_limit'), 'Server instructions limit'),
+      tool_description_max_bytes: $('#set_tool_limit_unlimited').checked
+        ? null : parseByteLimit($('#set_tool_limit'), 'Tool description limit'),
+    };
     if (STATE.auth_mode !== 'oauth_jwt') payload.bearer_token = bearer;
     const r = await api('PUT', '/admin/api/settings', payload);
     afterRestart(r, 'settings saved');
@@ -1991,6 +2332,7 @@ async function applySnapshot(scope, snap) {
           backend: b.name, tool_original: st.original,
           override: {
             name: st.name || '', title: st.title || '', description: st.description || '',
+            description_max_bytes: st.description_max_bytes ?? null,
             enabled: st.enabled !== false, always_load: !!st.always_load,
             params: (st.params || []).map(p => ({ original: p.original, name: p.name || '', description: p.description || '', hide: !!p.hide, default: p.default ?? '' })),
           },
@@ -2037,9 +2379,16 @@ async function doSave(backend, original, card, keepalive = false) {
   if (!namesValid(card)) return;  // #41
   const key = backend + '::' + original;
   clearTimeout(timers[key]); delete timers[key]; delete pending[key];
+  if (!capFieldValid($('.f-desc', card), true)) {
+    pending[key] = { backend, original, card };
+    return;
+  }
+  let override;
+  try { override = gather(card); }
+  catch (e) { toast('save failed: ' + e.message, 5000); pending[key] = { backend, original, card }; return; }
   const put = payload => fetch('/admin/api/override',
     { method: 'PUT', headers: authHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(payload), keepalive });
-  const payload = { backend, tool_original: original, override: gather(card) };
+  const payload = { backend, tool_original: original, override };
   try {
     let r = await put(payload);
     let j = await r.json().catch(() => ({}));
@@ -2055,7 +2404,7 @@ async function doSave(backend, original, card, keepalive = false) {
       $('.newname', card).textContent = j.name;
       toast(`name taken — saved as "${j.name}"`);
     }
-    patchToolState(backend, original, gather(card));
+    patchToolState(backend, original, override);
     flashSaved();
   } catch (e) { toast('save failed: ' + e.message); pending[key] = { backend, original, card }; }
 }
@@ -2074,6 +2423,9 @@ function patchToolState(backend, original, o) {
   t.name = ovVal(o.name, t.default_name);
   t.title = ovVal(o.title, t.default_title);
   t.description = ovVal(o.description, t.default_description);
+  t.description_max_bytes = o.description_max_bytes;
+  t.effective_description_max_bytes = o.description_max_bytes ?? effectiveBackendToolDescriptionLimit(b);
+  t.effective_description_bytes = bLen(o.description || t.default_description || '');
   t.enabled = o.enabled;
   t.always_load = o.always_load;
   t.max_result_chars = o.max_result_chars;
@@ -2108,6 +2460,10 @@ function instrKey(backend) { return 'instr::' + (backend ?? GATEWAY); }
 function scheduleInstr(backend, ta) {
   const key = instrKey(backend);
   clearTimeout(timers[key]);
+  if (!capFieldValid(ta)) {
+    delete timers[key]; delete instrPending[key];
+    return;
+  }
   instrPending[key] = { backend, ta };
   timers[key] = setTimeout(() => doSaveInstr(backend, ta), 550);
 }
@@ -2118,6 +2474,7 @@ function flushInstr(backend, ta) {
 async function doSaveInstr(backend, ta, keepalive = false) {
   const key = instrKey(backend);
   clearTimeout(timers[key]); delete timers[key]; delete instrPending[key];
+  if (!capFieldValid(ta, true)) { instrPending[key] = { backend, ta }; return; }
   const body = JSON.stringify({ backend, value: ta.value });
   try {
     const r = await fetch('/admin/api/instructions',

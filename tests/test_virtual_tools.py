@@ -87,6 +87,85 @@ def test_config_roundtrip_preserves_stable_bindings():
     assert reparsed.virtual_tools[0].members[0].backend_id == "backend-a"
 
 
+# --- #286: virtual-tool description byte limits -----------------------------
+# Virtual-tool descriptions are authored, so an over-limit description is
+# REJECTED at validation (never truncated): per-tool cap first, then the
+# gateway-global tool cap when the tool inherits.
+
+
+def test_virtual_tool_authored_description_over_own_cap_is_rejected():
+    raw = _raw_virtual(description="x" * 100, description_max_bytes=50)
+    with pytest.raises(cl.ConfigError, match="description is 100 UTF-8 bytes"):
+        _cfg(raw)
+
+
+def test_virtual_tool_authored_description_over_gateway_cap_is_rejected():
+    raw = _raw_virtual(description="x" * 30)  # no own cap -> inherits gateway
+    with pytest.raises(cl.ConfigError, match="effective cap is 20 bytes"):
+        cl.GatewayConfig.model_validate(
+            {
+                "backends": [
+                    {
+                        "id": "backend-a",
+                        "name": "a",
+                        "transport": "http",
+                        "url": "http://a/mcp",
+                    },
+                    {
+                        "id": "backend-b",
+                        "name": "b",
+                        "transport": "http",
+                        "url": "http://b/mcp",
+                    },
+                ],
+                "tool_description_max_bytes": 20,
+                "virtual_tools": [raw],
+            }
+        )
+
+
+def test_virtual_tool_own_cap_beats_gateway_global():
+    # a per-tool cap raises the effective cap above the gateway global
+    raw = _raw_virtual(description="x" * 30, description_max_bytes=100)
+    cfg = cl.GatewayConfig.model_validate(
+        {
+            "backends": [
+                {
+                    "id": "backend-a",
+                    "name": "a",
+                    "transport": "http",
+                    "url": "http://a/mcp",
+                },
+                {
+                    "id": "backend-b",
+                    "name": "b",
+                    "transport": "http",
+                    "url": "http://b/mcp",
+                },
+            ],
+            "tool_description_max_bytes": 20,
+            "virtual_tools": [raw],
+        }
+    )
+    tool = cfg.virtual_tools[0]
+    assert cl.effective_virtual_description_limit(cfg, tool) == 100
+    assert tool.description == "x" * 30
+
+
+def test_virtual_tool_description_cap_roundtrips_toml():
+    import tomllib
+
+    cfg = _cfg(_raw_virtual(description_max_bytes=500))
+    reparsed = cl.GatewayConfig.model_validate(tomllib.loads(cl.dump_toml(cfg)))
+    assert reparsed.virtual_tools[0].description_max_bytes == 500
+    assert reparsed == cfg
+
+
+def test_virtual_tool_description_cap_omitted_when_none():
+    raw = cl.to_raw(_cfg())
+    assert "description_max_bytes" not in raw["virtual_tools"][0]
+
+
 def _tool_with_input(input_config: dict) -> cl.VirtualTool:
     return cl.VirtualTool.model_validate(
         {
