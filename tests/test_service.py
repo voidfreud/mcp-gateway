@@ -435,7 +435,7 @@ def test_install_sh_is_thin_dry_run_wrapper(tmp_path):
         check=False,
     )
     assert result.returncode == 0
-    assert "uv tool install --force" in result.stdout
+    assert "uv tool install --force --no-cache" in result.stdout
     assert ".local/bin/mcp-gateway --install-service --restart" in result.stdout
     assert not (tmp_path / ".local").exists()
 
