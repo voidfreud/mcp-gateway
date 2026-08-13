@@ -1149,6 +1149,18 @@ def test_env_credential_store_path_suffix_is_exact(key):
         )
 
 
+def test_env_max_tokens_setting_may_be_literal():
+    backend = cl.Backend.model_validate(
+        {
+            "name": "b",
+            "transport": "stdio",
+            "command": "/bin/x",
+            "env": {"GITNEXUS_MCP_DEFAULT_MAX_TOKENS": "10000"},
+        }
+    )
+    assert backend.env["GITNEXUS_MCP_DEFAULT_MAX_TOKENS"] == "10000"
+
+
 def test_headers_stay_strict_for_path_suffixed_names():
     # headers use the GENERIC classifier: a path-suffixed credential name in
     # a header is still credential-like (headers carry credentials, not paths)

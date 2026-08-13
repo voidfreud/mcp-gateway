@@ -27,6 +27,7 @@ _CREDENTIAL_KEY_CONCEPTS = (
 )
 _CREDENTIAL_VALUE_SCHEMES = ("bearer ", "basic ", "token ")
 _ENV_PATH_KEY_SUFFIXES = ("-file", "-path", "-dir", "-directory")
+_ENV_NONCREDENTIAL_SUFFIXES = ("-max-tokens",)
 
 
 def is_safe_credential_value(value: str) -> bool:
@@ -48,8 +49,8 @@ def is_credential_like_key(key: str) -> bool:
 
 
 def is_credential_like_env_key(key: str) -> bool:
-    """Classify an env key, exempting conventional credential-store paths."""
+    """Classify an env key, exempting paths and nonsecret capacity settings."""
     normalized = key.lower().replace("_", "-")
-    if normalized.endswith(_ENV_PATH_KEY_SUFFIXES):
+    if normalized.endswith(_ENV_PATH_KEY_SUFFIXES + _ENV_NONCREDENTIAL_SUFFIXES):
         return False
     return is_credential_like_key(normalized)
