@@ -4,6 +4,20 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project aims to
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0](https://github.com/voidfreud/mcp-gateway/compare/v1.3.2...v1.4.0) (2026-08-13)
+
+
+### Features
+
+* add scriptable gateway control CLI ([#292](https://github.com/voidfreud/mcp-gateway/issues/292)) ([04c460a](https://github.com/voidfreud/mcp-gateway/commit/04c460a76800a731729aa1e0947e507ce5939f8d))
+* make MCP metadata limits configurable and enforceable ([#300](https://github.com/voidfreud/mcp-gateway/issues/300)) ([335072d](https://github.com/voidfreud/mcp-gateway/commit/335072d8c7e6c8bf05aa97074e1ca3673ccb8422)), closes [#286](https://github.com/voidfreud/mcp-gateway/issues/286)
+
+
+### Bug Fixes
+
+* allow literal maximum token environment settings ([#301](https://github.com/voidfreud/mcp-gateway/issues/301)) ([695f679](https://github.com/voidfreud/mcp-gateway/commit/695f679d6d5fac5fc1bb76f9cddce9e0fce7dccb))
+* rebuild checkout tool during install ([#302](https://github.com/voidfreud/mcp-gateway/issues/302)) ([c031402](https://github.com/voidfreud/mcp-gateway/commit/c031402f3f5dc84e475739ca800cd7e816bdaed6))
+
 ## [1.3.2](https://github.com/voidfreud/mcp-gateway/compare/v1.3.1...v1.3.2) (2026-08-04)
 
 
