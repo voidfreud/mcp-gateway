@@ -304,6 +304,32 @@ by disabling it (`enabled = false` on the tool, or the toggle in the admin UI).
 A disabled tool is not broadcast to an MCP client and cannot be called through the
 gateway.
 
+## Bounding broadcast metadata
+
+The gateway forwards two kinds of upstream text to every MCP client that
+connects: each backend's server-level `instructions` and each tool's
+`description`. An upstream backend can ship arbitrarily long blurb for these,
+and every client session then carries it. The configurable metadata limits
+(`server_instructions_max_bytes`, `tool_description_max_bytes`, and per-tool
+`description_max_bytes` — see [configuration.md](configuration.md#metadata-byte-limits))
+put a strict UTF-8 byte budget on that surface.
+
+Two guarantees are worth stating precisely:
+
+- **Authored text is rejected, never silently cut.** An instructions or
+description override you write through the admin UI, the API, the CLI, or a
+Virtual Tool definition is validated against the effective cap and rejected
+with a clear error when it does not fit.
+- **Captured upstream text is truncated only at broadcast time.** The
+backend's original instructions or description is never a load error; when it
+exceeds the effective cap it is cut at a UTF-8 character boundary (a multibyte
+character is never split) when the endpoint answers, and the truncation is
+visible in the admin state and dashboard byte counts.
+
+These caps bound what the gateway itself forwards; they are not a claim about
+how a given MCP client budgets context. A client may apply its own truncation
+on top (see the notes in [configuration.md](configuration.md#metadata-byte-limits)).
+
 ## Behavior hooks run your code
 
 Per-tool [behavior hooks](configuration.md#behavior-hooks-validate--post_process)

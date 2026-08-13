@@ -29,9 +29,13 @@ from typing import Any
 from urllib.parse import quote
 
 from mcp_gateway.cli_common import (
+    LIMIT_MAX_BYTES,
+    UNSET,
     CLIContext,
     CLIError,
     expect_object,
+    limit_flag_type,
+    limit_human,
     read_json_source,
     reject_unknown_fields,
     require_yes,
@@ -257,6 +261,31 @@ def _cmd_show(args: argparse.Namespace, ctx: CLIContext) -> None:
     ]
     if b.get("server_info"):
         lines.append(f"server_info: {b['server_info']}")
+    # #286: stored/effective metadata limits and the current instructions byte
+    # count — pass-through of the state fields, never recomputed client-side.
+    if any(
+        b.get(key) is not None
+        for key in (
+            "server_instructions_max_bytes",
+            "effective_server_instructions_max_bytes",
+            "tool_description_max_bytes",
+            "effective_tool_description_max_bytes",
+            "instructions_bytes",
+        )
+    ):
+        inst_cap = limit_human(
+            b.get("server_instructions_max_bytes"),
+            b.get("effective_server_instructions_max_bytes"),
+        )
+        tool_cap = limit_human(
+            b.get("tool_description_max_bytes"),
+            b.get("effective_tool_description_max_bytes"),
+        )
+        lines.append(f"server_instructions_max_bytes: {inst_cap}")
+        lines.append(f"tool_description_max_bytes: {tool_cap}")
+        ib = b.get("instructions_bytes")
+        if ib is not None:
+            lines.append(f"instructions_bytes: {ib}")
     tools = _list_field(b, "tools")
     lines.append(f"tools: {_enabled_tools(b)}/{len(tools)}")
     lines.append(f"resources: {len(_list_field(b, 'resources'))}")
@@ -718,6 +747,67 @@ def _cmd_refresh(args: argparse.Namespace, ctx: CLIContext) -> None:
 
 
 # ---------------------------------------------------------------------------
+# limits (show / update, #286)
+# ---------------------------------------------------------------------------
+
+
+def _cmd_limits(args: argparse.Namespace, ctx: CLIContext) -> None:
+    """Show (no flags) or update a backend's UTF-8 metadata limits.
+
+    The read view builds a focused record from the live state fields — stored
+    and server-resolved effective limits plus the current instructions byte
+    count — verbatim, never recomputed. The mutation sends only the keys the
+    user gave (absent keys keep stored values) and hot-reloads the backend.
+    """
+    payload: dict[str, Any] = {}
+    if args.server_instructions_max_bytes is not UNSET:
+        payload["server_instructions_max_bytes"] = args.server_instructions_max_bytes
+    if args.tool_description_max_bytes is not UNSET:
+        payload["tool_description_max_bytes"] = args.tool_description_max_bytes
+    if not payload:
+        state = _state(ctx)
+        b = _find_backend(state, args.name)
+        rec = {
+            "backend": b.get("name"),
+            "server_instructions_max_bytes": b.get("server_instructions_max_bytes"),
+            "effective_server_instructions_max_bytes": b.get(
+                "effective_server_instructions_max_bytes"
+            ),
+            "tool_description_max_bytes": b.get("tool_description_max_bytes"),
+            "effective_tool_description_max_bytes": b.get(
+                "effective_tool_description_max_bytes"
+            ),
+            "default_instructions_bytes": b.get("default_instructions_bytes"),
+            "instructions_bytes": b.get("instructions_bytes"),
+        }
+        inst_cap = limit_human(
+            b.get("server_instructions_max_bytes"),
+            b.get("effective_server_instructions_max_bytes"),
+        )
+        tool_cap = limit_human(
+            b.get("tool_description_max_bytes"),
+            b.get("effective_tool_description_max_bytes"),
+        )
+        lines = [
+            f"backend: {b.get('name')}",
+            f"server_instructions_max_bytes: {inst_cap}",
+            f"tool_description_max_bytes: {tool_cap}",
+        ]
+        ib = b.get("instructions_bytes")
+        if ib is not None:
+            lines.append(f"instructions_bytes: {ib}")
+        ctx.emit(rec, lines)
+        return
+    resp = expect_object(
+        ctx.client.request(
+            "PUT", f"/admin/api/backend/{quote(args.name)}/limits", payload=payload
+        ),
+        "limits response",
+    )
+    ctx.emit(resp, f"limits of '{args.name}' updated (hot reload)")
+
+
+# ---------------------------------------------------------------------------
 # Registrar
 # ---------------------------------------------------------------------------
 
@@ -933,6 +1023,40 @@ def register_backend_commands(  # noqa: PLR0915 - one declarative parser block p
     )
     p.add_argument("name", help="backend name")
     p.set_defaults(handler=_cmd_inspect)
+
+    p = sub.add_parser(
+        "limits",
+        help="show or update a backend's UTF-8 metadata limits (#286)",
+        description=(
+            "Without limit flags this prints the backend's stored/effective "
+            "limits and the current instructions byte count from the live "
+            "state. With flags it PUTs /admin/api/backend/{name}/limits and "
+            "hot-reloads the backend; each given key is stored, 'inherit' "
+            "clears it (the gateway global applies)."
+        ),
+    )
+    p.add_argument("name", help="backend name")
+    p.add_argument(
+        "--server-instructions-max-bytes",
+        type=limit_flag_type("inherit", "server_instructions_max_bytes"),
+        default=UNSET,
+        metavar="N|inherit",
+        help=(
+            f"server instructions cap in UTF-8 bytes (1..{LIMIT_MAX_BYTES}); "
+            "'inherit' clears the override"
+        ),
+    )
+    p.add_argument(
+        "--tool-description-max-bytes",
+        type=limit_flag_type("inherit", "tool_description_max_bytes"),
+        default=UNSET,
+        metavar="N|inherit",
+        help=(
+            f"tool description cap in UTF-8 bytes (1..{LIMIT_MAX_BYTES}); "
+            "'inherit' clears the override"
+        ),
+    )
+    p.set_defaults(handler=_cmd_limits)
 
     p = sub.add_parser(
         "refresh",

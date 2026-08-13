@@ -40,6 +40,7 @@ reference — global flags, JSON input, and safety rules — lives in
 | Resource edits | `mcp-gateway resource set …` |
 | Prompt edits | `mcp-gateway prompt set …` |
 | Server instructions | `mcp-gateway instructions set <backend> …` |
+| Backend metadata limits | `mcp-gateway backend limits <name> …` |
 | Virtual Tools editor | `mcp-gateway virtual create\|update\|validate\|test\|activate …` |
 | Export / import | `mcp-gateway settings export\|import` |
 | Gateway settings | `mcp-gateway settings show\|set` |
@@ -81,7 +82,14 @@ when no definition is active.
 
 The editor walks one definition through:
 
-1. Public name, description, and input schema.
+1. Public name, description, and input schema. The description has a live
+   byte counter against its effective cap, plus a **Description limit
+   (UTF-8 bytes)** control (`1`..`1,048,576`) with an **inherit gateway**
+   checkbox — checked (the default) inherits the gateway-wide
+   `tool_description_max_bytes` (unlimited when unset); unchecked saves a
+   scoped number for this Virtual Tool only. An authored description over
+   the effective cap is rejected on save — nothing you author is silently
+   truncated.
 2. Stable source members selected from the live backend catalog. The UI shows
    current effective names but stores backend IDs and original tool/parameter
    identities, so ordinary renames do not silently break the binding.
@@ -153,9 +161,22 @@ backend-wide controls:
 - **Server instructions.** A box to edit the backend's server-level
   instructions — the always-loaded blurb an MCP client receives about the server
   at connect time (for example, "use this server whenever the user asks about a
-  library"). Leaving it empty inherits the backend's original. Admin/UI saves
-  enforce a 2,048 UTF-8-byte compatibility budget; a directly authored TOML
-  `Backend.instructions` value is not schema-capped.
+  library"). Leaving it empty inherits the backend's original. An authored
+  override must fit the backend's **effective** instructions cap — its own
+  `server_instructions_max_bytes` when set, else the gateway-wide default
+  (`2048`) — and a save over the cap is rejected with a clear error. A directly
+  authored TOML `Backend.instructions` value is treated the same way: config
+  load rejects it rather than loading it. Only the backend's **captured
+  upstream** instructions can exceed the cap — such text is truncated at a
+  UTF-8 character boundary at broadcast time, and an amber warning on the card
+  reports the truncated byte count so you can see it.
+- **Backend metadata limits.** A card with the backend's two per-backend
+  caps: **Server instructions limit** and **Tool description limit** (UTF-8
+  bytes, `1`..`1,048,576`). Each has an **inherit gateway** checkbox — checked
+  (the default) inherits the gateway-wide value, unchecked saves a scoped
+  number for this backend only. **Save backend limits** applies the change
+  live (no restart); the tool cards and instructions box re-render against the
+  new effective caps.
 
 ### Rename vs Display name
 
@@ -210,6 +231,13 @@ Per tool you can edit:
 - **Description** — the text an MCP client receives to decide when and how to
   use the tool.
   This is usually the most valuable thing to rewrite.
+- **Description cap** — a per-tool **Description limit (UTF-8 bytes)** input
+  (`1`..`1,048,576`). A number caps what is broadcast for this one tool,
+  overriding the backend's and the gateway's caps; the **inherit backend**
+  checkbox clears the per-tool value. The description textarea shows a live
+  byte counter against the effective cap, and an amber warning appears when a
+  captured upstream description exceeds it — such a description is truncated
+  at a UTF-8 character boundary at broadcast time, never silently dropped.
 - **Enabled** — turn the toggle off to drop the tool from the listing entirely.
 
 Each parameter of the tool has its own row, where you can set:
@@ -288,9 +316,14 @@ The **⚙ Gateway** item collects gateway-wide settings and information:
   the version and the explicit `mcp-gateway update` command; it never applies
   the update.
 - **Stats and context footprint.** A read-only overview of every backend
-  endpoint and how much of the Admin/UI's 2,048 UTF-8-byte server-instructions
-  budget it uses. Direct TOML values are not schema-capped; other clients may
-  budget this context differently.
+  endpoint: its server-instructions byte count against the effective cap
+  (`instructions N / LIMIT B`; the defaults are a 2048-byte instructions cap
+  and an unlimited description cap). Each tool card and Virtual Tool card
+  carries its description byte count against its effective cap, and an amber
+  warning appears wherever a captured upstream blurb exceeds its cap, so
+  broadcast-time truncation stays observable. Other clients may budget this
+  context differently; the gateway enforces the configured caps, it does not
+  claim a client-specific budget.
 - **Export / import.** Your complete stored settings — every tool and parameter
   override, pins, server instructions, and display names — round-trip as a single
   JSON bundle. The **Export** button downloads it; **Import** applies one.
@@ -301,11 +334,14 @@ The **⚙ Gateway** item collects gateway-wide settings and information:
   import — only the text overrides move.
 - **Auto-uniquify toggle.** The name-collision escape hatch described under
   [Collision handling](#collision-handling).
-- **Gateway settings.** The UI edits four boot-time settings: the **bearer token
+- **Gateway settings.** The UI edits six boot-time settings: the **bearer token
   reference** (an `${ENV_VAR}` name, never the secret itself — see
   [security.md](security.md)), the **scheduled re-scan interval** (`0` = off),
-  the **Daily update checks** privacy toggle, and **log verbosity**. It displays
-  log retention read-only; set `log_max_bytes` and `log_backup_count` in
+  the **Daily update checks** privacy toggle, **log verbosity**, and the two
+  gateway-wide **metadata limits** — **Server instructions limit (UTF-8
+  bytes)** and **Tool description limit (UTF-8 bytes)**, the latter with an
+  **unlimited** checkbox (checked by default: no cap). It displays log
+  retention read-only; set `log_max_bytes` and `log_backup_count` in
   `config.toml` or through the [admin API](api.md#gateway-settings-payload).
   Saving asks a launchd-managed daemon to restart. In foreground/development
   mode it saves the values and reports that they apply on the next real restart.

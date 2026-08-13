@@ -38,6 +38,12 @@ _BACKEND_ADD_FIELDS = frozenset(
     }
 )
 
+# #286: the exact keys the per-backend limits endpoint accepts. A typo like
+# "tool_desc_max_bytes" must 400 before any work — never silently projected.
+_BACKEND_LIMIT_FIELDS = frozenset(
+    {"server_instructions_max_bytes", "tool_description_max_bytes"}
+)
+
 
 class AdminContext(Protocol):
     """The live Admin context surface needed by backend routes."""
@@ -68,6 +74,7 @@ class BackendRouteDeps:
     error: Callable[..., JSONResponse]
     needs_json: Callable[[Callable[..., Any]], Callable[..., Any]]
     clean: Callable[[Any], Any]
+    clean_limit: Callable[[Any, str], int | None]
     name_pattern: re.Pattern[str]
     virtual_route: str
     stable_backend_id: Callable[[Backend], str]
@@ -182,6 +189,42 @@ def backend_routes(  # noqa: PLR0915
             "backend_display_name_changed", backend=name, display_name=b.display_name
         )
         return JSONResponse({"ok": True})
+
+    async def set_backend_limits(request: Request):
+        """#286: set one backend's metadata byte-limit overrides.
+
+        Payload is a partial object: absent keys are left untouched (merge
+        semantics); explicit null clears the stored override (inherit the
+        gateway default); bool/out-of-range values and unknown keys are strict
+        400s. Commit is atomic (full-config validation before the save) and
+        hot-reloads the backend so rebuilt transforms pick up the new caps
+        immediately — no restart.
+        """
+        name = request.path_params["name"]
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            return deps().error("limits payload must be a JSON object")
+        unknown = sorted(set(payload) - _BACKEND_LIMIT_FIELDS)
+        if unknown:
+            return deps().error(f"unknown limit field(s): {', '.join(unknown)}")
+        cfg = ctx.load()
+        b = next((x for x in cfg.backends if x.name == name), None)
+        if b is None:
+            return deps().error("unknown backend")
+        for key in _BACKEND_LIMIT_FIELDS:
+            if key in payload:
+                try:
+                    setattr(b, key, deps().clean_limit(payload[key], key))
+                except cl.ConfigError as exc:
+                    return deps().error(str(exc))
+        ctx.commit(cfg, name)
+        ctx.log.info(
+            "backend_limits_changed",
+            backend=name,
+            server_instructions_max_bytes=b.server_instructions_max_bytes,
+            tool_description_max_bytes=b.tool_description_max_bytes,
+        )
+        return JSONResponse({"ok": True, "reloaded": "in-process"})
 
     async def rename_backend(  # noqa: PLR0911, PLR0912, PLR0915
         request: Request,
@@ -429,6 +472,11 @@ def backend_routes(  # noqa: PLR0915
             "/admin/api/backend/{name}/display-name",
             deps().needs_json(ctx.locked(set_display_name)),
             methods=["POST"],
+        ),
+        Route(
+            "/admin/api/backend/{name}/limits",
+            deps().needs_json(ctx.locked(set_backend_limits)),
+            methods=["PUT"],
         ),
         Route(
             "/admin/api/backend/{name}/rename",

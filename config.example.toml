@@ -31,6 +31,19 @@ log_file = "~/.local/state/mcp-gateway/gateway.log"
 # update_check = true       # check PyPI at startup and daily for a newer stable
 #                           # release; offline-tolerant and never auto-applies.
 #                           # Set false for zero update-check network requests.
+#
+# Metadata byte limits (#286): strict UTF-8 caps on the server-level
+# instructions and tool descriptions this gateway broadcasts to MCP clients.
+# Each accepts an integer from 1 to 1,048,576 (1 MiB). The instructions cap
+# limits AUTHORED overrides (backend `instructions`, admin/API/CLI writes);
+# captured upstream text is truncated to the cap at a UTF-8 character
+# boundary only when it is broadcast, with a warning. Tool-description caps
+# apply the same way; precedence per tool is: the tool's
+# description_max_bytes > the backend's tool_description_max_bytes > the
+# gateway-wide tool_description_max_bytes.
+# server_instructions_max_bytes = 2048   # default 2048 (backwards-compatible)
+# tool_description_max_bytes = 4096      # default: unset = no cap (unlimited);
+#                                        # top-level `unlimited` in the CLI
 
 # Optional defense-in-depth (#26): require this bearer token on every backend
 # MCP endpoint AND the admin API (/health, /ready and the bare GET /admin page
@@ -104,6 +117,13 @@ stateless = true                   # fresh session per call. false (warm,
 # request_timeout = 300.0          # each forwarded backend request, seconds
 # always_load = true               # pin ALL this backend's tools to load upfront
                                    # (eager — exempt from tool-search deferral)
+#
+# Per-backend metadata-limit overrides (#286): an integer from 1 to 1,048,576
+# (1 MiB) that overrides the gateway-wide cap for THIS backend only.
+# Unset = inherit the gateway value. Instructions precedence: backend over
+# gateway; tool descriptions precedence: tool > backend > gateway.
+# server_instructions_max_bytes = 1024
+# tool_description_max_bytes = 4096
 
   # Per-tool rewrite. `original` is the backend's own tool name.
   # Any of name/title/description omitted -> left as the backend's.
@@ -118,6 +138,10 @@ stateless = true                   # fresh session per call. false (warm,
   #                                # _meta "anthropic/maxResultSizeChars" — Claude
   #                                # Code honors it over its global 25k-token cap.
   #                                # Positive integer; omit for the client default.
+  # description_max_bytes = 1500   # per-tool cap on THIS tool's broadcast
+  #                                # description (#286): overrides the backend
+  #                                # and gateway caps; unset = inherit. Integer
+  #                                # from 1 to 1,048,576.
   # Behavior hooks (#16): user-authored Python, "module:function" resolved in
   # the hooks dir (MCP_GATEWAY_HOOKS > ./hooks/ > ~/.config/mcp-gateway/hooks/).
   # ARBITRARY CODE EXECUTION in the daemon, by design — same trust as a stdio
@@ -194,6 +218,9 @@ stateless = true                   # fresh session per call. false (warm,
 # [[virtual_tools]]
 # name = "web_search_everywhere"
 # description = "Search both providers concurrently and preserve every result."
+# description_max_bytes = 1500  # cap on THIS Virtual Tool's broadcast
+#                               # description (#286); unset = inherit the
+#                               # gateway-wide tool-description cap
 # enabled = false
 # dispatch = "all"                 # all | keyword | llm
 # max_result_bytes = 262144

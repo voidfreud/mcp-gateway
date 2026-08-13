@@ -15,7 +15,7 @@ import json
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TextIO, cast
@@ -359,3 +359,80 @@ def require_yes(args: argparse.Namespace, action: str) -> None:
     """
     if not getattr(args, "yes", False):
         raise CLIError(f"{action} requires --yes (refusing to prompt)")
+
+
+# ---------------------------------------------------------------------------
+# Metadata limits (#286): shared byte-limit contract
+# ---------------------------------------------------------------------------
+
+# Every enforceable metadata limit (server instructions, tool descriptions)
+# lives in 1..1 MiB, at every scope — gateway global, per-backend, per-tool,
+# per-virtual-tool. Mirrors the server's GatewayConfig ceiling.
+LIMIT_MAX_BYTES = 1_048_576
+
+# Sentinel for limit flags the user did NOT pass: the payload key must then be
+# omitted (server #139 merge semantics preserve the stored value). Distinct
+# from an explicit ``inherit``/``unlimited`` keyword, which maps to ``None``
+# in the wire payload (inherit / unbounded).
+UNSET = object()
+
+
+def parse_limit_bytes(raw: str, what: str) -> int:
+    """Strict UTF-8 byte-count parse: a decimal integer in ``1..LIMIT_MAX_BYTES``.
+
+    Only plain ASCII decimal digits parse; bool-like aliases (``true``,
+    ``false``, ``yes``, ...), floats, exponents, ``0``, negatives, and values
+    over the ceiling are all rejected with the same message — the exact
+    contract the server enforces, so a bad value fails before any request is
+    sent. Raises :class:`CLIError` (exit 1), not an argparse usage error.
+    """
+    text = raw.strip()
+    if not (text.isascii() and text.isdigit()):
+        raise CLIError(
+            f"{what} must be an integer between 1 and {LIMIT_MAX_BYTES} (got {raw!r})"
+        )
+    value = int(text)
+    if value < 1 or value > LIMIT_MAX_BYTES:
+        raise CLIError(
+            f"{what} must be an integer between 1 and {LIMIT_MAX_BYTES} (got {raw!r})"
+        )
+    return value
+
+
+def limit_flag_type(keyword: str | None, what: str) -> Callable[[str], int | None]:
+    """Build an argparse ``type`` for a metadata-limit flag.
+
+    Accepts a strict byte count (see :func:`parse_limit_bytes`) or, when
+    *keyword* is given, that keyword spelled exactly — ``inherit`` for scoped
+    limits (backend/tool/virtual), ``unlimited`` for the gateway-global tool
+    limit — mapping to ``None`` in the wire payload. With ``keyword=None``
+    the type is int-only (the global instructions cap has no null value).
+    Pair the keyword form with ``default=UNSET`` so a handler can tell
+    "flag absent" (payload key omitted) from an explicit keyword (payload
+    ``null``).
+    """
+    keyword_l = keyword.lower() if keyword is not None else None
+
+    def parse(raw: str) -> int | None:
+        if keyword_l is not None and raw.strip().lower() == keyword_l:
+            return None
+        return parse_limit_bytes(raw, what)
+
+    return parse
+
+
+def limit_human(stored: int | None, effective: int | None) -> str:
+    """Render one stored/effective limit pair for human output.
+
+    A stored value is shown verbatim; ``None`` (inherited) renders as
+    ``inherit``, with the server-resolved effective value — ``unlimited``
+    when that is ``None`` (no cap anywhere) — appended when it differs.
+    Rendering is pass-through only: the numbers are the server's, never
+    recomputed client-side.
+    """
+    base = "inherit" if stored is None else str(stored)
+    if effective is None:
+        return f"{base} (unlimited effective)" if stored is None else base
+    if effective != stored:
+        return f"{base} ({effective} effective)"
+    return base

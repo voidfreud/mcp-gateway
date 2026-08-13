@@ -108,6 +108,15 @@ def virtual_routes(  # noqa: PLR0915
             listed.append(
                 {
                     **definition,
+                    # #286: virtual tools have no captured default — the
+                    # definition text IS the effective description. Stored
+                    # limit (None = inherit), effective cap (tool > gateway;
+                    # None = unbounded), and its UTF-8 byte size.
+                    "description_max_bytes": tool.description_max_bytes,
+                    "effective_description_max_bytes": (
+                        cl.effective_virtual_description_limit(cfg, tool)
+                    ),
+                    "description_bytes": cl.utf8_byte_len(tool.description),
                     "resolution": resolution,
                     **statuses.get(tool.name, {}),
                 }
