@@ -73,7 +73,11 @@ jobs:
             }
             args+=(--since-commit "$base_sha")
           fi
+          # The Lob detector matches any word shaped test_ plus 35 characters,
+          # which many test names are, and Lob's API answers 422 to every
+          # token, which the detector counts as verified.
           args+=(--branch "$head_sha" --fail --no-update --github-actions)
+          args+=(--exclude-detectors lob)
 
           docker run --rm \
             --volume "$GITHUB_WORKSPACE:/repo:ro" \
