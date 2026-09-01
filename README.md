@@ -34,19 +34,12 @@ behavior.
 
 ## Start here
 
-Install the public PyPI distribution with [`uv`](https://docs.astral.sh/uv/):
+Install from this repository with [`uv`](https://docs.astral.sh/uv/):
 
 ```bash
-uv tool install mcp-local-gateway
+uv tool install git+https://github.com/voidfreud/mcp-gateway
 mcp-gateway
 ```
-
-The distribution is named `mcp-local-gateway` because the unrelated
-`mcp-gateway` name was already occupied on PyPI. The command and Python package
-remain `mcp-gateway` and `mcp_gateway`.
-Existing `uv` tool installs of v1.1.0 or earlier need the one-time
-[renamed-distribution migration](https://github.com/voidfreud/mcp-gateway/blob/main/docs/installation.md#upgrading-from-v110-or-earlier).
-
 
 Running `mcp-gateway` with no arguments starts the gateway in the current
 terminal on every platform — there is no first-run install prompt. On macOS the
@@ -67,15 +60,14 @@ MCP client's supported configuration or CLI.
 
 A fresh run normally creates `~/.config/mcp-gateway/config.toml`. The bundled
 DeepWiki and Context7 examples make outbound requests while capturing their
-initial catalogs and when tools are called. The gateway also makes one
-lightweight PyPI version request at startup and daily; it never auto-applies an
-update, tolerates offline failure, and exposes an `update_check` toggle in
-Gateway settings. Remove the sample backends and disable that toggle before
-starting if the environment must be network-silent.
+initial catalogs and when tools are called. Remove the sample backends before
+starting if the environment must be network-silent, and turn off the
+`update_check` setting: that daily version request is obsolete now that the
+package is not published, and it is being removed.
 
 The [installation guide](https://github.com/voidfreud/mcp-gateway/blob/main/docs/installation.md)
-covers the verified GitHub Release fallback, checkout development,
-configuration selection, and complete service lifecycle. See the
+covers checkout development, configuration selection, and the complete
+service lifecycle. See the
 [Admin guide](https://github.com/voidfreud/mcp-gateway/blob/main/docs/admin-guide.md)
 for registering endpoints in MCP clients.
 
@@ -141,25 +133,16 @@ the gateway is alive but degraded, `mcp-gateway status` reports per-backend
 liveness, and `mcp-gateway restart` restarts the daemon (an honest no-op in
 foreground/development mode).
 
-For a normal installation, one command checks PyPI, installs the exact published
-version, restarts the resident service when present, and requires `/health` plus
-`/ready` before reporting success:
+To update, reinstall from the repository and restart the service:
 
 ```bash
-mcp-gateway update
+uv tool upgrade mcp-local-gateway
+mcp-gateway restart
 ```
 
-Use the same path with an exact prior version for deterministic rollback:
-
-```bash
-mcp-gateway update --version X.Y.Z
-```
-
-An activation failure automatically attempts to reinstall and restart the old
-version. Config, logs, backups, and captured state are never part of the package
-swap. `just` is a repository/contributor tool, not the user control interface:
-contributors deploying a checkout can continue to use the guarded
-`just update` recipe from a clean `main` branch.
+Config, logs, backups, and captured state are never part of the package swap.
+See [releases.md](https://github.com/voidfreud/mcp-gateway/blob/main/docs/releases.md)
+for pinning a tagged version.
 
 ## What you can change
 
@@ -187,7 +170,7 @@ only suitable for an equivalent unprotected test instance.
 ## Documentation
 
 - [Installation](https://github.com/voidfreud/mcp-gateway/blob/main/docs/installation.md) — foreground and macOS service paths, upgrades, moves, and uninstalling.
-- [Releases](https://github.com/voidfreud/mcp-gateway/blob/main/docs/releases.md) — versioning, PyPI publishing, and verified fallback artifacts.
+- [Releases](https://github.com/voidfreud/mcp-gateway/blob/main/docs/releases.md) — versioning, tags, and installing a pinned release.
 - [Admin guide](https://github.com/voidfreud/mcp-gateway/blob/main/docs/admin-guide.md) — editing, registering endpoints in MCP clients, and Virtual Tools.
 - [Configuration reference](https://github.com/voidfreud/mcp-gateway/blob/main/docs/configuration.md) — `config.toml`, backends, secrets, and behavior hooks.
 - [Operations](https://github.com/voidfreud/mcp-gateway/blob/main/docs/operations.md) — the `mcp-gateway` command-line reference, service lifecycle, logs, and recovery.

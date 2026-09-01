@@ -1,11 +1,10 @@
 # Installation
 
 mcp-gateway runs in the foreground on every supported platform and can install
-itself as a resident macOS login service. The normal distribution is the public
-`mcp-local-gateway` package on PyPI; it installs the unchanged `mcp-gateway`
-command and `mcp_gateway` import package. Every release also publishes
-checksummed public GitHub Release assets. Checkout installs remain a
-contributor path.
+itself as a resident macOS login service. It is installed from this repository
+with `uv`; the package is named `mcp-local-gateway` and installs the
+`mcp-gateway` command and `mcp_gateway` import package. Checkout installs
+remain a contributor path.
 
 ## Prerequisites
 
@@ -17,25 +16,21 @@ separately:
 curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-GitHub authentication is not required for the normal PyPI install or a public
-checkout. The verified-release fallback below uses the
-[GitHub CLI](https://cli.github.com/), which asks you to authenticate. Install
+GitHub authentication is not required: the repository is public. Install
 [`just`](https://just.systems/) only for contributor/repository recipes.
 
 The MCP client CLIs you use are optional. Each `/<backend>/mcp` endpoint is
 registered in the client itself using that client's supported configuration or
 CLI; the gateway never registers endpoints for you.
 
-## Recommended — public PyPI package
+## Recommended — from the repository
 
 ```bash
-uv tool install mcp-local-gateway
+uv tool install git+https://github.com/voidfreud/mcp-gateway
 mcp-gateway
 ```
 
-The distribution name differs because another project already owns
-`mcp-gateway` on PyPI. Package installation itself never changes services or
-user state: the first `mcp-gateway` run starts the gateway in the foreground
+Package installation itself never changes services or user state: the first `mcp-gateway` run starts the gateway in the foreground
 and does not prompt to install anything. The macOS resident service is opt-in
 and explicit:
 
@@ -60,10 +55,10 @@ remains available when a backend need not stay warm.
 
 A fresh run normally seeds `~/.config/mcp-gateway/config.toml`. The bundled
 DeepWiki and Context7 examples contact those services for initial catalog
-capture and tool calls. With `update_check = true` (the default), the daemon also
-makes one lightweight PyPI version request at startup and daily; failures are
-offline-tolerant and updates are never auto-applied. Remove the sample backends
-and set `update_check = false` before launch for a network-silent configuration.
+capture and tool calls. Remove the sample backends and set
+`update_check = false` before launch for a network-silent configuration; that
+daily version request is obsolete now that the package is not published, and
+it is being removed.
 ### Upgrading from v1.1.0 or earlier
 
 Private releases through v1.1.0 used `mcp-gateway` as the distribution name.
@@ -73,7 +68,7 @@ the same command:
 
 ```bash
 uv tool uninstall mcp-gateway
-uv tool install mcp-local-gateway
+uv tool install git+https://github.com/voidfreud/mcp-gateway
 ```
 
 This removes only the old package environment; gateway config, captured state,
@@ -87,24 +82,7 @@ mcp-gateway service install
 On Linux and Windows, start `mcp-gateway` in the foreground as usual.
 
 
-## Verified release fallback and checkout install
-
-Every release carries checksummed wheel/source artifacts in the public GitHub
-repository. Use this only when PyPI is unavailable or when reviewing a specific
-release artifact:
-
-```bash
-gh auth login
-gh release download vX.Y.Z --repo voidfreud/mcp-gateway --dir mcp-gateway-vX.Y.Z
-cd mcp-gateway-vX.Y.Z
-shasum -a 256 -c SHA256SUMS
-uv tool install --reinstall ./*.whl
-mcp-gateway
-```
-
-The checksum file verifies all downloaded release assets. On systems without
-`shasum`, use an equivalent SHA-256 checker. The SBOM is evidence, not an install
-input. Do not use mutable `main` as a stable package source.
+## Checkout install
 
 Contributors who intentionally deploy a checkout on macOS can use:
 
@@ -166,40 +144,23 @@ existing config and secrets files to that mode when it reads them.
 
 ## Updating and rollback
 
-The normal update path requires no GitHub authentication:
+Reinstall from the repository, then restart the service so the new code is
+the one running:
 
 ```bash
-mcp-gateway update
+uv tool upgrade mcp-local-gateway
+mcp-gateway restart
 ```
 
-It resolves the latest published `mcp-local-gateway` version, asks `uv` to
-install that exact version, verifies the new command, and—when the resident
-service exists—uses the newly installed code to refresh service files, restart,
-and require `/health` plus `/ready`. Config, captured defaults, logs, backups,
-and runtime state are never part of the package swap.
-
-For provenance, the updater ignores ambient package-index, find-links,
-constraint, and override settings and resolves from public PyPI only. Network
-proxy and certificate environment settings still apply. Use the verified
-GitHub Release fallback when that fixed source is unavailable.
-
-
-Use the same command with an exact published version to roll back:
+To roll back or pin, install a tag instead:
 
 ```bash
-mcp-gateway update --version X.Y.Z
+uv tool install --reinstall "git+https://github.com/voidfreud/mcp-gateway@vX.Y.Z"
+mcp-gateway restart
 ```
 
-If activation fails after a package swap, the command automatically attempts to
-reinstall and restart the old exact version and reports whether rollback
-succeeded. Versions predating the first `mcp-local-gateway` PyPI release remain
-available only through the verified GitHub Release fallback above.
-
-“Exact” refers to the `mcp-local-gateway` package version. Like a normal Python
-application install, `uv` resolves compatible dependencies from public PyPI at
-install or rollback time; the GitHub checksum and SBOM verify the gateway
-release artifacts, not a byte-for-byte restoration of the prior tool
-environment.
+Config, captured defaults, logs, backups, and runtime state are never part of
+the package swap.
 
 For a contributor checkout deployment, the `just update` recipe remains the
 guarded path (contributor tooling, not the user control interface):
@@ -264,4 +225,4 @@ absent. Still, service-first removal is the supported order.
 - [configuration.md](configuration.md) — the full `config.toml` reference.
 - [operations.md](operations.md) — running, logs, health checks, troubleshooting.
 - [security.md](security.md) — what the gateway protects and what it does not.
-- [releases.md](releases.md) — release automation, PyPI publishing, and fallback artifacts.
+- [releases.md](releases.md) — tags and installing a pinned release.

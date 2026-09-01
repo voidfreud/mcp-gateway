@@ -25,16 +25,11 @@ restart, uninstall, or purge commands without explicit authorization.
 
 Use a focused branch and a GitHub Issue for bugs, deferred work, features,
 follow-ups, or decisions. Include the relevant tests and documentation, explain
-which verification layers ran, and open a pull request for CI and review.
-Use an accurate Conventional Commit pull-request title: `fix:` releases a patch,
-`feat:` releases a minor, and `!` releases a major. The title check does not
-accept a `BREAKING CHANGE` footer alone as a major signal. Approved changes are
-squash-merged; do not push directly to `main`.
+which verification layers ran. During the reset (`PLAN.md`, decision D17)
+work lands on `main` directly with a Conventional Commit subject and green CI.
 
-[The release guide](docs/releases.md) is the canonical policy for versioning,
-Release Please, release pull-request review, correction, and verified release
-consumption. Do not manually bump ordinary versions or duplicate its workflow.
-Use the [testing and verification guide](docs/testing.md) to distinguish
+[The release guide](docs/releases.md) says how a version is tagged and
+installed. Use the [testing and verification guide](docs/testing.md) to distinguish
 required CI from advisory checks and machine-specific release receipts.
 
 For a decision proposal or accepted ADR, follow the
