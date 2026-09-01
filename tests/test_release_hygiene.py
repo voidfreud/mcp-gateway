@@ -67,7 +67,6 @@ def test_local_secret_and_agent_state_paths_are_ignored() -> None:
         ".env.local",
         "secrets.env",
         "config.secret.toml",
-        "CLAUDE.md",
         ".agents/skills/gitnexus-exploring/SKILL.md",
         ".agents/worktrees/example/checkout",
         ".claude/skills/gitnexus-exploring/SKILL.md",

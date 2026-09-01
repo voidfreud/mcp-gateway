@@ -16,8 +16,6 @@ config.secret.toml
 # Local extensions and developer-tool state.
 .hooks/
 hooks.local/
-# AGENTS.md and .agents/ are canonical; provider-specific generated copies stay local.
-CLAUDE.md
 .agents/skills/gitnexus-*/
 .claude/skills/gitnexus-*/
 .claude/hooks/
