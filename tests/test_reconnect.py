@@ -123,7 +123,7 @@ def test_stateless_backend_has_no_death_callback(tmp_path, monkeypatch):
         assert mounts.deaths[-1] is None
 
 
-def test_disabled_backend_stops_reconnecting(tmp_path, monkeypatch):
+def test_disabling_a_backend_stops_its_reconnects(tmp_path, monkeypatch):
     mounts = _Mounts(fail_first=10_000)
     app, path = _app(tmp_path, monkeypatch, mounts)
     with TestClient(app) as client:
