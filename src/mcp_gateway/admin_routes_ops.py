@@ -141,10 +141,9 @@ def ops_routes(  # noqa: PLR0915
                 }
             except Exception as exc:  # noqa: BLE001 — the error IS the status
                 err = f"{type(exc).__name__}: {exc}"
-                # #161: a WARM backend that probes `error` may have a dead session
-                # fastmcp won't heal — recycle it best-effort (cooldown-debounced
-                # in the hook). Stateless backends spin a fresh session per probe,
-                # so there's nothing to recycle.
+                # A warm backend that probes `error` may hold a dead session
+                # fastmcp won't heal: wake its runner to reconnect. Stateless
+                # backends open a fresh session per probe, nothing to heal.
                 if not b.stateless:
                     recycle = ctx.hooks.get("recycle")
                     if recycle is not None:

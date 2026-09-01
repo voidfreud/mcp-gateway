@@ -623,6 +623,14 @@ def _cmd_check(args: argparse.Namespace, ctx: CLIContext) -> None:
         lines.append(f"missing: {', '.join(str(m) for m in missing)}")
     if isinstance(mounted, list) and mounted:
         lines.append(f"mounted: {', '.join(str(m) for m in mounted)}")
+    backends = data.get("backends")
+    if isinstance(backends, dict):
+        for name, entry in backends.items():
+            state = entry.get("state") if isinstance(entry, dict) else None
+            if state in (None, "up"):
+                continue
+            error = entry.get("error")
+            lines.append(f"{name}: {state}" + (f" ({error})" if error else ""))
     ctx.emit(data, lines)
     if not ready:
         raise CLIError("gateway is not ready (see output above)")

@@ -2311,21 +2311,6 @@ def test_stateless_route_persists_and_recycles(tmp_path, monkeypatch):
         assert _wait_for(lambda: mounts.count("b") >= 2)
 
 
-def test_recycle_cooldown_suppresses_second_recycle(tmp_path, monkeypatch):
-    mounts: list[str] = []
-    app, path = _recycle_app(tmp_path, monkeypatch, mounts)
-    with TestClient(app) as client:
-        assert _wait_for(lambda: mounts.count("b") >= 1)
-        # pre-stamp the cooldown as if a recycle just happened -> the toggle's
-        # recycle is skipped; the config change still persists.
-        server._last_recycle["b"] = time.monotonic()
-        r = client.post("/admin/api/backend/b/stateless", json={"value": True})
-        assert r.status_code == 200
-        assert cl.load(path).backends[0].stateless is True
-        time.sleep(0.3)  # give any (suppressed) recycle a chance to run
-        assert mounts.count("b") == 1  # cooldown suppressed the re-mount
-
-
 def test_stateless_route_persists_without_lifespan_hook(tmp_path):
     # A bare admin app (no lifespan) has no recycle hook — the value must still
     # persist and the route must still succeed.

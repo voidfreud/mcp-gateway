@@ -27,6 +27,7 @@ class BackendRuntime:
 
     _proxies: dict[BackendName, FastMCPProxy] = field(default_factory=dict)
     _transform_holders: dict[BackendName, TransformHolder] = field(default_factory=dict)
+    _status: dict[BackendName, dict[str, Any]] = field(default_factory=dict)
 
     @classmethod
     def from_legacy(
@@ -41,6 +42,17 @@ class BackendRuntime:
     def proxies(self) -> Mapping[BackendName, FastMCPProxy]:
         """A read-only view for consumers that only need proxy lookup."""
         return self._proxies
+
+    @property
+    def status(self) -> Mapping[BackendName, dict[str, Any]]:
+        """Each runner's connection state: connecting, up, down, reconnecting."""
+        return self._status
+
+    def set_status(self, name: BackendName, state: str, **detail: Any) -> None:
+        self._status[name] = {"state": state, **detail}
+
+    def clear_status(self, name: BackendName) -> None:
+        self._status.pop(name, None)
 
     def get_proxy(self, name: BackendName) -> FastMCPProxy | None:
         return self._proxies.get(name)

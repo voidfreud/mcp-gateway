@@ -46,7 +46,7 @@ when you want it.
 | Method | Path | Response |
 |--------|------|----------|
 | GET | `/health` | `text/plain`: `ok mcp-gateway <version> @ <resolved code path>`. Names the directory the daemon actually runs from. |
-| GET | `/ready` | JSON `{ready, mounted, enabled, missing, virtual}`. Status `200` when every enabled backend and the permanent `/virtual/mcp` endpoint are mounted, `503` otherwise. `virtual` carries `{mounted, endpoint, error}`. |
+| GET | `/ready` | JSON `{ready, mounted, enabled, missing, backends, virtual}`. Status `200` when every enabled backend and the permanent `/virtual/mcp` endpoint are mounted, `503` otherwise. `backends` maps each enabled backend to its runner state: `{state}` where state is `connecting`, `up`, `down`, or `reconnecting`; a `reconnecting` entry also carries `error` (the last failure) and `retry_in` (seconds to the next attempt). `virtual` carries `{mounted, endpoint, error}`. |
 
 ## General
 

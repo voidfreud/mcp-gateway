@@ -24,6 +24,7 @@ from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import timedelta
 from pathlib import Path
 from types import MethodType
+from typing import NamedTuple
 
 import anyio
 import httpx
@@ -172,15 +173,13 @@ ADMIN_BODY_LIMIT = config_loader.MAX_METADATA_LIMIT_BYTES * 6 + 64 * 1024
 # daemon could hang forever on shutdown). Issue #61.
 SHUTDOWN_GRACE = 5.0
 
-# #161: minimum gap between automatic recycles of ONE warm backend. A hard-down
-# backend would otherwise flap — every failing call and every status probe would
-# fire another teardown+remount. One recycle per backend per this window; a
-# trigger inside the cooldown is skipped with a log line. Module-scoped so it
-# resets on restart (and is patchable/resettable in tests, like admin._last_refresh).
-RECYCLE_COOLDOWN = 30.0
-
-# #161: per-backend monotonic timestamp of the last (attempted) recycle.
-_last_recycle: dict[str, float] = {}
+# Reconnect backoff for a backend that fails to mount or whose warm session
+# dies: the first retry waits RECONNECT_MIN, each further failure doubles the
+# wait up to RECONNECT_MAX. A session that stayed up for at least RECONNECT_MAX
+# is retried immediately, so a healthy backend that hiccups once is back at
+# once while a hard-down backend is probed once a minute.
+RECONNECT_MIN = 1.0
+RECONNECT_MAX = 60.0
 
 
 # ---------------------------------------------------------------------------
@@ -197,6 +196,7 @@ _SESSION_DEATH_TYPES: tuple[type[BaseException], ...] = (
     anyio.EndOfStream,
     BrokenPipeError,
     ConnectionError,  # incl. ConnectionResetError / ConnectionAbortedError
+    httpx.NetworkError,  # connect / read / write failed on the wire
     httpx.RemoteProtocolError,  # httpx "server disconnected" mid-stream
 )
 
@@ -214,6 +214,8 @@ _SESSION_DEATH_SIGNS: tuple[str, ...] = (
     "broken pipe",
     "connection closed",
     "connection reset",
+    "connection refused",
+    "all connection attempts failed",
     "peer closed",
 )
 
@@ -261,10 +263,10 @@ class CallLogMiddleware(Middleware):
     remote session went away is the trigger to recycle the backend — fastmcp's
     shared clients never self-heal. When *on_session_death* is set (warm backends
     only) and the raised exception matches a session-death signature, we
-    fire-and-forget that callback (it schedules the recycle; we never await it in
-    the call path) and then re-raise as normal. The failing call still fails; the
-    NEXT call finds a freshly re-mounted session. A cooldown in the recycle path
-    keeps a hard-down backend from flapping.
+    fire-and-forget that callback (it wakes the backend's runner; we never await
+    it in the call path) and then re-raise as normal. The failing call still
+    fails; the runner reconnects with backoff and the NEXT call finds a fresh
+    session.
     """
 
     def __init__(
@@ -676,6 +678,56 @@ def _unmount(
         oauth_runtime.detach_metadata(app, name)
 
 
+class _Snapshot(NamedTuple):
+    """The config and captured defaults a backend is mounted from."""
+
+    cfg: config_loader.GatewayConfig
+    tools: runtime.CapturedTools
+    meta: runtime.CapturedMeta
+    instructions: runtime.CapturedInstructions
+
+    @classmethod
+    def load(cls, config_path: str) -> _Snapshot:
+        cfg = config_loader.load(config_path)
+        return cls(
+            cfg,
+            admin.all_tools_from_defaults(cfg),
+            admin.all_meta_from_defaults(cfg),
+            admin.captured_instructions(cfg),
+        )
+
+
+async def _wait_any(*events: anyio.Event, timeout: float | None = None) -> None:
+    """Return as soon as any of *events* is set or *timeout* seconds pass."""
+    if timeout is not None and timeout <= 0:
+        return
+    async with anyio.create_task_group() as tg:
+        if timeout is not None:
+            tg.cancel_scope.deadline = anyio.current_time() + timeout
+
+        async def waiter(ev: anyio.Event) -> None:
+            await ev.wait()
+            tg.cancel_scope.cancel()
+
+        for ev in events:
+            tg.start_soon(waiter, ev)
+
+
+def _reconnect_delay(previous: float, lived: float | None) -> float:
+    """Seconds to wait before the next mount attempt.
+
+    *lived* is how long the last session was held, or None when the mount
+    itself failed. A session that lasted RECONNECT_MAX or longer earns an
+    immediate retry; anything else doubles the previous wait, starting at
+    RECONNECT_MIN and capped at RECONNECT_MAX.
+    """
+    if lived is not None and lived >= RECONNECT_MAX:
+        return 0.0
+    if previous <= 0:
+        return RECONNECT_MIN
+    return min(previous * 2, RECONNECT_MAX)
+
+
 def _suppress_list_changed(proxy) -> None:
     """Stop this proxy advertising ``listChanged`` for tools/resources/prompts.
 
@@ -844,6 +896,7 @@ async def _mount_backend(  # noqa: PLR0913, PLR0917 — the mount needs the full
         )
         return True
     except Exception as exc:  # noqa: BLE001
+        backend_runtime.set_status(b.name, "down", error=f"{type(exc).__name__}: {exc}")
         log.warning("backend_mount_failed", backend=b.name, error=str(exc))
         return False
 
@@ -903,14 +956,14 @@ def _build_app(  # noqa: PLR0913, PLR0915, PLR0917 — composition root; takes w
     hooks: dict = {}  # lifespan installs hooks["add"] (hot-add) for the admin
 
     @asynccontextmanager
-    async def lifespan(app: Starlette):  # noqa: PLR0915 — the per-runner lifecycle + #43/#161 plumbing is one cohesive scope
-        # One teardown event per backend (#78): setting one unmounts JUST that
-        # backend — its runner unwinds its OWN AsyncExitStack (the anyio LIFO rule
-        # from #7, killing a warm client / stdio child), then _unmount drops its
-        # route. On shutdown we set them all. A disabled backend is never mounted
-        # (boot skips it), so its endpoint is simply absent (404) until re-enabled.
+    async def lifespan(app: Starlette):  # noqa: PLR0915 — the runner lifecycle and its hooks are one scope; split in Stage 3
+        # One runner task per backend owns its mount for the daemon's life. Its
+        # stop event ends it (shutdown, remove); its wake event makes it drop
+        # the current session and reconnect (session death, recycle). A
+        # disabled backend is never mounted, so its endpoint is absent (404)
+        # until re-enabled.
         stops: dict[str, anyio.Event] = {}
-        # #43: list_changed queue + worker, post-mount refresh, interval sweep.
+        wakes: dict[str, anyio.Event] = {}
         refresher = _AutoRefresh(
             cfg.introspect_interval,
             cfg.baseline_max_age,
@@ -918,72 +971,108 @@ def _build_app(  # noqa: PLR0913, PLR0915, PLR0917 — composition root; takes w
             backend_runtime,
             log,
         )
-        # #161: recycle requests (backend name) enqueued from arbitrary tasks —
-        # the call-log middleware, the status probe, the stateless-toggle route.
-        # A single worker task INSIDE this task group drains them, so the actual
-        # teardown+remount always runs in the group that owns the runners (the
-        # same safe pattern as the #43 list_changed stream). Never awaited by the
-        # trigger sites — they only send_nowait.
-        recycle_send, recycle_recv = anyio.create_memory_object_stream(32)
 
         def fire_recycle(name: str) -> None:
-            """Fire-and-forget: enqueue a recycle of *name*. Swallows a full or
-            closed queue (a recycle for this backend is already pending / we're
-            shutting down)."""
-            try:
-                recycle_send.send_nowait(name)
-            except (anyio.WouldBlock, anyio.ClosedResourceError):
-                pass
+            """Ask *name*'s runner to drop its session and reconnect now. Safe
+            from any task; repeated requests collapse into one reconnect."""
+            ev = wakes.get(name)
+            if ev is not None:
+                ev.set()
 
-        async def runner(  # noqa: PLR0913 — mirrors _mount_backend's signature
-            b,
-            cfg_,
-            all_tools_,
-            meta_,
-            captured_,
-            *,
-            task_status=anyio.TASK_STATUS_IGNORED,
-        ):
-            ev = anyio.Event()
-            stops[b.name] = ev
-            # Stateful backends get a persistent client -> subscribe it to
-            # tools/list_changed (#43); stateless ones have no standing session.
+        async def serve_once(b, snap: _Snapshot, stop, started):
+            """Mount *b* once, report the result through *started*, and hold
+            the mount until *stop* or its wake event. Returns the mount result
+            and how long the session was held (None when the mount failed)."""
+            wake = anyio.Event()
+            wakes[b.name] = wake
             handler = (
                 None
                 if b.stateless
                 else _ListChangedHandler(b, refresher.send.send_nowait, log)
             )
-            # #161: only WARM backends recycle (a stateless backend already uses
-            # a fresh session per call — nothing to heal).
-            on_death = None if b.stateless else (lambda: fire_recycle(b.name))
+            # Only warm backends can have a dead session to heal; a stateless
+            # backend opens a fresh session per call.
+            on_death = None if b.stateless else wake.set
+            backend_runtime.set_status(b.name, "connecting")
+            lived = None
+            async with AsyncExitStack() as stack:
+                ok = await _mount_backend(
+                    app,
+                    stack,
+                    b,
+                    snap.cfg,
+                    snap.tools,
+                    snap.meta,
+                    snap.instructions,
+                    backend_runtime,
+                    log,
+                    handler,
+                    on_death,
+                    oauth_runtime,
+                )
+                started(ok)
+                if ok:
+                    backend_runtime.set_status(b.name, "up")
+                    mounted_at = time.monotonic()
+                    # A (re)connect may mean new backend state: re-capture the
+                    # baseline in the background (throttled and age-gated).
+                    tg.start_soon(refresher.post_mount, b)
+                    await _wait_any(stop, wake)
+                    lived = time.monotonic() - mounted_at
+            _unmount(app, b.name, backend_runtime, oauth_runtime)
+            return ok, lived
+
+        async def runner(b, snap: _Snapshot, *, task_status=anyio.TASK_STATUS_IGNORED):
+            """Own one backend for the daemon's life: mount, hold, reconnect
+            with backoff, until stopped or disabled. Each reconnect reads the
+            live config, so a changed ``stateless`` flag takes effect."""
+            stop = anyio.Event()
+            stops[b.name] = stop
+            delay = 0.0
+            pending = [task_status]  # hot_add awaits the FIRST mount result
+
+            def started(ok: bool) -> None:
+                if pending:
+                    pending.pop().started(ok)
+
             try:
-                async with AsyncExitStack() as stack:
-                    ok = await _mount_backend(
-                        app,
-                        stack,
-                        b,
-                        cfg_,
-                        all_tools_,
-                        meta_,
-                        captured_,
-                        backend_runtime,
-                        log,
-                        handler,
-                        on_death,
-                        oauth_runtime,
+                while not stop.is_set():
+                    ok, lived = await serve_once(b, snap, stop, started)
+                    if stop.is_set():
+                        return
+                    delay = _reconnect_delay(delay, lived)
+                    error = backend_runtime.status.get(b.name, {}).get("error")
+                    backend_runtime.set_status(
+                        b.name, "reconnecting", error=error, retry_in=delay
                     )
-                    task_status.started(ok)
-                    if ok:
-                        # #43 trigger 1 (the load-bearing one): a (re)connect
-                        # means possibly-new backend state — re-capture the
-                        # baseline in the background (throttled; boot after an
-                        # upgrade catches upstream tool-catalog changes).
-                        # #157: age-gated — skipped while the stored baseline
-                        # is younger than cfg.baseline_max_age.
-                        tg.start_soon(refresher.post_mount, b)
-                        await ev.wait()
+                    log.warning(
+                        "backend_reconnecting",
+                        backend=b.name,
+                        reason="session_died" if ok else "mount_failed",
+                        delay_s=delay,
+                    )
+                    wake = anyio.Event()
+                    wakes[b.name] = wake
+                    await _wait_any(stop, wake, timeout=delay)
+                    try:
+                        snap = _Snapshot.load(config_path)
+                    except Exception as exc:  # noqa: BLE001 — keep the last good config
+                        log.warning(
+                            "backend_reconnect_config_unreadable",
+                            backend=b.name,
+                            error=str(exc),
+                        )
+                        continue
+                    live = next(
+                        (x for x in snap.cfg.backends if x.name == b.name), None
+                    )
+                    if live is None or not live.enabled:
+                        return
+                    b = live
             finally:
                 stops.pop(b.name, None)
+                wakes.pop(b.name, None)
+                backend_runtime.clear_status(b.name)
                 _unmount(app, b.name, backend_runtime, oauth_runtime)
 
         async def virtual_runner():
@@ -1054,57 +1143,8 @@ def _build_app(  # noqa: PLR0913, PLR0915, PLR0917 — composition root; takes w
                 if oauth_runtime is not None:
                     oauth_runtime.detach_metadata(app, virtual_tools.VIRTUAL_ROUTE)
 
-        async def hot_recycle(name: str) -> None:
-            """Tear a warm backend's runner down like hot_remove AND immediately
-            re-run it — fresh AsyncExitStack, fresh client, re-mount (#161). This
-            is the automatic heal fastmcp's shared clients don't do: a warm remote
-            session that died is replaced without a daemon restart. Debounced by
-            RECYCLE_COOLDOWN per backend so a hard-down backend can't flap.
-
-            A re-run reads FRESH config, so it also picks up a changed
-            ``stateless`` flag (the stateless-toggle route commits then recycles)."""
-            now = time.monotonic()
-            last = _last_recycle.get(name)
-            if last is not None and now - last < RECYCLE_COOLDOWN:
-                log.info("recycle_skipped", backend=name, reason="cooldown")
-                return
-            _last_recycle[name] = now
-            cfg2 = config_loader.load(config_path)
-            b = next((x for x in cfg2.backends if x.name == name), None)
-            if b is None or not b.enabled:
-                log.info("recycle_skipped", backend=name, reason="absent-or-disabled")
-                return
-            log.info("recycle_start", backend=name)
-            ev = stops.get(name)
-            if ev is not None:
-                ev.set()  # tear the old runner down (unwinds its stack, _unmount)
-                # Wait for the old runner to FULLY unwind before re-running, so the
-                # new mount can't race the old runner's _unmount (which strips every
-                # route on this path). stops.pop happens in the runner's finally,
-                # immediately before _unmount — so `name not in stops` means done.
-                with anyio.move_on_after(SHUTDOWN_GRACE + 2):
-                    while name in stops:
-                        await anyio.sleep(0.02)
-            ok = await tg.start(
-                runner,
-                b,
-                cfg2,
-                admin.all_tools_from_defaults(cfg2),
-                admin.all_meta_from_defaults(cfg2),
-                admin.captured_instructions(cfg2),
-            )
-            log.info("recycle_done", backend=name, ok=ok)
-
-        async def recycle_worker() -> None:
-            async for name in recycle_recv:  # ends when recycle_send closes
-                try:
-                    await hot_recycle(name)
-                except Exception as exc:  # noqa: BLE001 — best-effort background heal
-                    log.warning("recycle_error", backend=name, error=str(exc))
-
         async with anyio.create_task_group() as tg:
             tg.start_soon(refresher.worker)  # #43: list_changed consumer
-            tg.start_soon(recycle_worker)  # #161: warm-session recycle consumer
             if refresher.interval > 0:
                 tg.start_soon(refresher.interval_loop)
             if cfg.update_check:  # #A8: one daily update-check monitor (opt-out)
@@ -1114,24 +1154,15 @@ def _build_app(  # noqa: PLR0913, PLR0915, PLR0917 — composition root; takes w
             # readiness on any of them — boot ≈ the slowest backend instead of
             # the sum, and a slow/hung backend delays only its own endpoint
             # (each runner appends its Mount when ready, same path as hot-add).
+            boot = _Snapshot(cfg, all_tools, captured_meta, captured_instr)
             for b in cfg.backends:
                 if b.enabled:  # #78: disabled backends aren't mounted (404)
-                    tg.start_soon(
-                        runner, b, cfg, all_tools, captured_meta, captured_instr
-                    )
+                    tg.start_soon(runner, b, boot)
 
             async def hot_add(b: config_loader.Backend) -> bool:
                 """Mount a just-imported backend live (#7). Config is already
                 saved; a fresh load picks the new backend's transforms up."""
-                cfg2 = config_loader.load(config_path)
-                return await tg.start(
-                    runner,
-                    b,
-                    cfg2,
-                    admin.all_tools_from_defaults(cfg2),
-                    admin.all_meta_from_defaults(cfg2),
-                    admin.captured_instructions(cfg2),
-                )
+                return await tg.start(runner, b, _Snapshot.load(config_path))
 
             def hot_remove(name: str) -> None:
                 """Unmount a backend live (#78): set its teardown event; the runner
@@ -1142,7 +1173,7 @@ def _build_app(  # noqa: PLR0913, PLR0915, PLR0917 — composition root; takes w
 
             hooks["add"] = hot_add
             hooks["remove"] = hot_remove
-            hooks["recycle"] = fire_recycle  # #161
+            hooks["recycle"] = fire_recycle
             log.info(
                 "gateway_starting",
                 backends=[b.name for b in cfg.backends],
@@ -1158,7 +1189,6 @@ def _build_app(  # noqa: PLR0913, PLR0915, PLR0917 — composition root; takes w
                 hooks.pop("add", None)
                 hooks.pop("remove", None)
                 hooks.pop("recycle", None)
-                recycle_send.close()  # ends the recycle worker (#161)
                 refresher.close()  # ends the worker + interval loop (#43)
                 for ev in list(stops.values()):
                     ev.set()  # graceful: every runner exits its stack, tg drains
@@ -1184,6 +1214,10 @@ def _build_app(  # noqa: PLR0913, PLR0915, PLR0917 — composition root; takes w
                 "mounted": sorted(backend_runtime.proxies),
                 "enabled": want,
                 "missing": missing,
+                "backends": {
+                    n: backend_runtime.status.get(n, {"state": "unmounted"})
+                    for n in want
+                },
                 "virtual": {
                     "mounted": virtual_ready,
                     "endpoint": "/virtual/mcp",

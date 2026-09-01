@@ -390,9 +390,17 @@ curl -s http://127.0.0.1:9100/ready
 ```
 
 Returns JSON listing which backends are `mounted`, which are `enabled`, and which
-are `missing`. HTTP status is `200` when everything is ready and `503` when an
-enabled backend has not mounted — so a monitor can tell "up" from "up but
-degraded".
+are `missing`, plus a `backends` map with each enabled backend's connection
+state: `connecting`, `up`, `down`, or `reconnecting` (with the last error and
+the seconds until the next attempt). HTTP status is `200` when everything is
+ready and `503` when an enabled backend has not mounted — so a monitor can
+tell "up" from "up but degraded".
+
+A backend that cannot be reached, or whose warm session dies, is never given
+up on: its runner reconnects with backoff (one second, doubling to a minute)
+until it succeeds or the backend is disabled. A network change such as a VPN
+toggle therefore heals itself; the first call after the change may fail, and
+the next one finds a fresh session.
 
 `mcp-gateway check` runs the `/ready` probe from the terminal: it prints
 whether the gateway is ready and which backends are missing, then exits `0`
@@ -530,7 +538,7 @@ credentialed or remote deployment for live verification.
 |---------|--------------|------------|
 | `/health` doesn't respond at all | Daemon not running | `launchctl print gui/$(id -u)/com.void.mcp-gateway` for status; `launchctl kickstart -k …` to (re)start. Check `gateway.log` and `err.log`. |
 | `/health` reports an older version than `mcp-gateway version` | Package was replaced without restarting the resident process | Run `mcp-gateway service install`; normal `mcp-gateway update` performs and verifies this automatically. |
-| `/ready` returns 503; a backend shows red in the UI | An enabled backend failed to connect or mount | Check that backend's URL/command and its secret; use **Re-inspect** in the UI, or read the error on its status dot. Other backends keep working. |
+| `/ready` returns 503; a backend shows red in the UI | An enabled backend cannot connect; the gateway keeps retrying with backoff | Read the error in `/ready` (`backends.<name>.error`) or `mcp-gateway check`; fix that backend's URL/command or secret. It mounts on the next attempt, other backends keep working. |
 | Every call to the gateway returns 401 | A bearer token is set but the caller is not sending it | Register the endpoint with the credential as described in [security.md](security.md), or provide the token to the admin UI when prompted. |
 | A client still shows the old tool name/description after an edit | The session has not re-listed the backend's tools yet | Reconnect the MCP server, start a new session, or trigger a tool use. Text edits are live in the gateway immediately, but a connected session can cache the old broadcast. |
 | A tool you renamed can't be saved | Its name (or a deliberately identical description) collides with another tool | Pick a unique name, or turn on **auto-uniquify** in the ⚙ Gateway header for bulk renames. |
