@@ -8,8 +8,8 @@ conflict, the feature loses.
 
 mcp-gateway is a local MCP proxy. It mounts each backend on its own endpoint,
 lets the operator rewrite what that backend advertises, keeps the connection
-alive through network changes, and is controlled from a CLI. That is the whole
-product. Anything else must earn its place by naming the person who needs it
+alive through network changes, and is controlled from a CLI with a secondary
+dashboard. That is the whole product. Anything else must earn its place by naming the person who needs it
 today and the failure they hit without it.
 
 - A feature nobody uses is deleted, not maintained.
@@ -69,14 +69,38 @@ backends without operator action.
   fixed.
 - Health and readiness always tell the truth about the current state.
 
-## 6. Dependencies are liabilities
+## 6. Quiet by default
+
+The gateway is a resident process on someone's machine. It does not poll,
+sweep, rescan, or log unless something happened or the operator asked.
+
+- No timer runs unless it is configured, and none can be set below fifteen
+  minutes. Catalog refresh happens on mount, on a backend's own change
+  notification, and on a manual request.
+- Logging records lifecycle events and errors. Debug detail is opt-in,
+  rotation is bounded, and an idle gateway writes nothing.
+- Staleness measured in minutes is acceptable. Churn is not.
+
+## 7. Built on FastMCP, never drifting from it
+
+FastMCP is the base, and the gateway extends it rather than imitating it. The
+MCP protocol is what the gateway is compliant with; FastMCP is how.
+
+- Every FastMCP import lives in one adapter module. Nothing else in the tree
+  touches FastMCP internals.
+- Each private seam the adapter relies on is listed there with a test that
+  breaks when FastMCP changes it.
+- FastMCP is pinned exactly. A scheduled job tries the newest release so an
+  upgrade is a pin change plus a green suite, never a surprise.
+
+## 8. Dependencies are liabilities
 
 Runtime dependencies are pinned, few, and each carries most of its weight.
 Before adding one, prove the existing set cannot do the job. A dependency used
 once, or replaceable by twenty lines of standard library, is not added. Dev
 dependencies follow the same rule.
 
-## 7. Tests verify the product
+## 9. Tests verify the product
 
 Tests exist to prove the gateway behaves; they are not a place to store
 process. The suite covers the documented behavior, every failure path, and
@@ -84,17 +108,18 @@ every edge case that was ever a bug. It does not test the repository's own
 release scripts, link checkers, skills, or ceremony. Test files obey the same
 size and duplication rules as source.
 
-## 8. Documentation describes now
+## 10. Documentation describes now
 
 The README is the front door and says what the product is, how to install it,
 and how to use it in under five minutes. Reference pages describe current
 behavior only. Nothing in `docs/` records history, audits, or plans that have
 been executed; those belong in git, the changelog, and closed issues.
 
-## 9. Ship like a product
+## 11. Ship like a product
 
-The `main` branch is always releasable. Changes arrive as small pull requests
-with a Conventional Commit title, green CI, and updated docs and tests in the
-same change. Releases are automated and reproducible. The repository looks the
+The `main` branch is always releasable. Changes land as small commits with a
+Conventional Commit title, green CI, and updated docs and tests in the same
+change. Releases are git tags, installed with `uv tool install` from this
+repository. The repository looks the
 same to a stranger as it does to its author: no personal paths, local state,
 generated artifacts, or tool residue.
