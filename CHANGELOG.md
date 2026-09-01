@@ -4,6 +4,19 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project aims to
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.1](https://github.com/voidfreud/mcp-gateway/compare/v1.4.0...v1.4.1) (2026-09-01)
+
+
+### Bug Fixes
+
+* relock pip to clear the dependency audit ([9d84665](https://github.com/voidfreud/mcp-gateway/commit/9d8466545c801f0d24e144dcc21171dfbf28a4ec))
+
+
+### Documentation
+
+* add project principles and the reset plan ([1cd313e](https://github.com/voidfreud/mcp-gateway/commit/1cd313e856e79e47de9d1a8498dd26100a10cd39))
+* record the reset decisions and stage issues ([41f5b60](https://github.com/voidfreud/mcp-gateway/commit/41f5b609c8d1053d72acfee19249e679c2c11208))
+
 ## [1.4.0](https://github.com/voidfreud/mcp-gateway/compare/v1.3.2...v1.4.0) (2026-08-13)
 
 
