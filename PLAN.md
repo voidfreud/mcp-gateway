@@ -60,12 +60,12 @@ table, not by drifting.
 | D15 | Root directory target: `src`, `tests`, `docs`, `.github`, `README.md`, `AGENTS.md`, `PRINCIPLES.md`, `LICENSE`, `pyproject.toml`, `uv.lock`, `config.example.toml`. Tool caches are redirected into one ignored directory where the tool allows it. | The root should look as simple as the product is. |
 | D16 | The reset ships as 2.0.0, a git tag, with a short migration note for removed config keys. | It is a breaking change and should say so. |
 | D17 | Work lands on `main` directly during the reset; no pull requests. CI must still be green on every push. | Speed. The PR ceremony returns, if at all, after Stage 6. |
+| D18 | Dashboard statistics show calls, errors, and latency per tool and per backend, plus each backend's last refresh time. Nothing is sampled on a timer; counters are kept in memory by the daemon and reset on restart. | Enough to see what is used and what is failing, without a metrics store. |
+| D19 | The pre-reset branch with soft byte caps is deleted. Stage 4 implements D7 fresh in the restructured code. | A patch against the old layout would be rewritten anyway. |
 
 ## Open questions
 
-- Issues #285 and #287 through #290 are superseded by the stage issues. Close them?
-- Statistics (D13): the proposed set is calls, errors, and latency per tool and per backend, plus last refresh time. Confirm or amend.
-- Branch `wip/soft-metadata-limits` holds the pre-reset change that stopped rejecting over-cap saves. It matches D7 in spirit but broadcasts unshortened text instead of truncating. Fold it into Stage 4 or delete it.
+None. Add one here the moment it appears; answer it by adding a decision.
 
 ## Stages
 
