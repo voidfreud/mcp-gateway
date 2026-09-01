@@ -17,12 +17,16 @@ default:
 # one offline release-contract build. The release recipe is intentionally last:
 # tests inspect the contract through synthetic fixtures rather than nesting
 # another package build inside pytest.
-check: lint test smoke release-contract
+check: lint size test smoke release-contract
 
 # Build, inspect, install-check, SBOM, and checksum the local release assets.
 # This is strictly local verification: it never tags, publishes, or deploys.
 release-contract:
     uv run python tools/release_contract.py build --out-dir dist
+
+# File-size limits from PRINCIPLES.md, as a ratchet over the baseline in the script
+size:
+    uv run python tools/check_size.py
 
 # Ruff lint + format check
 lint:
